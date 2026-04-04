@@ -2,8 +2,7 @@
 
 import json
 import sqlite3
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -60,7 +59,7 @@ CREATE TABLE IF NOT EXISTS findings (
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class Database:
@@ -95,6 +94,7 @@ class Database:
             (target_dir, commit_sha, json.dumps(config) if config else None),
         )
         self.conn.commit()
+        assert cur.lastrowid is not None
         return cur.lastrowid
 
     def complete_scan(self, scan_id: int):
@@ -114,9 +114,7 @@ class Database:
         ).fetchone()
 
     def list_scans(self) -> list[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT * FROM scans ORDER BY id DESC"
-        ).fetchall()
+        return self.conn.execute("SELECT * FROM scans ORDER BY id DESC").fetchall()
 
     # -- Jobs --
 
@@ -128,7 +126,9 @@ class Database:
         )
         self.conn.commit()
 
-    def next_pending_job(self, scan_id: int, model_id: str | None = None) -> sqlite3.Row | None:
+    def next_pending_job(
+        self, scan_id: int, model_id: str | None = None
+    ) -> sqlite3.Row | None:
         if model_id:
             return self.conn.execute(
                 "SELECT * FROM jobs WHERE scan_id = ? AND status = 'pending' AND model_id = ? LIMIT 1",
@@ -208,6 +208,7 @@ class Database:
             (job_id, line_number, code_snippet, explanation, confidence),
         )
         self.conn.commit()
+        assert cur.lastrowid is not None
         return cur.lastrowid
 
     def update_finding_review(

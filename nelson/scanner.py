@@ -5,7 +5,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from .agents import AgentAdapter, AgentResult, create_adapter
+from .agents import AgentAdapter, create_adapter
 from .cwe import CWE_OPEN, CWE_TOP_25, applicable_cwes, build_open_prompt, build_prompt
 from .db import Database
 from .inventory import SourceFile, discover_files
@@ -76,7 +76,11 @@ def create_scan(
 
     log.info(
         "Scan %d (%s): %d files, %d jobs across %d models",
-        scan_id, mode, len(files), len(matrix), len(models),
+        scan_id,
+        mode,
+        len(files),
+        len(matrix),
+        len(models),
     )
     return scan_id, files
 
@@ -85,7 +89,7 @@ def create_scan(
 _adapter_cache: dict[str, AgentAdapter] = {}
 
 
-def _get_adapter(model_spec: str, models: list[str]) -> AgentAdapter:
+def _get_adapter(model_spec: str, models: list[str]) -> AgentAdapter | None:
     """Look up or create the adapter for a given model_id."""
     if model_spec not in _adapter_cache:
         # Find the original spec string that produces this model_id
@@ -171,8 +175,11 @@ def run_scan(
             prompt = build_prompt(job["file_path"], content, finfo.language, cwe)
 
         log.info(
-            "Job %d: %s × %s × %s",
-            job["id"], job["file_path"], job["cwe_id"], model_id,
+            "Job %d: %s x %s x %s",
+            job["id"],
+            job["file_path"],
+            job["cwe_id"],
+            model_id,
         )
 
         result = adapter.run(prompt)

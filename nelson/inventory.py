@@ -163,7 +163,7 @@ def discover_files(target_dir: str | Path) -> list[SourceFile]:
 
 def _is_generated(path: Path) -> bool:
     try:
-        with open(path, "r", errors="ignore") as f:
+        with open(path, errors="ignore") as f:
             for i, line in enumerate(f):
                 if i >= 5:
                     break

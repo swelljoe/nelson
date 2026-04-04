@@ -3,7 +3,6 @@
 import json
 import logging
 import subprocess
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -64,7 +63,9 @@ def parse_findings(text: str) -> list[Finding]:
                 try:
                     data = json.loads(text[start : i + 1])
                     if isinstance(data, list):
-                        return [_parse_one(item) for item in data if isinstance(item, dict)]
+                        return [
+                            _parse_one(item) for item in data if isinstance(item, dict)
+                        ]
                 except json.JSONDecodeError:
                     pass
                 break
@@ -89,8 +90,7 @@ class AgentAdapter(ABC):
     needs_pacing: bool = False  # CLI tools with rolling subscription limits need delays
 
     @abstractmethod
-    def run(self, prompt: str) -> AgentResult:
-        ...
+    def run(self, prompt: str) -> AgentResult: ...
 
 
 class ClaudeCLIAdapter(AgentAdapter):
@@ -106,8 +106,10 @@ class ClaudeCLIAdapter(AgentAdapter):
         cmd = [
             "claude",
             "-p",
-            "--model", self.model,
-            "--output-format", "json",
+            "--model",
+            self.model,
+            "--output-format",
+            "json",
             "--no-session-persistence",
         ]
 
@@ -120,9 +122,7 @@ class ClaudeCLIAdapter(AgentAdapter):
                 timeout=self.timeout,
             )
         except subprocess.TimeoutExpired:
-            return AgentResult(
-                findings=[], raw_output="", error="timeout"
-            )
+            return AgentResult(findings=[], raw_output="", error="timeout")
 
         raw = result.stdout
         stderr = result.stderr
@@ -132,11 +132,14 @@ class ClaudeCLIAdapter(AgentAdapter):
             combined = raw + stderr
             if any(s in combined.lower() for s in ["rate limit", "429", "overloaded"]):
                 return AgentResult(
-                    findings=[], raw_output=raw, rate_limited=True,
+                    findings=[],
+                    raw_output=raw,
+                    rate_limited=True,
                     error="rate limited",
                 )
             return AgentResult(
-                findings=[], raw_output=raw,
+                findings=[],
+                raw_output=raw,
                 error=f"exit code {result.returncode}: {stderr[:500]}",
             )
 
@@ -147,7 +150,8 @@ class ClaudeCLIAdapter(AgentAdapter):
         cost_usd = None
         try:
             envelope = json.loads(raw)
-            # claude --output-format json wraps in {"type":"result","result":...,"usage":...,"cost_usd":...}
+            # claude --output-format json wraps in
+            # {"type":"result","result":...,"usage":...}
             if isinstance(envelope, dict) and "result" in envelope:
                 text_content = envelope["result"]
                 usage = envelope.get("usage", {})
@@ -194,7 +198,11 @@ class OpenAIAPIAdapter(AgentAdapter):
         except httpx.TimeoutException:
             return AgentResult(findings=[], raw_output="", error="timeout")
         except httpx.ConnectError as e:
-            return AgentResult(findings=[], raw_output="", error=f"connection error: {e}")
+            return AgentResult(
+                findings=[],
+                raw_output="",
+                error=f"connection error: {e}",
+            )
 
         if resp.status_code == 429:
             return AgentResult(
@@ -202,7 +210,8 @@ class OpenAIAPIAdapter(AgentAdapter):
             )
         if resp.status_code != 200:
             return AgentResult(
-                findings=[], raw_output=resp.text,
+                findings=[],
+                raw_output=resp.text,
                 error=f"HTTP {resp.status_code}: {resp.text[:500]}",
             )
 
