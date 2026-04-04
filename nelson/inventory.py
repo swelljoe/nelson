@@ -26,6 +26,8 @@ LANGUAGE_MAP: dict[str, str] = {
     ".php": "php",
     ".sh": "shell",
     ".bash": "shell",
+    ".pl": "perl",
+    ".pm": "perl",
 }
 
 # Directories to always skip (in addition to .gitignore)

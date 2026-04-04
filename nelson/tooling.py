@@ -85,6 +85,14 @@ RECOMMENDED_TOOLS: list[SecurityTool] = [
         cwe_coverage=["CWE-787", "CWE-125", "CWE-476", "CWE-190", "CWE-119"],
         install_hint="Install cppcheck and run: cppcheck --enable=warning,security .",
     ),
+    # Perl
+    SecurityTool(
+        name="Perl::Critic",
+        description="Perl static analysis — configurable policies including security checks",
+        languages={"perl"},
+        cwe_coverage=["CWE-78", "CWE-89", "CWE-94", "CWE-798"],
+        install_hint="Install Perl::Critic: cpanm Perl::Critic && echo 'severity = 3' > .perlcriticrc",
+    ),
     # Rust
     SecurityTool(
         name="clippy",
@@ -331,6 +339,46 @@ def _check_cppcheck(target: Path) -> ToolStatus:
     )
 
 
+def _check_perlcritic(target: Path) -> ToolStatus:
+    tool = next(t for t in RECOMMENDED_TOOLS if t.name == "Perl::Critic")
+
+    candidates = [
+        target / ".perlcriticrc",
+        target / "perlcriticrc",
+    ]
+
+    for cfg in candidates:
+        if cfg.exists():
+            return ToolStatus(
+                tool=tool, present=True, security_rules_enabled=None,
+                detail=f"Perl::Critic configuration found ({cfg.name})",
+            )
+
+    # Check CI workflows or Makefile
+    ci_dir = target / ".github" / "workflows"
+    makefile = target / "Makefile"
+
+    for f in [makefile]:
+        if f.exists() and _file_contains(f, "perlcritic"):
+            return ToolStatus(
+                tool=tool, present=True, security_rules_enabled=None,
+                detail=f"Perl::Critic found in {f.name}",
+            )
+
+    if ci_dir.is_dir():
+        for wf in ci_dir.iterdir():
+            if wf.suffix in (".yml", ".yaml") and _file_contains(wf, "perlcritic"):
+                return ToolStatus(
+                    tool=tool, present=True, security_rules_enabled=None,
+                    detail="Perl::Critic found in CI workflows",
+                )
+
+    return ToolStatus(
+        tool=tool, present=False, security_rules_enabled=None,
+        detail="No Perl::Critic configuration or usage found",
+    )
+
+
 def _check_clippy(target: Path) -> ToolStatus:
     tool = next(t for t in RECOMMENDED_TOOLS if t.name == "clippy")
 
@@ -375,6 +423,7 @@ _CHECKERS: dict[str, callable] = {
     "eslint-plugin-security": _check_eslint_security,
     "clang-tidy (security checks)": _check_clang_tidy,
     "cppcheck": _check_cppcheck,
+    "Perl::Critic": _check_perlcritic,
     "clippy": _check_clippy,
 }
 
