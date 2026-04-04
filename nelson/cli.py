@@ -472,3 +472,158 @@ def report(
                 f"  {row['cwe_id']} ({row['model_id']}):"
                 f" {row['count']} ({row['confidence']})"
             )
+
+
+@main.command()
+@click.argument("target_dir", type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "--focused-model",
+    default="claude:haiku",
+    help="Model for focused CWE scan. Default: claude:haiku",
+)
+@click.option(
+    "--open-model",
+    default="claude:sonnet",
+    help="Model for open scan. Default: claude:sonnet",
+)
+@click.option(
+    "--review-model",
+    default="claude:sonnet",
+    help="Model for review pass. Default: claude:sonnet",
+)
+@click.option(
+    "--delay",
+    default=2.0,
+    type=float,
+    help="Seconds between jobs (pacing). Default: 2.0",
+)
+@click.option(
+    "--db",
+    "db_path",
+    default="nelson.db",
+    help="Path to SQLite database. Default: nelson.db",
+)
+def haha(
+    target_dir: str,
+    focused_model: str,
+    open_model: str,
+    review_model: str,
+    delay: float,
+    db_path: str,
+):
+    """Run the full pipeline: focused scan, open scan, review, report.
+
+    This runs both scan modes, reviews all findings, and prints a
+    final report. It's convenient but token-intensive on large projects.
+    """
+    db = Database(db_path)
+
+    files = discover_files(target_dir)
+    if not files:
+        click.echo("No source files found.", err=True)
+        sys.exit(1)
+
+    click.echo(f"Found {len(files)} source files.\n")
+
+    # -- Step 1: Focused scan --
+    click.echo(click.style("=== Focused scan ===", bold=True))
+    focused_id, _ = create_scan(
+        db,
+        target_dir,
+        [focused_model],
+        mode="focused",
+    )
+    focused_counts = db.job_counts(focused_id)
+    focused_total = sum(focused_counts.values())
+    click.echo(
+        f"Scan {focused_id}: {len(files)} files,"
+        f" {focused_total} jobs with {focused_model}"
+    )
+
+    def on_scan_progress(counts):
+        done = counts.get("complete", 0) + counts.get("error", 0)
+        total = sum(counts.values())
+        click.echo(f"  {done}/{total}", err=True)
+
+    run_scan(
+        db,
+        focused_id,
+        [focused_model],
+        target_dir,
+        delay=delay,
+        on_progress=on_scan_progress,
+    )
+    focused_findings = db.findings_for_scan(focused_id)
+    click.echo(f"  {len(focused_findings)} findings\n")
+
+    # -- Step 2: Open scan --
+    click.echo(click.style("=== Open scan ===", bold=True))
+    open_id, _ = create_scan(
+        db,
+        target_dir,
+        [open_model],
+        mode="open",
+    )
+    open_counts = db.job_counts(open_id)
+    open_total = sum(open_counts.values())
+    click.echo(
+        f"Scan {open_id}: {len(files)} files, {open_total} jobs with {open_model}"
+    )
+
+    run_scan(
+        db,
+        open_id,
+        [open_model],
+        target_dir,
+        delay=delay,
+        on_progress=on_scan_progress,
+    )
+    open_findings = db.findings_for_scan(open_id)
+    click.echo(f"  {len(open_findings)} findings\n")
+
+    # -- Step 3: Review both scans --
+    click.echo(click.style("=== Review ===", bold=True))
+    for sid, label in [(focused_id, "focused"), (open_id, "open")]:
+        unreviewed = db.unreviewed_findings(sid)
+        if not unreviewed:
+            click.echo(f"  {label} scan {sid}: nothing to review")
+            continue
+        click.echo(
+            f"  Reviewing {len(unreviewed)} findings"
+            f" from {label} scan {sid} with {review_model}..."
+        )
+
+        def on_review_progress(reviewed, total):
+            click.echo(f"    {reviewed}/{total}", err=True)
+
+        run_review(
+            db,
+            sid,
+            review_model,
+            target_dir,
+            delay=delay,
+            on_progress=on_review_progress,
+        )
+
+    click.echo()
+
+    # -- Step 4: Summary --
+    click.echo(click.style("=== Results ===", bold=True))
+    for sid, label in [(focused_id, "focused"), (open_id, "open")]:
+        review_sum = db.review_summary(sid)
+        confirmed = review_sum.get("confirmed", 0)
+        false_pos = review_sum.get("false_positive", 0)
+        needs = review_sum.get("needs_review", 0)
+        total_findings = sum(review_sum.values())
+        click.echo(
+            f"  {label} scan {sid}: {total_findings} findings"
+            f" — {confirmed} confirmed,"
+            f" {false_pos} false positive,"
+            f" {needs} needs review"
+        )
+
+    click.echo(
+        f"\nRun 'nelson report {focused_id} --verdict confirmed'"
+        f" or 'nelson report {open_id} --verdict confirmed'"
+        " for details."
+    )

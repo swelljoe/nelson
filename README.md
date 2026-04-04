@@ -64,6 +64,14 @@ nelson review -m claude:sonnet
 nelson report --verdict confirmed
 ```
 
+Or, run the full pipeline in one command:
+
+```bash
+nelson haha /path/to/project
+```
+
+This runs a focused CWE scan (Haiku), an open scan (Sonnet), reviews everything (Sonnet), and prints a summary. See [haha mode](#haha-mode) for details.
+
 ## Usage
 
 ### Scanning
@@ -148,6 +156,30 @@ nelson list
 nelson status
 nelson status 3
 ```
+
+### Haha mode
+
+The `haha` command runs the full pipeline in one shot:
+
+1. **Focused scan** — checks each file against applicable CWEs (default: `claude:haiku`)
+2. **Open scan** — broad "find any vulnerability" pass (default: `claude:sonnet`)
+3. **Review** — verifies all findings from both scans (default: `claude:sonnet`)
+4. **Summary** — prints confirmed/false positive/needs review counts
+
+```bash
+# Run with defaults
+nelson haha /path/to/project
+
+# Override models
+nelson haha /path/to/project \
+    --focused-model claude:haiku \
+    --open-model "lmstudio:google/gemma-4-26b-a4b" \
+    --review-model claude:opus
+```
+
+Each scan is stored separately in the database, so you can inspect them individually with `nelson report <scan_id>` afterward.
+
+**Token usage warning:** On a large project, `haha` mode will consume significantly more tokens than running a single scan mode. The focused scan generates one job per (file, applicable CWE, model) combination — a 50-file Python project produces ~950 focused jobs alone, plus 50 open-mode jobs, plus review jobs for every finding. Consider running individual `nelson scan` and `nelson review` commands if you want more control over pacing and cost.
 
 ## Model configuration
 
