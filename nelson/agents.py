@@ -84,6 +84,7 @@ class AgentAdapter(ABC):
     """Base class for agent adapters."""
 
     name: str
+    needs_pacing: bool = False  # CLI tools with rolling subscription limits need delays
 
     @abstractmethod
     def run(self, prompt: str) -> AgentResult:
@@ -96,6 +97,7 @@ class ClaudeCLIAdapter(AgentAdapter):
     def __init__(self, model: str = "haiku", timeout: int = 120):
         self.model = model
         self.name = f"claude-{model}"
+        self.needs_pacing = True
         self.timeout = timeout
 
     def run(self, prompt: str) -> AgentResult:
@@ -226,10 +228,11 @@ def create_adapter(spec: str) -> AgentAdapter:
     """Create an adapter from a spec string.
 
     Examples:
-        "claude:haiku"          -> ClaudeCLIAdapter(model="haiku")
-        "claude:sonnet"         -> ClaudeCLIAdapter(model="sonnet")
-        "openai:qwen3.5"       -> OpenAIAPIAdapter(model="qwen3.5")
-        "openai:qwen3.5@http://host:8080/v1" -> OpenAIAPIAdapter with custom URL
+        "claude:haiku"              -> Claude CLI with Haiku
+        "claude:sonnet"             -> Claude CLI with Sonnet
+        "lmstudio:google/gemma-4"   -> LM Studio on localhost:1234
+        "ollama:llama3"             -> Ollama on localhost:11434
+        "openai:model@http://h:p/v1" -> Custom OpenAI-compatible endpoint
     """
     parts = spec.split(":", 1)
     if len(parts) != 2:
@@ -246,5 +249,12 @@ def create_adapter(spec: str) -> AgentAdapter:
             model, url = model_spec.split("@", 1)
             return OpenAIAPIAdapter(model=model, base_url=url)
         return OpenAIAPIAdapter(model=model_spec)
+    elif adapter_type == "lmstudio":
+        return OpenAIAPIAdapter(model=model_spec, base_url="http://localhost:1234/v1")
+    elif adapter_type == "ollama":
+        return OpenAIAPIAdapter(model=model_spec, base_url="http://localhost:11434/v1")
     else:
-        raise ValueError(f"Unknown adapter type '{adapter_type}'. Known: {list(ADAPTERS)}")
+        raise ValueError(
+            f"Unknown adapter type '{adapter_type}'. "
+            f"Known: claude, openai, lmstudio, ollama"
+        )

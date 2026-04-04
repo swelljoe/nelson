@@ -113,6 +113,11 @@ class Database:
             "SELECT * FROM scans ORDER BY id DESC LIMIT 1"
         ).fetchone()
 
+    def list_scans(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM scans ORDER BY id DESC"
+        ).fetchall()
+
     # -- Jobs --
 
     def create_jobs_batch(self, scan_id: int, jobs: list[tuple[str, str, str]]):
@@ -172,6 +177,19 @@ class Database:
             (scan_id,),
         ).fetchall()
         return {r["status"]: r["cnt"] for r in rows}
+
+    def usage_by_model(self, scan_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT model_id,
+                      COUNT(*) as jobs,
+                      SUM(tokens_in) as total_tokens_in,
+                      SUM(tokens_out) as total_tokens_out,
+                      SUM(cost_usd) as total_cost_usd
+               FROM jobs
+               WHERE scan_id = ? AND status = 'complete'
+               GROUP BY model_id""",
+            (scan_id,),
+        ).fetchall()
 
     # -- Findings --
 

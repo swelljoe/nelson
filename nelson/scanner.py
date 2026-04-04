@@ -200,7 +200,7 @@ def run_scan(
         if on_progress:
             on_progress(db.job_counts(scan_id))
 
-        if delay > 0:
+        if delay > 0 and adapter.needs_pacing:
             time.sleep(delay)
 
     db.complete_scan(scan_id)

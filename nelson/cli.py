@@ -27,6 +27,8 @@ def main(verbose: bool):
         format="%(asctime)s %(levelname)-5s %(message)s",
         datefmt="%H:%M:%S",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 @main.command()
@@ -132,6 +134,30 @@ def scan(target_dir: str, models: tuple[str], cwe_ids: tuple[str], delay: float,
         click.echo("\nNo vulnerabilities found.")
 
 
+@main.command(name="list")
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+def list_scans(db_path: str):
+    """List all scans."""
+    db = Database(db_path)
+    scans = db.list_scans()
+    if not scans:
+        click.echo("No scans found.")
+        return
+
+    click.echo(f"{'ID':>4}  {'Status':<11}  {'Findings':>8}  {'Jobs':>6}  {'Model':<35}  {'Target'}")
+    click.echo(f"{'─' * 4}  {'─' * 11}  {'─' * 8}  {'─' * 6}  {'─' * 35}  {'─' * 30}")
+    for s in scans:
+        scan_id = s["id"]
+        status = "complete" if s["completed_at"] else "in progress"
+        counts = db.job_counts(scan_id)
+        total_jobs = sum(counts.values())
+        findings = db.findings_for_scan(scan_id)
+        target = s["target_dir"]
+        config = json.loads(s["config"]) if s["config"] else {}
+        models = ", ".join(config.get("models", []))
+        click.echo(f"{scan_id:>4}  {status:<11}  {len(findings):>8}  {total_jobs:>6}  {models:<35}  {target}")
+
+
 @main.command()
 @click.argument("scan_id", type=int, required=False)
 @click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
@@ -164,6 +190,18 @@ def status(scan_id: int | None, db_path: str):
 
     findings = db.findings_for_scan(scan_id)
     click.echo(f"  Findings:  {len(findings)}")
+
+    usage = db.usage_by_model(scan_id)
+    if usage:
+        click.echo(f"\n  Token usage by model:")
+        for row in usage:
+            tin = row["total_tokens_in"] or 0
+            tout = row["total_tokens_out"] or 0
+            total = tin + tout
+            line = f"    {row['model_id']}: {total:,} tokens ({tin:,} in, {tout:,} out) across {row['jobs']} jobs"
+            if row["total_cost_usd"]:
+                line += f" — ${row['total_cost_usd']:.4f}"
+            click.echo(line)
 
 
 @main.command()
