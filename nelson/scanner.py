@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 from .agents import AgentAdapter, AgentResult, create_adapter
-from .cwe import CWE_TOP_25, applicable_cwes, build_prompt
+from .cwe import CWE_OPEN, CWE_TOP_25, applicable_cwes, build_open_prompt, build_prompt
 from .db import Database
 from .inventory import SourceFile, discover_files
 
@@ -31,17 +31,25 @@ def build_job_matrix(
     files: list[SourceFile],
     models: list[str],
     cwe_ids: list[str] | None = None,
+    mode: str = "focused",
 ) -> list[tuple[str, str, str]]:
-    """Build (file_path, cwe_id, model_id) tuples, filtered by language applicability."""
+    """Build (file_path, cwe_id, model_id) tuples.
+
+    mode="focused": one job per (file, applicable CWE, model)
+    mode="open": one job per (file, model) with cwe_id="OPEN"
+    """
     jobs = []
     for f in files:
-        cwes = applicable_cwes(f.language)
-        if cwe_ids:
-            cwes = [c for c in cwes if c.id in cwe_ids]
-        for cwe in cwes:
-            for model_spec in models:
-                adapter = create_adapter(model_spec)
-                jobs.append((f.path, cwe.id, adapter.name))
+        for model_spec in models:
+            adapter = create_adapter(model_spec)
+            if mode == "open":
+                jobs.append((f.path, "OPEN", adapter.name))
+            else:
+                cwes = applicable_cwes(f.language)
+                if cwe_ids:
+                    cwes = [c for c in cwes if c.id in cwe_ids]
+                for cwe in cwes:
+                    jobs.append((f.path, cwe.id, adapter.name))
     return jobs
 
 
@@ -50,6 +58,7 @@ def create_scan(
     target_dir: str,
     models: list[str],
     cwe_ids: list[str] | None = None,
+    mode: str = "focused",
 ) -> tuple[int, list[SourceFile]]:
     """Discover files, build matrix, create scan and jobs in DB."""
     target = str(Path(target_dir).resolve())
@@ -59,15 +68,15 @@ def create_scan(
         raise ValueError(f"No source files found in {target}")
 
     commit_sha = get_commit_sha(target)
-    config = {"models": models, "cwe_ids": cwe_ids}
+    config = {"models": models, "cwe_ids": cwe_ids, "mode": mode}
     scan_id = db.create_scan(target, commit_sha=commit_sha, config=config)
 
-    matrix = build_job_matrix(files, models, cwe_ids=cwe_ids)
+    matrix = build_job_matrix(files, models, cwe_ids=cwe_ids, mode=mode)
     db.create_jobs_batch(scan_id, matrix)
 
     log.info(
-        "Scan %d: %d files, %d jobs across %d models",
-        scan_id, len(files), len(matrix), len(models),
+        "Scan %d (%s): %d files, %d jobs across %d models",
+        scan_id, mode, len(files), len(matrix), len(models),
     )
     return scan_id, files
 
@@ -108,8 +117,9 @@ def run_scan(
     """
     target = Path(target_dir).resolve()
 
-    # Build CWE lookup
+    # Build CWE lookup (include the OPEN sentinel)
     cwe_lookup = {c.id: c for c in CWE_TOP_25}
+    cwe_lookup["OPEN"] = CWE_OPEN
 
     # Pre-create all adapters
     adapters: dict[str, AgentAdapter] = {}
@@ -155,7 +165,10 @@ def run_scan(
             db.fail_job(job["id"], f"Cannot read file: {e}")
             continue
 
-        prompt = build_prompt(job["file_path"], content, finfo.language, cwe)
+        if job["cwe_id"] == "OPEN":
+            prompt = build_open_prompt(job["file_path"], content, finfo.language)
+        else:
+            prompt = build_prompt(job["file_path"], content, finfo.language, cwe)
 
         log.info(
             "Job %d: %s × %s × %s",
@@ -189,11 +202,15 @@ def run_scan(
                 cost_usd=result.cost_usd,
             )
             for f in result.findings:
+                explanation = f.explanation
+                # In open mode, prepend the model-identified CWE to the explanation
+                if job["cwe_id"] == "OPEN" and f.cwe_id:
+                    explanation = f"[{f.cwe_id}] {explanation}"
                 db.add_finding(
                     job["id"],
                     line_number=f.line_number,
                     code_snippet=f.code_snippet,
-                    explanation=f.explanation,
+                    explanation=explanation,
                     confidence=f.confidence,
                 )
 

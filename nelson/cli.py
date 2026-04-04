@@ -9,6 +9,7 @@ import click
 
 from .db import Database
 from .inventory import discover_files
+from .review import run_review
 from .scanner import create_scan, run_scan
 from .tooling import assess_tooling, format_tooling_report
 
@@ -81,10 +82,14 @@ def inventory(target_dir: str):
     help="Resume a previous scan by ID instead of creating a new one.",
 )
 @click.option(
+    "--mode", type=click.Choice(["focused", "open"]), default="focused",
+    help="'focused': one CWE at a time (default). 'open': find any vulnerability per file.",
+)
+@click.option(
     "--db", "db_path", default="nelson.db",
     help="Path to SQLite database. Default: nelson.db",
 )
-def scan(target_dir: str, models: tuple[str], cwe_ids: tuple[str], delay: float, resume: int | None, db_path: str):
+def scan(target_dir: str, models: tuple[str], cwe_ids: tuple[str], delay: float, resume: int | None, mode: str, db_path: str):
     """Scan TARGET_DIR for vulnerabilities."""
     db = Database(db_path)
     cwe_list = list(cwe_ids) if cwe_ids else None
@@ -98,20 +103,22 @@ def scan(target_dir: str, models: tuple[str], cwe_ids: tuple[str], delay: float,
         target_dir = s["target_dir"]
         config = json.loads(s["config"]) if s["config"] else {}
         models = tuple(config.get("models", models))
-        click.echo(f"Resuming scan {scan_id} on {target_dir}")
+        mode = config.get("mode", mode)
+        click.echo(f"Resuming scan {scan_id} ({mode} mode) on {target_dir}")
     else:
-        from .cwe import applicable_cwes
-        from .inventory import SourceFile
+        if mode == "open" and cwe_ids:
+            click.echo("Warning: --cwe flags are ignored in open mode.", err=True)
+            cwe_list = None
 
         files = discover_files(target_dir)
         if not files:
             click.echo("No source files found.", err=True)
             sys.exit(1)
 
-        scan_id, files = create_scan(db, target_dir, list(models), cwe_ids=cwe_list)
+        scan_id, files = create_scan(db, target_dir, list(models), cwe_ids=cwe_list, mode=mode)
         counts = db.job_counts(scan_id)
         total = sum(counts.values())
-        click.echo(f"Scan {scan_id}: {len(files)} files, {total} jobs")
+        click.echo(f"Scan {scan_id} ({mode} mode): {len(files)} files, {total} jobs")
 
     def on_progress(counts):
         done = counts.get("complete", 0) + counts.get("error", 0)
@@ -134,6 +141,55 @@ def scan(target_dir: str, models: tuple[str], cwe_ids: tuple[str], delay: float,
         click.echo("\nNo vulnerabilities found.")
 
 
+@main.command()
+@click.argument("scan_id", type=int, required=False)
+@click.option(
+    "-m", "--model", "model_spec", default="claude:sonnet",
+    help="Model to use for review. Default: claude:sonnet",
+)
+@click.option(
+    "--delay", default=2.0, type=float,
+    help="Seconds between reviews (for CLI pacing). Default: 2.0",
+)
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+def review(scan_id: int | None, model_spec: str, delay: float, db_path: str):
+    """Review findings from a scan with a (usually smarter) model."""
+    db = Database(db_path)
+    if scan_id is None:
+        s = db.latest_scan()
+        if s is None:
+            click.echo("No scans found.")
+            return
+        scan_id = s["id"]
+    else:
+        s = db.get_scan(scan_id)
+        if s is None:
+            click.echo(f"Scan {scan_id} not found.", err=True)
+            sys.exit(1)
+
+    target_dir = s["target_dir"]
+
+    unreviewed = db.unreviewed_findings(scan_id)
+    if not unreviewed:
+        click.echo(f"Scan {scan_id}: no unreviewed findings.")
+        return
+
+    click.echo(f"Reviewing {len(unreviewed)} findings from scan {scan_id} with {model_spec}...")
+
+    def on_progress(reviewed, total):
+        click.echo(f"  Reviewed {reviewed}/{total}", err=True)
+
+    run_review(
+        db, scan_id, model_spec, target_dir,
+        delay=delay, on_progress=on_progress,
+    )
+
+    summary = db.review_summary(scan_id)
+    click.echo(f"\nReview complete:")
+    for status, count in sorted(summary.items()):
+        click.echo(f"  {status}: {count}")
+
+
 @main.command(name="list")
 @click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
 def list_scans(db_path: str):
@@ -144,8 +200,8 @@ def list_scans(db_path: str):
         click.echo("No scans found.")
         return
 
-    click.echo(f"{'ID':>4}  {'Status':<11}  {'Findings':>8}  {'Jobs':>6}  {'Model':<35}  {'Target'}")
-    click.echo(f"{'─' * 4}  {'─' * 11}  {'─' * 8}  {'─' * 6}  {'─' * 35}  {'─' * 30}")
+    click.echo(f"{'ID':>4}  {'Status':<11}  {'Mode':<8}  {'Findings':>8}  {'Jobs':>6}  {'Model':<35}  {'Target'}")
+    click.echo(f"{'─' * 4}  {'─' * 11}  {'─' * 8}  {'─' * 8}  {'─' * 6}  {'─' * 35}  {'─' * 30}")
     for s in scans:
         scan_id = s["id"]
         status = "complete" if s["completed_at"] else "in progress"
@@ -155,7 +211,8 @@ def list_scans(db_path: str):
         target = s["target_dir"]
         config = json.loads(s["config"]) if s["config"] else {}
         models = ", ".join(config.get("models", []))
-        click.echo(f"{scan_id:>4}  {status:<11}  {len(findings):>8}  {total_jobs:>6}  {models:<35}  {target}")
+        mode = config.get("mode", "focused")
+        click.echo(f"{scan_id:>4}  {status:<11}  {mode:<8}  {len(findings):>8}  {total_jobs:>6}  {models:<35}  {target}")
 
 
 @main.command()
@@ -191,6 +248,12 @@ def status(scan_id: int | None, db_path: str):
     findings = db.findings_for_scan(scan_id)
     click.echo(f"  Findings:  {len(findings)}")
 
+    review_sum = db.review_summary(scan_id)
+    if any(k != "unreviewed" for k in review_sum):
+        click.echo(f"  Reviews:")
+        for rs, count in sorted(review_sum.items()):
+            click.echo(f"    {rs}: {count}")
+
     usage = db.usage_by_model(scan_id)
     if usage:
         click.echo(f"\n  Token usage by model:")
@@ -209,8 +272,12 @@ def status(scan_id: int | None, db_path: str):
 @click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
 @click.option("--confidence", type=click.Choice(["high", "medium", "low"]), default=None, help="Filter by confidence.")
 @click.option("--cwe", "cwe_filter", default=None, help="Filter by CWE ID.")
+@click.option(
+    "--verdict", type=click.Choice(["confirmed", "false_positive", "needs_review", "resolved", "unreviewed"]),
+    default=None, help="Filter by review verdict.",
+)
 @click.option("--json-output", "as_json", is_flag=True, help="Output as JSON.")
-def report(scan_id: int | None, db_path: str, confidence: str | None, cwe_filter: str | None, as_json: bool):
+def report(scan_id: int | None, db_path: str, confidence: str | None, cwe_filter: str | None, verdict: str | None, as_json: bool):
     """Show findings for a scan (default: latest)."""
     db = Database(db_path)
     if scan_id is None:
@@ -226,6 +293,11 @@ def report(scan_id: int | None, db_path: str, confidence: str | None, cwe_filter
         findings = [f for f in findings if f["confidence"] == confidence]
     if cwe_filter:
         findings = [f for f in findings if f["cwe_id"] == cwe_filter]
+    if verdict:
+        if verdict == "unreviewed":
+            findings = [f for f in findings if f["verified_status"] is None]
+        else:
+            findings = [f for f in findings if f["verified_status"] == verdict]
 
     if as_json:
         data = [
@@ -237,6 +309,9 @@ def report(scan_id: int | None, db_path: str, confidence: str | None, cwe_filter
                 "explanation": f["explanation"],
                 "code": f["code_snippet"],
                 "model": f["model_id"],
+                "verdict": f["verified_status"],
+                "reviewed_by": f["verified_by_model"],
+                "review_detail": f["suggested_fix"],
             }
             for f in findings
         ]
@@ -278,6 +353,25 @@ def report(scan_id: int | None, db_path: str, confidence: str | None, cwe_filter
             click.echo(f"  Code: {f['code_snippet']}")
         if f["explanation"]:
             click.echo(f"  Why:  {f['explanation']}")
+
+        # Show review status if reviewed
+        vs = f["verified_status"]
+        if vs:
+            verdict_colors = {
+                "confirmed": "red",
+                "false_positive": "green",
+                "needs_review": "yellow",
+                "resolved": "cyan",
+            }
+            verdict_style = click.style(
+                vs.upper().replace("_", " "),
+                fg=verdict_colors.get(vs, "white"),
+                bold=True,
+            )
+            click.echo(f"  Review: {verdict_style} (by {f['verified_by_model']})")
+            if f["suggested_fix"]:
+                for line in f["suggested_fix"].splitlines():
+                    click.echo(f"    {line}")
 
     # Summary
     click.echo(f"\n{'─' * 60}")

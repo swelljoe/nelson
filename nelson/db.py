@@ -210,6 +210,31 @@ class Database:
         self.conn.commit()
         return cur.lastrowid
 
+    def update_finding_review(
+        self,
+        finding_id: int,
+        *,
+        verified_by_model: str,
+        verified_status: str,
+        suggested_fix: str | None = None,
+    ):
+        self.conn.execute(
+            """UPDATE findings SET verified_by_model = ?, verified_status = ?, suggested_fix = ?
+               WHERE id = ?""",
+            (verified_by_model, verified_status, suggested_fix, finding_id),
+        )
+        self.conn.commit()
+
+    def unreviewed_findings(self, scan_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """SELECT f.*, j.file_path, j.cwe_id, j.model_id, j.scan_id
+               FROM findings f
+               JOIN jobs j ON f.job_id = j.id
+               WHERE j.scan_id = ? AND f.verified_status IS NULL
+               ORDER BY j.file_path, f.line_number""",
+            (scan_id,),
+        ).fetchall()
+
     def findings_for_scan(self, scan_id: int) -> list[sqlite3.Row]:
         return self.conn.execute(
             """SELECT f.*, j.file_path, j.cwe_id, j.model_id
@@ -231,3 +256,14 @@ class Database:
                ORDER BY count DESC""",
             (scan_id,),
         ).fetchall()
+
+    def review_summary(self, scan_id: int) -> dict[str, int]:
+        rows = self.conn.execute(
+            """SELECT f.verified_status, COUNT(*) as cnt
+               FROM findings f
+               JOIN jobs j ON f.job_id = j.id
+               WHERE j.scan_id = ?
+               GROUP BY f.verified_status""",
+            (scan_id,),
+        ).fetchall()
+        return {r["verified_status"] or "unreviewed": r["cnt"] for r in rows}

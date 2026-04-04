@@ -271,3 +271,49 @@ File: {file_path}
 ```{language}
 {file_content}
 ```"""
+
+
+# Sentinel CWE entry for open-ended scanning
+CWE_OPEN = CWEEntry(
+    id="OPEN",
+    name="Open Scan",
+    description="Scan for any vulnerability without a specific CWE focus.",
+    languages=set(),
+    example_vulnerable={},
+    example_safe={},
+)
+
+
+def build_open_prompt(file_path: str, file_content: str, language: str) -> str:
+    """Build an open-ended vulnerability analysis prompt."""
+    return f"""You are a security researcher performing a vulnerability audit. Analyze the following {language} file and find any security vulnerabilities.
+
+Look for all classes of vulnerability including but not limited to:
+- Memory safety issues (buffer overflows, use-after-free, etc.)
+- Injection attacks (SQL, command, code, XSS, etc.)
+- Authentication and authorization flaws
+- Cryptographic weaknesses
+- Race conditions
+- Path traversal
+- Deserialization issues
+- Hard-coded credentials
+- Improper input validation
+- Any other security-relevant bugs
+
+IMPORTANT INSTRUCTIONS:
+- If you find NO vulnerabilities, you MUST return exactly: []
+- If you find vulnerabilities, return a JSON array of objects with these fields:
+  - "line": the line number (integer)
+  - "code": the vulnerable code snippet (string, just the relevant lines)
+  - "cwe": the CWE ID if you can identify one, otherwise "unknown" (string)
+  - "explanation": what the vulnerability is and why it matters (string)
+  - "confidence": "high", "medium", or "low" (string)
+- Return ONLY the JSON array, no other text, no markdown fences, no explanation outside the JSON.
+- Be precise. Only report actual vulnerabilities, not theoretical ones or style issues.
+- Do not report vulnerabilities in comments or dead code.
+- Rank by severity — put the most serious vulnerability first.
+
+File: {file_path}
+```{language}
+{file_content}
+```"""

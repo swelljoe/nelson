@@ -18,6 +18,7 @@ class Finding:
     code_snippet: str | None
     explanation: str | None
     confidence: str | None  # high, medium, low
+    cwe_id: str | None = None  # Set by model in open scan mode
 
 
 @dataclass
@@ -77,6 +78,7 @@ def _parse_one(item: dict) -> Finding:
         code_snippet=item.get("code"),
         explanation=item.get("explanation"),
         confidence=item.get("confidence"),
+        cwe_id=item.get("cwe"),
     )
 
 
