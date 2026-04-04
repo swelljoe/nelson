@@ -174,6 +174,71 @@ CLI-based agents (Claude Code) are paced with a configurable delay between jobs 
 nelson scan /path/to/project -m claude:haiku --delay 5
 ```
 
+## Prompts
+
+Here's roughly what gets sent to the model for each job.
+
+**Focused mode** — one prompt per (file, CWE) pair. The model is told exactly what to look for, given a vulnerable and safe example, and asked to return structured JSON:
+
+```
+You are a security auditor. Analyze the following python file for exactly one
+type of vulnerability:
+
+CWE-89 (SQL Injection): The product constructs all or part of an SQL command
+using externally-influenced input without neutralizing special elements that
+could modify the intended SQL command.
+
+Example of VULNERABLE code in python:
+  cursor.execute(f"SELECT * FROM users WHERE name = '{user_input}'")
+
+Example of SAFE code in python:
+  cursor.execute("SELECT * FROM users WHERE name = %s", (user_input,))
+
+IMPORTANT INSTRUCTIONS:
+- Only look for CWE-89 (SQL Injection). Do not report other vulnerability types.
+- If you find NO instances of this vulnerability, you MUST return exactly: []
+- If you find instances, return a JSON array of objects with these fields:
+  - "line": the line number (integer)
+  - "code": the vulnerable code snippet (string)
+  - "explanation": why this is vulnerable to CWE-89 (string)
+  - "confidence": "high", "medium", or "low" (string)
+- Return ONLY the JSON array, no other text.
+
+File: app/db.py
+<full file content>
+```
+
+**Open mode** — one prompt per file, asking the model to find anything:
+
+```
+You are a security researcher performing a vulnerability audit. Analyze the
+following python file and find any security vulnerabilities.
+
+Look for all classes of vulnerability including but not limited to:
+- Injection attacks (SQL, command, code, XSS, etc.)
+- Authentication and authorization flaws
+- Cryptographic weaknesses
+- Path traversal
+- Hard-coded credentials
+- Any other security-relevant bugs
+
+IMPORTANT INSTRUCTIONS:
+- If you find NO vulnerabilities, you MUST return exactly: []
+- If you find vulnerabilities, return a JSON array of objects with these fields:
+  - "line": the line number (integer)
+  - "code": the vulnerable code snippet (string)
+  - "cwe": the CWE ID if you can identify one, otherwise "unknown" (string)
+  - "explanation": what the vulnerability is and why it matters (string)
+  - "confidence": "high", "medium", or "low" (string)
+- Return ONLY the JSON array, no other text.
+- Rank by severity — put the most serious vulnerability first.
+
+File: app/db.py
+<full file content>
+```
+
+The focused prompts are generated from the CWE definitions in `nelson/cwe.py`, which include language-specific examples. Vulnerability types that don't apply to the file's language are skipped (e.g., buffer overflows aren't checked for Python files).
+
 ## File filtering
 
 Nelson automatically excludes files that are unlikely to contain production vulnerabilities:
