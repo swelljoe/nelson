@@ -171,6 +171,83 @@ class ClaudeCLIAdapter(AgentAdapter):
         )
 
 
+class GeminiCLIAdapter(AgentAdapter):
+    """Invoke Gemini via the gemini CLI tool."""
+
+    def __init__(self, model: str | None = None, timeout: int = 120):
+        self.model = model
+        self.name = f"gemini-{model}" if model else "gemini"
+        self.needs_pacing = True
+        self.timeout = timeout
+
+    def run(self, prompt: str) -> AgentResult:
+        cmd = ["gemini", "-p", prompt, "--output-format", "json"]
+        if self.model:
+            cmd.extend(["-m", self.model])
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return AgentResult(findings=[], raw_output="", error="timeout")
+
+        raw = result.stdout
+        stderr = result.stderr
+
+        if result.returncode != 0:
+            combined = raw + stderr
+            if any(
+                s in combined.lower()
+                for s in ["rate limit", "429", "overloaded", "quota"]
+            ):
+                return AgentResult(
+                    findings=[],
+                    raw_output=raw,
+                    rate_limited=True,
+                    error="rate limited",
+                )
+            return AgentResult(
+                findings=[],
+                raw_output=raw,
+                error=f"exit code {result.returncode}: {stderr[:500]}",
+            )
+
+        # Parse the JSON output from gemini --output-format json
+        text_content = raw
+        tokens_in = None
+        tokens_out = None
+        try:
+            envelope = json.loads(raw)
+            if isinstance(envelope, dict) and "response" in envelope:
+                text_content = envelope["response"]
+                # Sum tokens across all models used (router + main)
+                stats = envelope.get("stats", {})
+                models_stats = stats.get("models", {})
+                total_in = 0
+                total_out = 0
+                for model_stats in models_stats.values():
+                    tokens = model_stats.get("tokens", {})
+                    total_in += tokens.get("input", 0)
+                    total_out += tokens.get("candidates", 0)
+                if total_in or total_out:
+                    tokens_in = total_in
+                    tokens_out = total_out
+        except (json.JSONDecodeError, TypeError):
+            text_content = raw
+
+        findings = parse_findings(str(text_content))
+        return AgentResult(
+            findings=findings,
+            raw_output=raw,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+        )
+
+
 class OpenAIAPIAdapter(AgentAdapter):
     """Invoke a local model via OpenAI-compatible API (e.g., llama.cpp server)."""
 
@@ -231,6 +308,7 @@ class OpenAIAPIAdapter(AgentAdapter):
 # Registry of known adapters
 ADAPTERS: dict[str, type[AgentAdapter]] = {
     "claude": ClaudeCLIAdapter,
+    "gemini": GeminiCLIAdapter,
     "openai": OpenAIAPIAdapter,
 }
 
@@ -241,6 +319,8 @@ def create_adapter(spec: str) -> AgentAdapter:
     Examples:
         "claude:haiku"              -> Claude CLI with Haiku
         "claude:sonnet"             -> Claude CLI with Sonnet
+        "gemini:gemini-2.5-flash"   -> Gemini CLI with specific model
+        "gemini:"                   -> Gemini CLI with default model
         "lmstudio:google/gemma-4"   -> LM Studio on localhost:1234
         "ollama:llama3"             -> Ollama on localhost:11434
         "openai:model@http://h:p/v1" -> Custom OpenAI-compatible endpoint
@@ -255,6 +335,8 @@ def create_adapter(spec: str) -> AgentAdapter:
 
     if adapter_type == "claude":
         return ClaudeCLIAdapter(model=model_spec)
+    elif adapter_type == "gemini":
+        return GeminiCLIAdapter(model=model_spec if model_spec else None)
     elif adapter_type == "openai":
         if "@" in model_spec:
             model, url = model_spec.split("@", 1)
@@ -267,5 +349,5 @@ def create_adapter(spec: str) -> AgentAdapter:
     else:
         raise ValueError(
             f"Unknown adapter type '{adapter_type}'. "
-            f"Known: claude, openai, lmstudio, ollama"
+            f"Known: claude, gemini, openai, lmstudio, ollama"
         )

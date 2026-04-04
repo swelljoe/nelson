@@ -8,6 +8,7 @@ from pathlib import Path
 import click
 
 from .db import Database
+from .html_report import generate_scan_report, generate_summary_report
 from .inventory import discover_files
 from .review import run_review
 from .scanner import create_scan, run_scan
@@ -472,6 +473,50 @@ def report(
                 f"  {row['cwe_id']} ({row['model_id']}):"
                 f" {row['count']} ({row['confidence']})"
             )
+
+
+@main.command(name="html-report")
+@click.argument("scan_id", type=int, required=False)
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+@click.option(
+    "-o",
+    "--output",
+    "output_path",
+    default=None,
+    help="Output file path. Default: nelson-report-<scan_id>.html",
+)
+def html_report(scan_id: int | None, db_path: str, output_path: str | None):
+    """Generate a detailed HTML report for a scan (default: latest)."""
+    db = Database(db_path)
+    if scan_id is None:
+        s = db.latest_scan()
+        if s is None:
+            click.echo("No scans found.")
+            return
+        scan_id = s["id"]
+
+    html = generate_scan_report(db, scan_id)
+    out = Path(output_path or f"nelson-report-{scan_id}.html")
+    out.write_text(html)
+    click.echo(f"Wrote {out} ({len(html):,} bytes)")
+
+
+@main.command(name="html-summary")
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+@click.option(
+    "-o",
+    "--output",
+    "output_path",
+    default=None,
+    help="Output file path. Default: nelson-summary.html",
+)
+def html_summary(db_path: str, output_path: str | None):
+    """Generate an executive summary HTML report across all scans."""
+    db = Database(db_path)
+    html = generate_summary_report(db)
+    out = Path(output_path or "nelson-summary.html")
+    out.write_text(html)
+    click.echo(f"Wrote {out} ({len(html):,} bytes)")
 
 
 @main.command()

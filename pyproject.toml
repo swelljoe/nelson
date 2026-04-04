@@ -35,3 +35,4 @@ ignore = [
 "nelson/cwe.py" = ["E501"]    # Long example strings
 "nelson/db.py" = ["E501", "S101"]  # SQL strings, asserts for type narrowing
 "nelson/review.py" = ["E501"] # Long prompt strings
+"nelson/html_report.py" = ["E501"] # Inline CSS and HTML strings
