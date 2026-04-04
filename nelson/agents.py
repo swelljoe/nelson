@@ -1,0 +1,250 @@
+"""Agent adapters for invoking AI models via CLI or API."""
+
+import json
+import logging
+import subprocess
+import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+import httpx
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class Finding:
+    line_number: int | None
+    code_snippet: str | None
+    explanation: str | None
+    confidence: str | None  # high, medium, low
+
+
+@dataclass
+class AgentResult:
+    findings: list[Finding]
+    raw_output: str
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    cost_usd: float | None = None
+    rate_limited: bool = False
+    error: str | None = None
+
+
+def parse_findings(text: str) -> list[Finding]:
+    """Extract a JSON array of findings from model output.
+
+    Models sometimes wrap JSON in markdown fences or add preamble text.
+    We try to find and parse the JSON array regardless.
+    """
+    text = text.strip()
+
+    # Try direct parse first
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return [_parse_one(item) for item in data if isinstance(item, dict)]
+    except json.JSONDecodeError:
+        pass
+
+    # Try to find JSON array in the text
+    start = text.find("[")
+    if start == -1:
+        return []
+
+    # Find matching closing bracket
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "[":
+            depth += 1
+        elif text[i] == "]":
+            depth -= 1
+            if depth == 0:
+                try:
+                    data = json.loads(text[start : i + 1])
+                    if isinstance(data, list):
+                        return [_parse_one(item) for item in data if isinstance(item, dict)]
+                except json.JSONDecodeError:
+                    pass
+                break
+
+    return []
+
+
+def _parse_one(item: dict) -> Finding:
+    return Finding(
+        line_number=item.get("line"),
+        code_snippet=item.get("code"),
+        explanation=item.get("explanation"),
+        confidence=item.get("confidence"),
+    )
+
+
+class AgentAdapter(ABC):
+    """Base class for agent adapters."""
+
+    name: str
+
+    @abstractmethod
+    def run(self, prompt: str) -> AgentResult:
+        ...
+
+
+class ClaudeCLIAdapter(AgentAdapter):
+    """Invoke Claude via the claude CLI tool."""
+
+    def __init__(self, model: str = "haiku", timeout: int = 120):
+        self.model = model
+        self.name = f"claude-{model}"
+        self.timeout = timeout
+
+    def run(self, prompt: str) -> AgentResult:
+        cmd = [
+            "claude",
+            "-p",
+            "--model", self.model,
+            "--output-format", "json",
+            "--no-session-persistence",
+        ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return AgentResult(
+                findings=[], raw_output="", error="timeout"
+            )
+
+        raw = result.stdout
+        stderr = result.stderr
+
+        # Detect rate limiting
+        if result.returncode != 0:
+            combined = raw + stderr
+            if any(s in combined.lower() for s in ["rate limit", "429", "overloaded"]):
+                return AgentResult(
+                    findings=[], raw_output=raw, rate_limited=True,
+                    error="rate limited",
+                )
+            return AgentResult(
+                findings=[], raw_output=raw,
+                error=f"exit code {result.returncode}: {stderr[:500]}",
+            )
+
+        # Parse the JSON output from claude --output-format json
+        text_content = raw
+        tokens_in = None
+        tokens_out = None
+        cost_usd = None
+        try:
+            envelope = json.loads(raw)
+            # claude --output-format json wraps in {"type":"result","result":...,"usage":...,"cost_usd":...}
+            if isinstance(envelope, dict) and "result" in envelope:
+                text_content = envelope["result"]
+                usage = envelope.get("usage", {})
+                tokens_in = usage.get("input_tokens")
+                tokens_out = usage.get("output_tokens")
+                cost_usd = envelope.get("cost_usd")
+        except (json.JSONDecodeError, TypeError):
+            text_content = raw
+
+        findings = parse_findings(str(text_content))
+        return AgentResult(
+            findings=findings,
+            raw_output=raw,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost_usd=cost_usd,
+        )
+
+
+class OpenAIAPIAdapter(AgentAdapter):
+    """Invoke a local model via OpenAI-compatible API (e.g., llama.cpp server)."""
+
+    def __init__(
+        self,
+        model: str,
+        base_url: str = "http://localhost:8080/v1",
+        timeout: int = 300,
+    ):
+        self.model = model
+        self.name = f"local-{model}"
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+
+    def run(self, prompt: str) -> AgentResult:
+        url = f"{self.base_url}/chat/completions"
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,  # Low temp for consistent analysis
+        }
+
+        try:
+            resp = httpx.post(url, json=payload, timeout=self.timeout)
+        except httpx.TimeoutException:
+            return AgentResult(findings=[], raw_output="", error="timeout")
+        except httpx.ConnectError as e:
+            return AgentResult(findings=[], raw_output="", error=f"connection error: {e}")
+
+        if resp.status_code == 429:
+            return AgentResult(
+                findings=[], raw_output="", rate_limited=True, error="rate limited"
+            )
+        if resp.status_code != 200:
+            return AgentResult(
+                findings=[], raw_output=resp.text,
+                error=f"HTTP {resp.status_code}: {resp.text[:500]}",
+            )
+
+        data = resp.json()
+        text = data["choices"][0]["message"]["content"]
+        usage = data.get("usage", {})
+
+        findings = parse_findings(text)
+        return AgentResult(
+            findings=findings,
+            raw_output=text,
+            tokens_in=usage.get("prompt_tokens"),
+            tokens_out=usage.get("completion_tokens"),
+        )
+
+
+# Registry of known adapters
+ADAPTERS: dict[str, type[AgentAdapter]] = {
+    "claude": ClaudeCLIAdapter,
+    "openai": OpenAIAPIAdapter,
+}
+
+
+def create_adapter(spec: str) -> AgentAdapter:
+    """Create an adapter from a spec string.
+
+    Examples:
+        "claude:haiku"          -> ClaudeCLIAdapter(model="haiku")
+        "claude:sonnet"         -> ClaudeCLIAdapter(model="sonnet")
+        "openai:qwen3.5"       -> OpenAIAPIAdapter(model="qwen3.5")
+        "openai:qwen3.5@http://host:8080/v1" -> OpenAIAPIAdapter with custom URL
+    """
+    parts = spec.split(":", 1)
+    if len(parts) != 2:
+        raise ValueError(
+            f"Invalid adapter spec '{spec}'. Expected 'type:model', e.g. 'claude:haiku'"
+        )
+
+    adapter_type, model_spec = parts
+
+    if adapter_type == "claude":
+        return ClaudeCLIAdapter(model=model_spec)
+    elif adapter_type == "openai":
+        if "@" in model_spec:
+            model, url = model_spec.split("@", 1)
+            return OpenAIAPIAdapter(model=model, base_url=url)
+        return OpenAIAPIAdapter(model=model_spec)
+    else:
+        raise ValueError(f"Unknown adapter type '{adapter_type}'. Known: {list(ADAPTERS)}")

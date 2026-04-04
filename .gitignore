@@ -1,3 +1,8 @@
+# Nelson
+nelson.db
+nelson.db-wal
+nelson.db-shm
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -22,6 +27,7 @@ var/
 wheels/
 share/python-wheels/
 *.egg-info/
+nelson.egg-info/
 .installed.cfg
 *.egg
 MANIFEST
