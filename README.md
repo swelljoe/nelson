@@ -42,12 +42,23 @@ Requires Python 3.12+.
 ```bash
 git clone https://github.com/swelljoe/nelson.git
 cd nelson
+python -m venv .venv
+source .venv/bin/activate
 pip install -e .
+```
+
+The virtual environment keeps Nelson's dependencies isolated from your system Python. You'll need to activate it (`source .venv/bin/activate`) each time you open a new shell, or just run Nelson directly:
+
+```bash
+/path/to/nelson/.venv/bin/nelson --help
 ```
 
 Or run without installing:
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install click httpx
 python -m nelson --help
 ```
 
