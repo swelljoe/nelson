@@ -14,6 +14,8 @@ Nelson works with a variety of models via Claude Code, Gemini CLI, and OpenAI co
 
 Unless you're in a hurry to get the best results and have an unlimited token budget, I believe a smart use of your tokens is to run a report with a cheap model, like Haiku, and then review the report with a smarter model, and finally have a more careful interactive session with your favorite frontier model to correct the issue or just open your editor and fix the bug yourself. Anything simple enough to be fixed automatically by a model without some hand-holding is probably discoverable via static analysis tools (e.g. `ruff` for Python with the `S` rules enabled), and you should be running those kinds of tools and fixing all the discovered issues before handing the codebase over to `nelson`.
 
+If you are using a smart model (e.g. Opus), the open mode is probably sufficient/recommended, and it only runs one job per file.
+
 Nelson doesn't try to fix security bugs, currently. It is exclusively a reporting tool.
 
 I'll be doing more testing and benchmarking of effectiveness of various models to figure out the most efficient use of time and tokens, as I have hundreds of thousands of lines of code to review across dozens of repos. It may turn out that, as with coding, it's best to just use the smartest model you have access to, because the dumb models waste a lot more human time than the usage cost they save. But, so far, I've been impressed with what a relatively dumb model can do when given a focused task.
