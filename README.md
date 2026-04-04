@@ -32,3 +32,183 @@ find . -type f -name *.py -print0 | while IFS= read -r -d '' file; do
             one to /out/report.txt."
 done
 ```
+
+## Installation
+
+Requires Python 3.12+.
+
+```bash
+git clone https://github.com/swirl/nelson.git
+cd nelson
+pip install -e .
+```
+
+Or run without installing:
+
+```bash
+python -m nelson --help
+```
+
+## Quickstart
+
+The typical workflow is: scan, review, report.
+
+```bash
+# 1. Scan a project for vulnerabilities
+nelson scan /path/to/project -m claude:haiku
+
+# 2. Review findings with a smarter model to filter false positives
+nelson review -m claude:sonnet
+
+# 3. View confirmed findings
+nelson report --verdict confirmed
+```
+
+## Usage
+
+### Scanning
+
+Nelson has two scan modes:
+
+**Focused mode** (default) checks each file against specific CWE types from the Top 25, filtered by language applicability. A Python file won't be checked for buffer overflows, a C file won't be checked for XSS, etc. This produces more jobs but gives smaller models a better chance of finding issues.
+
+```bash
+# Focused scan with default model (claude:haiku)
+nelson scan /path/to/project
+
+# Limit to specific CWE types
+nelson scan /path/to/project --cwe CWE-89 --cwe CWE-78
+
+# Use a local model via LM Studio
+nelson scan /path/to/project -m "lmstudio:google/gemma-4-26b-a4b"
+```
+
+**Open mode** sends each file once with a broad "find any vulnerability" prompt, similar to the Ralph/Carlini approach. Fewer jobs, but requires a more capable model to produce useful results.
+
+```bash
+nelson scan /path/to/project --mode open -m claude:sonnet
+```
+
+Scans are resumable. If interrupted, just resume by scan ID:
+
+```bash
+nelson scan /path/to/project --resume 3
+```
+
+### Reviewing
+
+The review pass sends each finding back to a model (usually a smarter one) along with the full source file, asking it to trace execution flow and assess whether the vulnerability is reachable and realistic.
+
+```bash
+# Review with Claude Sonnet (default)
+nelson review
+
+# Review a specific scan
+nelson review 3
+
+# Review with a different model
+nelson review -m claude:opus
+```
+
+Each finding gets a verdict: `confirmed`, `false_positive`, `needs_review`, or `resolved` (if the file has been deleted since the scan). Review is idempotent -- running it again only processes unreviewed findings, so you can review with one model and then run a second pass with another.
+
+### Reporting
+
+```bash
+# Show all findings from the latest scan
+nelson report
+
+# Show findings from a specific scan
+nelson report 3
+
+# Filter by review verdict
+nelson report --verdict confirmed
+nelson report --verdict false_positive
+nelson report --verdict needs_review
+
+# Filter by confidence or CWE
+nelson report --confidence high
+nelson report --cwe CWE-89
+
+# JSON output for scripting
+nelson report --json-output
+nelson report --verdict confirmed --json-output
+```
+
+### Other commands
+
+```bash
+# List source files that would be scanned, with security tooling assessment
+nelson inventory /path/to/project
+
+# List all scans
+nelson list
+
+# Show detailed status of a scan (job counts, token usage, review summary)
+nelson status
+nelson status 3
+```
+
+## Model configuration
+
+Models are specified with a `type:model` syntax:
+
+| Spec | Description |
+|------|-------------|
+| `claude:haiku` | Claude Haiku via CLI |
+| `claude:sonnet` | Claude Sonnet via CLI |
+| `claude:opus` | Claude Opus via CLI |
+| `lmstudio:google/gemma-4-26b-a4b` | LM Studio on localhost:1234 |
+| `ollama:llama3` | Ollama on localhost:11434 |
+| `openai:model@http://host:port/v1` | Any OpenAI-compatible API endpoint |
+
+Multiple models can be used in a single scan to compare effectiveness:
+
+```bash
+nelson scan /path/to/project -m claude:haiku -m "lmstudio:google/gemma-4-26b-a4b"
+```
+
+CLI-based models (Claude, Gemini, etc.) are paced with a configurable delay between jobs to avoid hitting rolling subscription limits. API-based models (LM Studio, Ollama, custom endpoints) run without delay. The default delay is 2 seconds; adjust with `--delay`:
+
+```bash
+nelson scan /path/to/project -m claude:haiku --delay 5
+```
+
+## File filtering
+
+Nelson automatically excludes files that are unlikely to contain production vulnerabilities:
+
+- **Test code**: `test_*`, `*_test.*`, `*_spec.*`, `tests/`, `__tests__/`, etc.
+- **Documentation**: `docs/`, `*.md`, `*.txt`
+- **Generated code**: files with "DO NOT EDIT" / "AUTO-GENERATED" headers
+- **Vendored code**: `vendor/`, `node_modules/`, `third_party/`
+- **Large files**: over 500KB
+- **Non-source files**: only scans files with recognized extensions (`.py`, `.go`, `.ts`, `.js`, `.c`, `.cpp`, `.rs`, `.java`, `.rb`, `.php`, `.sh`)
+
+Use `nelson inventory /path/to/project` to see exactly which files would be scanned.
+
+## Security tooling assessment
+
+Nelson checks whether your project is using recommended static analysis tools and reports gaps. This runs automatically as part of `nelson inventory` and `nelson report`. For example, it will flag if:
+
+- Ruff is present but the S (Bandit) security rules aren't enabled
+- A Go project has no golangci-lint with gosec
+- A TypeScript project has no eslint-plugin-security
+
+The idea is that static analysis tools are cheaper and faster than AI for pattern-matching vulnerabilities, and Nelson should complement them rather than duplicate their work.
+
+## Database
+
+Scan state is stored in a SQLite database (`nelson.db` in the current directory by default). Use `--db` to specify a different path. The database uses WAL mode for safe concurrent reads.
+
+All scan results, findings, and review verdicts are preserved, making it easy to compare results across models, modes, and time.
+
+## Token tracking
+
+Nelson tracks token usage and cost per job. Use `nelson status` to see totals:
+
+```
+Token usage by model:
+  claude-haiku: 45,231 tokens (38,100 in, 7,131 out) across 24 jobs -- $0.0142
+  local-google/gemma-4-26b-a4b: 61,522 tokens (23,263 in, 38,259 out) across 8 jobs
+```
