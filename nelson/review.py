@@ -5,7 +5,7 @@ import logging
 import time
 from pathlib import Path
 
-from .agents import AgentAdapter, create_adapter, parse_findings
+from .agents import create_adapter
 from .db import Database
 
 log = logging.getLogger(__name__)
@@ -129,7 +129,8 @@ def run_review(
         file_path = target / finding["file_path"]
         if not file_path.is_file():
             log.info(
-                "File deleted, marking resolved: %s", finding["file_path"],
+                "File deleted, marking resolved: %s",
+                finding["file_path"],
             )
             db.update_finding_review(
                 finding["id"],
@@ -151,13 +152,19 @@ def run_review(
         language = LANGUAGE_MAP.get(ext, "unknown")
 
         prompt = build_review_prompt(
-            finding["file_path"], content, language, dict(finding),
+            finding["file_path"],
+            content,
+            language,
+            dict(finding),
         )
 
         log.info(
             "Review %d/%d: %s line %s (%s)",
-            i + 1, total, finding["file_path"],
-            finding["line_number"], finding["cwe_id"],
+            i + 1,
+            total,
+            finding["file_path"],
+            finding["line_number"],
+            finding["cwe_id"],
         )
 
         result = adapter.run(prompt)
@@ -169,7 +176,10 @@ def run_review(
             # Retry this finding
             result = adapter.run(prompt)
             if result.rate_limited:
-                log.error("Still rate limited after backoff, skipping finding %d", finding["id"])
+                log.error(
+                    "Still rate limited after backoff, skipping finding %d",
+                    finding["id"],
+                )
                 continue
 
         backoff = 0.0
@@ -190,7 +200,8 @@ def run_review(
 
         if review is None:
             log.warning(
-                "Could not parse review response for finding %d", finding["id"],
+                "Could not parse review response for finding %d",
+                finding["id"],
             )
             continue
 
