@@ -103,9 +103,12 @@ def _run_cli(
         text=True,
     )
 
+    interrupted = False
     original_handler = signal.getsignal(signal.SIGINT)
 
     def _interrupt(signum, frame):
+        nonlocal interrupted
+        interrupted = True
         proc.terminate()
         signal.signal(signal.SIGINT, original_handler)
 
@@ -122,8 +125,8 @@ def _run_cli(
     finally:
         signal.signal(signal.SIGINT, original_handler)
 
-    # If the process was terminated by our SIGINT handler, raise
-    if proc.returncode == -signal.SIGTERM or proc.returncode == -signal.SIGINT:
+    # If the SIGINT handler fired, raise regardless of returncode
+    if interrupted:
         raise KeyboardInterrupt
 
     return subprocess.CompletedProcess(
