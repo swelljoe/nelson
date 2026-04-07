@@ -161,6 +161,57 @@ def discover_files(target_dir: str | Path) -> list[SourceFile]:
     return files
 
 
+def files_from_paths(paths: list[str | Path]) -> tuple[list[SourceFile], Path]:
+    """Build SourceFile entries from explicit file paths.
+
+    Used when the user names individual files (or a shell glob) on the
+    command line, instead of pointing at a directory. Returns the list of
+    SourceFile entries and a common root directory; each SourceFile's
+    ``path`` is relative to that root.
+
+    Files with unknown extensions, zero size, or larger than ``MAX_FILE_SIZE``
+    are skipped. Path-based filters (test/doc patterns, generated-file
+    detection) are *not* applied — if the user named a file explicitly,
+    we trust them.
+    """
+    import os
+
+    abs_paths: list[Path] = []
+    for p in paths:
+        ap = Path(p).resolve()
+        if not ap.is_file():
+            raise ValueError(f"Not a file: {p}")
+        abs_paths.append(ap)
+
+    if not abs_paths:
+        return [], Path.cwd()
+
+    if len(abs_paths) == 1:
+        root = abs_paths[0].parent
+    else:
+        root = Path(os.path.commonpath([str(p) for p in abs_paths]))
+        if root.is_file():
+            root = root.parent
+
+    files: list[SourceFile] = []
+    for p in abs_paths:
+        ext = p.suffix.lower()
+        language = LANGUAGE_MAP.get(ext)
+        if language is None:
+            continue
+        try:
+            size = p.stat().st_size
+        except OSError:
+            continue
+        if size == 0 or size > MAX_FILE_SIZE:
+            continue
+        rel = p.relative_to(root)
+        files.append(SourceFile(path=str(rel), language=language, size=size))
+
+    files.sort(key=lambda f: f.path)
+    return files, root
+
+
 def _is_generated(path: Path) -> bool:
     try:
         with open(path, errors="ignore") as f:

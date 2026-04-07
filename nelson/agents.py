@@ -2,6 +2,7 @@
 
 import json
 import logging
+import signal
 import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -83,6 +84,56 @@ def _parse_one(item: dict) -> Finding:
     )
 
 
+def _run_cli(
+    cmd: list[str],
+    timeout: int,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a CLI subprocess that can be interrupted with Ctrl-C.
+
+    subprocess.run() defers KeyboardInterrupt until the child exits,
+    making Ctrl-C appear unresponsive. This uses Popen so we can
+    terminate the child immediately on SIGINT.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    original_handler = signal.getsignal(signal.SIGINT)
+
+    def _interrupt(signum, frame):
+        proc.terminate()
+        signal.signal(signal.SIGINT, original_handler)
+
+    signal.signal(signal.SIGINT, _interrupt)
+    try:
+        stdout, stderr = proc.communicate(
+            input=input_text,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        signal.signal(signal.SIGINT, original_handler)
+
+    # If the process was terminated by our SIGINT handler, raise
+    if proc.returncode == -signal.SIGTERM or proc.returncode == -signal.SIGINT:
+        raise KeyboardInterrupt
+
+    return subprocess.CompletedProcess(
+        cmd,
+        proc.returncode,
+        stdout,
+        stderr,
+    )
+
+
 class AgentAdapter(ABC):
     """Base class for agent adapters."""
 
@@ -114,13 +165,7 @@ class ClaudeCLIAdapter(AgentAdapter):
         ]
 
         try:
-            result = subprocess.run(
-                cmd,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-            )
+            result = _run_cli(cmd, self.timeout, input_text=prompt)
         except subprocess.TimeoutExpired:
             return AgentResult(findings=[], raw_output="", error="timeout")
 
@@ -186,12 +231,7 @@ class GeminiCLIAdapter(AgentAdapter):
             cmd.extend(["-m", self.model])
 
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout,
-            )
+            result = _run_cli(cmd, self.timeout)
         except subprocess.TimeoutExpired:
             return AgentResult(findings=[], raw_output="", error="timeout")
 

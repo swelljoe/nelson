@@ -125,112 +125,128 @@ def run_review(
 
     backoff = 0.0
 
-    for i, finding in enumerate(findings):
-        file_path = target / finding["file_path"]
-        if not file_path.is_file():
-            log.info(
-                "File deleted, marking resolved: %s",
+    try:
+        for i, finding in enumerate(findings):
+            file_path = target / finding["file_path"]
+            if not file_path.is_file():
+                log.info(
+                    "File deleted, marking resolved: %s",
+                    finding["file_path"],
+                )
+                db.update_finding_review(
+                    finding["id"],
+                    verified_by_model="nelson",
+                    verified_status="resolved",
+                    suggested_fix="File no longer exists in the source tree.",
+                )
+                if on_progress:
+                    on_progress(i + 1, total)
+                continue
+            try:
+                content = file_path.read_text(errors="replace")
+            except OSError as e:
+                log.warning("Cannot read %s: %s", finding["file_path"], e)
+                continue
+
+            # Determine language from file extension
+            ext = file_path.suffix.lower()
+            language = LANGUAGE_MAP.get(ext, "unknown")
+
+            prompt = build_review_prompt(
                 finding["file_path"],
+                content,
+                language,
+                dict(finding),
             )
-            db.update_finding_review(
-                finding["id"],
-                verified_by_model="nelson",
-                verified_status="resolved",
-                suggested_fix="File no longer exists in the source tree.",
+
+            log.info(
+                "Review %d/%d: %s line %s (%s)",
+                i + 1,
+                total,
+                finding["file_path"],
+                finding["line_number"],
+                finding["cwe_id"],
             )
-            if on_progress:
-                on_progress(i + 1, total)
-            continue
-        try:
-            content = file_path.read_text(errors="replace")
-        except OSError as e:
-            log.warning("Cannot read %s: %s", finding["file_path"], e)
-            continue
 
-        # Determine language from file extension
-        ext = file_path.suffix.lower()
-        language = LANGUAGE_MAP.get(ext, "unknown")
-
-        prompt = build_review_prompt(
-            finding["file_path"],
-            content,
-            language,
-            dict(finding),
-        )
-
-        log.info(
-            "Review %d/%d: %s line %s (%s)",
-            i + 1,
-            total,
-            finding["file_path"],
-            finding["line_number"],
-            finding["cwe_id"],
-        )
-
-        result = adapter.run(prompt)
-
-        if result.rate_limited:
-            backoff = min(max(backoff * 2, 30.0), max_backoff)
-            log.warning("Rate limited, backing off %.0fs", backoff)
-            time.sleep(backoff)
-            # Retry this finding
             result = adapter.run(prompt)
+
             if result.rate_limited:
-                log.error(
-                    "Still rate limited after backoff, skipping finding %d",
+                backoff = min(max(backoff * 2, 30.0), max_backoff)
+                log.warning("Rate limited, backing off %.0fs", backoff)
+                time.sleep(backoff)
+                # Retry this finding
+                result = adapter.run(prompt)
+                if result.rate_limited:
+                    log.error(
+                        "Still rate limited after backoff, skipping finding %d",
+                        finding["id"],
+                    )
+                    continue
+
+            backoff = 0.0
+
+            if result.error:
+                log.warning(
+                    "Review error for finding %d: %s",
+                    finding["id"],
+                    result.error,
+                )
+                continue
+
+            review = parse_review_result(result.raw_output)
+            # For Claude CLI, the raw_output is the JSON envelope;
+            # try parsing the result field
+            if review is None:
+                try:
+                    envelope = json.loads(result.raw_output)
+                    if isinstance(envelope, dict) and "result" in envelope:
+                        review = parse_review_result(
+                            str(envelope["result"]),
+                        )
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            if review is None:
+                log.warning(
+                    "Could not parse review response for finding %d",
                     finding["id"],
                 )
                 continue
 
-        backoff = 0.0
+            verdict = review.get("verdict", "needs_review")
+            if verdict not in (
+                "confirmed",
+                "false_positive",
+                "needs_review",
+            ):
+                verdict = "needs_review"
 
-        if result.error:
-            log.warning("Review error for finding %d: %s", finding["id"], result.error)
-            continue
+            reasoning = review.get("reasoning", "")
+            severity = review.get("severity", "")
+            suggested_fix = review.get("suggested_fix", "")
 
-        review = parse_review_result(result.raw_output)
-        # For Claude CLI, the raw_output is the JSON envelope; try parsing the result field
-        if review is None:
-            try:
-                envelope = json.loads(result.raw_output)
-                if isinstance(envelope, dict) and "result" in envelope:
-                    review = parse_review_result(str(envelope["result"]))
-            except (json.JSONDecodeError, TypeError):
-                pass
+            # Combine reasoning and severity into suggested_fix for storage
+            fix_text = ""
+            if severity:
+                fix_text += f"Severity: {severity}\n"
+            if reasoning:
+                fix_text += f"Analysis: {reasoning}\n"
+            if suggested_fix:
+                fix_text += f"Fix: {suggested_fix}"
 
-        if review is None:
-            log.warning(
-                "Could not parse review response for finding %d",
+            db.update_finding_review(
                 finding["id"],
+                verified_by_model=adapter.name,
+                verified_status=verdict,
+                suggested_fix=fix_text.strip() or None,
             )
-            continue
 
-        verdict = review.get("verdict", "needs_review")
-        if verdict not in ("confirmed", "false_positive", "needs_review"):
-            verdict = "needs_review"
+            if on_progress:
+                on_progress(i + 1, total)
 
-        reasoning = review.get("reasoning", "")
-        severity = review.get("severity", "")
-        suggested_fix = review.get("suggested_fix", "")
+            if delay > 0 and adapter.needs_pacing:
+                time.sleep(delay)
 
-        # Combine reasoning and severity into the suggested_fix field for storage
-        fix_text = ""
-        if severity:
-            fix_text += f"Severity: {severity}\n"
-        if reasoning:
-            fix_text += f"Analysis: {reasoning}\n"
-        if suggested_fix:
-            fix_text += f"Fix: {suggested_fix}"
-
-        db.update_finding_review(
-            finding["id"],
-            verified_by_model=adapter.name,
-            verified_status=verdict,
-            suggested_fix=fix_text.strip() or None,
-        )
-
-        if on_progress:
-            on_progress(i + 1, total)
-
-        if delay > 0 and adapter.needs_pacing:
-            time.sleep(delay)
+    except KeyboardInterrupt:
+        log.warning("Review interrupted by user")
+        raise
