@@ -8,7 +8,7 @@ from pathlib import Path
 from .agents import AgentAdapter, create_adapter
 from .cwe import CWE_OPEN, CWE_TOP_25, applicable_cwes, build_open_prompt, build_prompt
 from .db import Database
-from .inventory import SourceFile, discover_files
+from .inventory import LANGUAGE_MAP, SourceFile, discover_files
 
 log = logging.getLogger(__name__)
 
@@ -59,10 +59,17 @@ def create_scan(
     models: list[str],
     cwe_ids: list[str] | None = None,
     mode: str = "focused",
+    files: list[SourceFile] | None = None,
 ) -> tuple[int, list[SourceFile]]:
-    """Discover files, build matrix, create scan and jobs in DB."""
+    """Discover files, build matrix, create scan and jobs in DB.
+
+    If ``files`` is provided, it is used as-is (e.g. when the user named
+    individual files on the command line); otherwise the target directory
+    is walked with ``discover_files``.
+    """
     target = str(Path(target_dir).resolve())
-    files = discover_files(target)
+    if files is None:
+        files = discover_files(target)
 
     if not files:
         raise ValueError(f"No source files found in {target}")
@@ -99,6 +106,15 @@ def _get_adapter(model_spec: str, models: list[str]) -> AgentAdapter | None:
     return _adapter_cache.get(model_spec)
 
 
+def _release_job(db: Database, job_id: int):
+    """Put a running job back to pending so it can be retried on resume."""
+    db.conn.execute(
+        "UPDATE jobs SET status = 'pending', started_at = NULL WHERE id = ?",
+        (job_id,),
+    )
+    db.conn.commit()
+
+
 def run_scan(
     db: Database,
     scan_id: int,
@@ -131,100 +147,131 @@ def run_scan(
         a = create_adapter(spec)
         adapters[a.name] = a
 
-    # Build a file info lookup (need language for prompts)
-    files = discover_files(target_dir)
-    file_info = {f.path: f for f in files}
+    # Derive language for each job's file from its extension. We don't
+    # re-run discover_files here because the scan may have been created
+    # from an explicit file list that wouldn't be re-discovered.
+    def language_for(file_path: str) -> str | None:
+        return LANGUAGE_MAP.get(Path(file_path).suffix.lower())
 
     backoff = 0.0
 
-    while True:
-        job = db.next_pending_job(scan_id)
-        if job is None:
-            break
+    current_job_id: int | None = None
 
-        if not db.claim_job(job["id"]):
-            continue  # Someone else claimed it (future: multi-worker)
+    try:
+        while True:
+            job = db.next_pending_job(scan_id)
+            if job is None:
+                break
 
-        model_id = job["model_id"]
-        adapter = adapters.get(model_id)
-        if adapter is None:
-            db.fail_job(job["id"], f"No adapter for model '{model_id}'")
-            continue
+            if not db.claim_job(job["id"]):
+                continue  # Someone else claimed it (future: multi-worker)
 
-        cwe = cwe_lookup.get(job["cwe_id"])
-        if cwe is None:
-            db.fail_job(job["id"], f"Unknown CWE '{job['cwe_id']}'")
-            continue
+            current_job_id = job["id"]
+            model_id = job["model_id"]
+            adapter = adapters.get(model_id)
+            if adapter is None:
+                db.fail_job(job["id"], f"No adapter for model '{model_id}'")
+                current_job_id = None
+                continue
 
-        finfo = file_info.get(job["file_path"])
-        if finfo is None:
-            db.fail_job(job["id"], f"File not in inventory: {job['file_path']}")
-            continue
+            cwe = cwe_lookup.get(job["cwe_id"])
+            if cwe is None:
+                db.fail_job(job["id"], f"Unknown CWE '{job['cwe_id']}'")
+                current_job_id = None
+                continue
 
-        # Read the file
-        file_path = target / job["file_path"]
-        try:
-            content = file_path.read_text(errors="replace")
-        except OSError as e:
-            db.fail_job(job["id"], f"Cannot read file: {e}")
-            continue
-
-        if job["cwe_id"] == "OPEN":
-            prompt = build_open_prompt(job["file_path"], content, finfo.language)
-        else:
-            prompt = build_prompt(job["file_path"], content, finfo.language, cwe)
-
-        log.info(
-            "Job %d: %s x %s x %s",
-            job["id"],
-            job["file_path"],
-            job["cwe_id"],
-            model_id,
-        )
-
-        result = adapter.run(prompt)
-
-        if result.rate_limited:
-            # Put the job back to pending and back off
-            db.conn.execute(
-                "UPDATE jobs SET status = 'pending', started_at = NULL WHERE id = ?",
-                (job["id"],),
-            )
-            db.conn.commit()
-            backoff = min(max(backoff * 2, 30.0), max_backoff)
-            log.warning("Rate limited by %s, backing off %.0fs", model_id, backoff)
-            time.sleep(backoff)
-            continue
-
-        # Reset backoff on success
-        backoff = 0.0
-
-        if result.error:
-            db.fail_job(job["id"], result.error)
-        else:
-            db.complete_job(
-                job["id"],
-                tokens_in=result.tokens_in,
-                tokens_out=result.tokens_out,
-                cost_usd=result.cost_usd,
-            )
-            for f in result.findings:
-                explanation = f.explanation
-                # In open mode, prepend the model-identified CWE to the explanation
-                if job["cwe_id"] == "OPEN" and f.cwe_id:
-                    explanation = f"[{f.cwe_id}] {explanation}"
-                db.add_finding(
+            language = language_for(job["file_path"])
+            if language is None:
+                db.fail_job(
                     job["id"],
-                    line_number=f.line_number,
-                    code_snippet=f.code_snippet,
-                    explanation=explanation,
-                    confidence=f.confidence,
+                    f"Unknown file type: {job['file_path']}",
+                )
+                current_job_id = None
+                continue
+
+            # Read the file
+            file_path = target / job["file_path"]
+            try:
+                content = file_path.read_text(errors="replace")
+            except OSError as e:
+                db.fail_job(job["id"], f"Cannot read file: {e}")
+                current_job_id = None
+                continue
+
+            if job["cwe_id"] == "OPEN":
+                prompt = build_open_prompt(
+                    job["file_path"],
+                    content,
+                    language,
+                )
+            else:
+                prompt = build_prompt(
+                    job["file_path"],
+                    content,
+                    language,
+                    cwe,
                 )
 
-        if on_progress:
-            on_progress(db.job_counts(scan_id))
+            log.info(
+                "Job %d: %s x %s x %s",
+                job["id"],
+                job["file_path"],
+                job["cwe_id"],
+                model_id,
+            )
 
-        if delay > 0 and adapter.needs_pacing:
-            time.sleep(delay)
+            result = adapter.run(prompt)
+
+            if result.rate_limited:
+                # Put the job back to pending and back off
+                _release_job(db, job["id"])
+                current_job_id = None
+                backoff = min(max(backoff * 2, 30.0), max_backoff)
+                log.warning(
+                    "Rate limited by %s, backing off %.0fs",
+                    model_id,
+                    backoff,
+                )
+                time.sleep(backoff)
+                continue
+
+            # Reset backoff on success
+            backoff = 0.0
+
+            if result.error:
+                db.fail_job(job["id"], result.error)
+            else:
+                db.complete_job(
+                    job["id"],
+                    tokens_in=result.tokens_in,
+                    tokens_out=result.tokens_out,
+                    cost_usd=result.cost_usd,
+                )
+                for f in result.findings:
+                    explanation = f.explanation
+                    # In open mode, prepend the model-identified CWE
+                    if job["cwe_id"] == "OPEN" and f.cwe_id:
+                        explanation = f"[{f.cwe_id}] {explanation}"
+                    db.add_finding(
+                        job["id"],
+                        line_number=f.line_number,
+                        code_snippet=f.code_snippet,
+                        explanation=explanation,
+                        confidence=f.confidence,
+                    )
+
+            current_job_id = None
+
+            if on_progress:
+                on_progress(db.job_counts(scan_id))
+
+            if delay > 0 and adapter.needs_pacing:
+                time.sleep(delay)
+
+    except KeyboardInterrupt:
+        log.warning("Scan interrupted by user")
+        if current_job_id is not None:
+            _release_job(db, current_job_id)
+        raise
 
     db.complete_scan(scan_id)

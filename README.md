@@ -112,10 +112,27 @@ nelson scan /path/to/project -m "lmstudio:google/gemma-4-26b-a4b"
 nelson scan --mode open -m claude:sonnet /path/to/project
 ```
 
+You can also point `nelson scan` at one or more individual files instead of a whole directory. This is useful for spot-checking a single file, or for scanning whatever a shell glob expands to. When you name files explicitly, the usual path-based filters (test/doc patterns, generated-file detection) are skipped — Nelson trusts you to know what you want. The same applies to `nelson inventory` and `nelson haha`.
+
+```bash
+# Scan a single file
+nelson scan path/to/suspicious.py
+
+# Scan everything a glob expands to (shell does the expansion)
+nelson scan src/api/*.py
+
+# Mix and match — multiple explicit files are fine
+nelson scan src/auth.py src/db.py src/handlers/*.go
+
+# Same shape works for inventory and haha
+nelson inventory src/api/*.py
+nelson haha src/auth.py src/db.py
+```
+
 Scans are resumable. If interrupted, just resume by scan ID:
 
 ```bash
-nelson scan --resume 3 /path/to/project
+nelson scan --resume 3
 ```
 
 ### Reviewing
@@ -182,6 +199,7 @@ The detailed report shows every finding grouped by file, with confidence badges,
 ```bash
 # List source files that would be scanned, with security tooling assessment
 nelson inventory /path/to/project
+# (also accepts individual files or globs, just like `nelson scan`)
 
 # List all scans
 nelson list
@@ -319,6 +337,8 @@ Nelson automatically excludes files that are unlikely to contain production vuln
 - **Non-source files**: only scans files with recognized extensions (`.py`, `.go`, `.ts`, `.js`, `.c`, `.cpp`, `.rs`, `.java`, `.rb`, `.php`, `.pl`, `.pm`, `.sh`)
 
 Use `nelson inventory /path/to/project` to see exactly which files would be scanned.
+
+These filters only apply when scanning a directory. If you name files explicitly on the command line (e.g. `nelson scan src/foo.py src/bar.py`), only the extension and size checks are applied — test/doc/generated-file detection is skipped, on the assumption that you meant what you typed.
 
 ## Security tooling assessment
 

@@ -9,7 +9,7 @@ import click
 
 from .db import Database
 from .html_report import generate_scan_report, generate_summary_report
-from .inventory import discover_files
+from .inventory import discover_files, files_from_paths
 from .review import run_review
 from .scanner import create_scan, run_scan
 from .tooling import assess_tooling, format_tooling_report
@@ -17,6 +17,31 @@ from .tooling import assess_tooling, format_tooling_report
 
 def _db_path() -> Path:
     return Path("nelson.db")
+
+
+def _resolve_paths(paths: tuple[str, ...]):
+    """Resolve a variadic PATHS argument into (target_dir, files).
+
+    A single directory is walked with the usual filters; one or more
+    files (e.g. from a shell glob) go through ``files_from_paths``.
+    Exits with an error message if anything is wrong.
+    """
+    if not paths:
+        click.echo("Error: provide one or more files or a directory.", err=True)
+        sys.exit(1)
+
+    if len(paths) == 1 and Path(paths[0]).is_dir():
+        target_dir = paths[0]
+        files = discover_files(target_dir)
+    else:
+        try:
+            files, root = files_from_paths(list(paths))
+        except ValueError as e:
+            click.echo(f"Error: {e}", err=True)
+            sys.exit(1)
+        target_dir = str(root)
+
+    return target_dir, files
 
 
 @click.group()
@@ -34,10 +59,14 @@ def main(verbose: bool):
 
 
 @main.command()
-@click.argument("target_dir", type=click.Path(exists=True, file_okay=False))
-def inventory(target_dir: str):
-    """List source files that would be scanned in TARGET_DIR."""
-    files = discover_files(target_dir)
+@click.argument("paths", type=click.Path(exists=True), nargs=-1)
+def inventory(paths: tuple[str, ...]):
+    """List source files that would be scanned.
+
+    PATHS can be a single directory, a single file, or multiple files
+    (e.g. from a shell glob like ``src/*.py``).
+    """
+    target_dir, files = _resolve_paths(paths)
     if not files:
         click.echo("No source files found.")
         return
@@ -65,7 +94,7 @@ def inventory(target_dir: str):
 
 
 @main.command()
-@click.argument("target_dir", type=click.Path(exists=True, file_okay=False))
+@click.argument("paths", type=click.Path(exists=True), nargs=-1)
 @click.option(
     "-m",
     "--model",
@@ -106,7 +135,7 @@ def inventory(target_dir: str):
     help="Path to SQLite database. Default: nelson.db",
 )
 def scan(
-    target_dir: str,
+    paths: tuple[str, ...],
     models: tuple[str],
     cwe_ids: tuple[str],
     delay: float,
@@ -114,7 +143,12 @@ def scan(
     mode: str,
     db_path: str,
 ):
-    """Scan TARGET_DIR for vulnerabilities."""
+    """Scan PATHS for vulnerabilities.
+
+    PATHS can be a single directory (the default — every source file
+    under it is scanned, with the usual filters), a single file, or
+    multiple files (e.g. from a shell glob like ``src/*.py``).
+    """
     db = Database(db_path)
     cwe_list = list(cwe_ids) if cwe_ids else None
 
@@ -130,11 +164,19 @@ def scan(
         mode = config.get("mode", mode)
         click.echo(f"Resuming scan {scan_id} ({mode} mode) on {target_dir}")
     else:
+        if not paths:
+            click.echo(
+                "Error: provide one or more files/directories, or --resume.",
+                err=True,
+            )
+            sys.exit(1)
+
         if mode == "open" and cwe_ids:
             click.echo("Warning: --cwe flags are ignored in open mode.", err=True)
             cwe_list = None
 
-        files = discover_files(target_dir)
+        target_dir, files = _resolve_paths(paths)
+
         if not files:
             click.echo("No source files found.", err=True)
             sys.exit(1)
@@ -145,6 +187,7 @@ def scan(
             list(models),
             cwe_ids=cwe_list,
             mode=mode,
+            files=files,
         )
         counts = db.job_counts(scan_id)
         total = sum(counts.values())
@@ -160,7 +203,7 @@ def scan(
             err=True,
         )
 
-    click.echo(f"Starting scan with delay={delay}s between jobs...")
+    click.echo("Starting scan...")
     run_scan(
         db,
         scan_id,
@@ -520,7 +563,7 @@ def html_summary(db_path: str, output_path: str | None):
 
 
 @main.command()
-@click.argument("target_dir", type=click.Path(exists=True, file_okay=False))
+@click.argument("paths", type=click.Path(exists=True), nargs=-1)
 @click.option(
     "--focused-model",
     default="claude:haiku",
@@ -549,7 +592,7 @@ def html_summary(db_path: str, output_path: str | None):
     help="Path to SQLite database. Default: nelson.db",
 )
 def haha(
-    target_dir: str,
+    paths: tuple[str, ...],
     focused_model: str,
     open_model: str,
     review_model: str,
@@ -558,12 +601,15 @@ def haha(
 ):
     """Run the full pipeline: focused scan, open scan, review, report.
 
+    PATHS can be a single directory, a single file, or multiple files
+    (e.g. from a shell glob like ``src/*.py``).
+
     This runs both scan modes, reviews all findings, and prints a
     final report. It's convenient but token-intensive on large projects.
     """
     db = Database(db_path)
 
-    files = discover_files(target_dir)
+    target_dir, files = _resolve_paths(paths)
     if not files:
         click.echo("No source files found.", err=True)
         sys.exit(1)
@@ -577,6 +623,7 @@ def haha(
         target_dir,
         [focused_model],
         mode="focused",
+        files=files,
     )
     focused_counts = db.job_counts(focused_id)
     focused_total = sum(focused_counts.values())
@@ -608,6 +655,7 @@ def haha(
         target_dir,
         [open_model],
         mode="open",
+        files=files,
     )
     open_counts = db.job_counts(open_id)
     open_total = sum(open_counts.values())
