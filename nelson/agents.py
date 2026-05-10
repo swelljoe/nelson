@@ -110,6 +110,7 @@ def _run_cli(
     watchdog_stop = threading.Event()
     watchdog: threading.Thread | None = None
     if cancel_event is not None:
+
         def _watch():
             while not watchdog_stop.is_set():
                 if cancel_event.is_set():

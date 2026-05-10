@@ -213,9 +213,7 @@ def scan(
         )
 
     if parallel and len(models) > 1:
-        click.echo(
-            f"Starting scan ({len(models)} models in parallel)..."
-        )
+        click.echo(f"Starting scan ({len(models)} models in parallel)...")
     else:
         click.echo("Starting scan...")
     run_scan(

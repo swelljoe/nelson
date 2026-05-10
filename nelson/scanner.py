@@ -239,7 +239,7 @@ def _model_worker(
             progress_event.set()
 
             if delay > 0 and adapter.needs_pacing and cancel_event.wait(delay):
-                    break
+                break
     finally:
         if current_job_id is not None:
             _release_job(db, current_job_id)
@@ -352,9 +352,7 @@ def run_scan(
         log.error("One or more workers failed:")
         for spec, exc in worker_exceptions.items():
             log.error("  %s: %s", spec, exc)
-        raise RuntimeError(
-            f"Worker failures: {', '.join(worker_exceptions.keys())}"
-        )
+        raise RuntimeError(f"Worker failures: {', '.join(worker_exceptions.keys())}")
 
     # Verify all jobs reached a terminal state before marking scan complete
     job_counts = db.job_counts(scan_id)
