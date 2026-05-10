@@ -604,11 +604,13 @@ def _resolve_compare_scans(
         if not ids:
             click.echo("Error: --scans requires at least one scan id.", err=True)
             sys.exit(1)
-        rows = [db.get_scan(i) for i in ids]
-        for i, r in zip(ids, rows, strict=True):
+        rows = []
+        for i in ids:
+            r = db.get_scan(i)
             if r is None:
                 click.echo(f"Scan {i} not found.", err=True)
                 sys.exit(1)
+            rows.append(r)
         targets = {r["target_dir"] for r in rows}
         if len(targets) > 1:
             click.echo(
