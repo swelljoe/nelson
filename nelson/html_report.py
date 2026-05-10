@@ -588,14 +588,12 @@ def generate_compare_report(scan_ids, models, clusters) -> str:
             )
 
     strong = sum(
-        v for k, v in agreement_hist.items() if n_models >= 2 and k >= n_models
+        1 for c in clusters if c.eligible >= 2 and c.agreement == c.eligible
     )
     partial = sum(
-        v
-        for k, v in agreement_hist.items()
-        if k >= 2 and not (n_models >= 2 and k >= n_models)
+        1 for c in clusters if c.agreement >= 2 and c.agreement < c.eligible
     )
-    singletons = agreement_hist.get(1, 0)
+    singletons = sum(1 for c in clusters if c.agreement == 1)
 
     parts: list[str] = []
     parts.append(f"""\
