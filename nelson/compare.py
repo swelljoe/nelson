@@ -224,22 +224,26 @@ def render_text(
     out.append("")
 
     # Agreement histogram
-    by_agreement: dict[int, int] = defaultdict(int)
+    by_agreement_eligible: dict[tuple[int, int], int] = defaultdict(int)
     for c in clusters:
-        by_agreement[c.agreement] += 1
+        by_agreement_eligible[(c.agreement, c.eligible)] += 1
     out.append("Agreement summary:")
-    for k in sorted(by_agreement.keys(), reverse=True):
-        n = by_agreement[k]
+    for agreement, eligible in sorted(
+        by_agreement_eligible.keys(), reverse=True
+    ):
+        n = by_agreement_eligible[(agreement, eligible)]
         marker = (
             click.style("strong signal", fg="red", bold=True)
-            if k >= max(2, len(models))
+            if eligible >= 2 and agreement == eligible
             else (
                 click.style("partial", fg="yellow")
-                if k >= 2
+                if agreement >= 2
                 else click.style("singleton", fg="white")
             )
         )
-        out.append(f"  {k}/{len(models)} models  {n:>4} clusters  ({marker})")
+        out.append(
+            f"  {agreement}/{eligible} eligible models  {n:>4} clusters  ({marker})"
+        )
     out.append("")
 
     # Per-model totals (flagged in any cluster + only-this-model totals)
