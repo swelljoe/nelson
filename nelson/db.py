@@ -246,6 +246,51 @@ class Database:
             (scan_id,),
         ).fetchall()
 
+    def findings_for_scans(self, scan_ids: list[int]) -> list[sqlite3.Row]:
+        """Like findings_for_scan but across multiple scans."""
+        if not scan_ids:
+            return []
+        # ph is just `?, ?, ?` placeholders; values are bound below. sqlite3
+        # has no native list binding for IN clauses.
+        ph = ",".join("?" * len(scan_ids))
+        return self.conn.execute(
+            f"""SELECT f.*, j.file_path, j.cwe_id, j.model_id, j.scan_id
+               FROM findings f
+               JOIN jobs j ON f.job_id = j.id
+               WHERE j.scan_id IN ({ph})
+               ORDER BY j.file_path, f.line_number""",  # noqa: S608
+            scan_ids,
+        ).fetchall()
+
+    def coverage_for_scans(
+        self, scan_ids: list[int]
+    ) -> tuple[dict[tuple[str, str], set[str]], dict[str, set[str]]]:
+        """Distinct models that ran a *completed* job for each (file, cwe).
+
+        Returns (focused, open) where focused maps (file, cwe) -> {model_id}
+        and open maps file -> {model_id} for OPEN-mode jobs. A model that
+        errored out on a job isn't counted as having 'voted no'.
+        """
+        if not scan_ids:
+            return {}, {}
+        ph = ",".join("?" * len(scan_ids))
+        rows = self.conn.execute(
+            f"""SELECT DISTINCT file_path, cwe_id, model_id
+               FROM jobs
+               WHERE scan_id IN ({ph}) AND status = 'complete'""",  # noqa: S608
+            scan_ids,
+        ).fetchall()
+        focused: dict[tuple[str, str], set[str]] = {}
+        open_: dict[str, set[str]] = {}
+        for r in rows:
+            if r["cwe_id"] == "OPEN":
+                open_.setdefault(r["file_path"], set()).add(r["model_id"])
+            else:
+                focused.setdefault(
+                    (r["file_path"], r["cwe_id"]), set()
+                ).add(r["model_id"])
+        return focused, open_
+
     def findings_summary(self, scan_id: int) -> list[sqlite3.Row]:
         return self.conn.execute(
             """SELECT j.cwe_id, j.model_id, f.confidence,
