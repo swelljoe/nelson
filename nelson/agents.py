@@ -2,8 +2,8 @@
 
 import json
 import logging
-import signal
 import subprocess
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -88,12 +88,15 @@ def _run_cli(
     cmd: list[str],
     timeout: int,
     input_text: str | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a CLI subprocess that can be interrupted with Ctrl-C.
+    """Run a CLI subprocess that can be cancelled via a threading.Event.
 
-    subprocess.run() defers KeyboardInterrupt until the child exits,
-    making Ctrl-C appear unresponsive. This uses Popen so we can
-    terminate the child immediately on SIGINT.
+    subprocess.run() defers cancellation until the child exits, making
+    Ctrl-C appear unresponsive. We use Popen plus a watchdog thread that
+    terminates the child the moment ``cancel_event`` is set. Callers in
+    worker threads must use this rather than installing a signal handler,
+    since Python only allows signal.signal() on the main thread.
     """
     proc = subprocess.Popen(
         cmd,
@@ -103,16 +106,19 @@ def _run_cli(
         text=True,
     )
 
-    interrupted = False
-    original_handler = signal.getsignal(signal.SIGINT)
+    watchdog_stop = threading.Event()
+    watchdog: threading.Thread | None = None
+    if cancel_event is not None:
+        def _watch():
+            while not watchdog_stop.is_set():
+                if cancel_event.is_set():
+                    proc.terminate()
+                    return
+                watchdog_stop.wait(0.2)
 
-    def _interrupt(signum, frame):
-        nonlocal interrupted
-        interrupted = True
-        proc.terminate()
-        signal.signal(signal.SIGINT, original_handler)
+        watchdog = threading.Thread(target=_watch, daemon=True)
+        watchdog.start()
 
-    signal.signal(signal.SIGINT, _interrupt)
     try:
         stdout, stderr = proc.communicate(
             input=input_text,
@@ -123,10 +129,11 @@ def _run_cli(
         proc.wait()
         raise
     finally:
-        signal.signal(signal.SIGINT, original_handler)
+        watchdog_stop.set()
+        if watchdog is not None:
+            watchdog.join(timeout=1.0)
 
-    # If the SIGINT handler fired, raise regardless of returncode
-    if interrupted:
+    if cancel_event is not None and cancel_event.is_set():
         raise KeyboardInterrupt
 
     return subprocess.CompletedProcess(
@@ -144,7 +151,9 @@ class AgentAdapter(ABC):
     needs_pacing: bool = False  # CLI tools with rolling subscription limits need delays
 
     @abstractmethod
-    def run(self, prompt: str) -> AgentResult: ...
+    def run(
+        self, prompt: str, cancel_event: threading.Event | None = None
+    ) -> AgentResult: ...
 
 
 class ClaudeCLIAdapter(AgentAdapter):
@@ -156,7 +165,9 @@ class ClaudeCLIAdapter(AgentAdapter):
         self.needs_pacing = True
         self.timeout = timeout
 
-    def run(self, prompt: str) -> AgentResult:
+    def run(
+        self, prompt: str, cancel_event: threading.Event | None = None
+    ) -> AgentResult:
         cmd = [
             "claude",
             "-p",
@@ -168,7 +179,9 @@ class ClaudeCLIAdapter(AgentAdapter):
         ]
 
         try:
-            result = _run_cli(cmd, self.timeout, input_text=prompt)
+            result = _run_cli(
+                cmd, self.timeout, input_text=prompt, cancel_event=cancel_event
+            )
         except subprocess.TimeoutExpired:
             return AgentResult(findings=[], raw_output="", error="timeout")
 
@@ -228,13 +241,15 @@ class GeminiCLIAdapter(AgentAdapter):
         self.needs_pacing = True
         self.timeout = timeout
 
-    def run(self, prompt: str) -> AgentResult:
+    def run(
+        self, prompt: str, cancel_event: threading.Event | None = None
+    ) -> AgentResult:
         cmd = ["gemini", "-p", prompt, "--output-format", "json"]
         if self.model:
             cmd.extend(["-m", self.model])
 
         try:
-            result = _run_cli(cmd, self.timeout)
+            result = _run_cli(cmd, self.timeout, cancel_event=cancel_event)
         except subprocess.TimeoutExpired:
             return AgentResult(findings=[], raw_output="", error="timeout")
 
@@ -305,13 +320,18 @@ class OpenAIAPIAdapter(AgentAdapter):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def run(self, prompt: str) -> AgentResult:
+    def run(
+        self, prompt: str, cancel_event: threading.Event | None = None
+    ) -> AgentResult:
         url = f"{self.base_url}/chat/completions"
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.1,  # Low temp for consistent analysis
         }
+
+        if cancel_event is not None and cancel_event.is_set():
+            raise KeyboardInterrupt
 
         try:
             resp = httpx.post(url, json=payload, timeout=self.timeout)
