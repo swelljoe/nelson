@@ -7,8 +7,13 @@ from pathlib import Path
 
 import click
 
+from . import compare as compare_mod
 from .db import Database
-from .html_report import generate_scan_report, generate_summary_report
+from .html_report import (
+    generate_compare_report,
+    generate_scan_report,
+    generate_summary_report,
+)
 from .inventory import discover_files, files_from_paths
 from .review import run_review
 from .scanner import create_scan, run_scan
@@ -572,6 +577,198 @@ def html_summary(db_path: str, output_path: str | None):
     db = Database(db_path)
     html = generate_summary_report(db)
     out = Path(output_path or "nelson-summary.html")
+    out.write_text(html)
+    click.echo(f"Wrote {out} ({len(html):,} bytes)")
+
+
+def _resolve_compare_scans(
+    db: Database,
+    scan_id: int | None,
+    scans: str | None,
+) -> list[int]:
+    """Validate and return the scan_ids to compare.
+
+    Cross-scan compare requires the scans share target_dir + commit_sha
+    (within reason — a missing commit_sha doesn't disqualify, but two
+    different SHAs do).
+    """
+    if scans:
+        try:
+            ids = [int(s.strip()) for s in scans.split(",") if s.strip()]
+        except ValueError:
+            click.echo(
+                "Error: --scans must be a comma-separated list of integers.",
+                err=True,
+            )
+            sys.exit(1)
+        if not ids:
+            click.echo("Error: --scans requires at least one scan id.", err=True)
+            sys.exit(1)
+        rows = []
+        for i in ids:
+            r = db.get_scan(i)
+            if r is None:
+                click.echo(f"Scan {i} not found.", err=True)
+                sys.exit(1)
+            rows.append(r)
+        targets = {r["target_dir"] for r in rows}
+        if len(targets) > 1:
+            click.echo(
+                "Error: --scans must reference scans of the same target_dir."
+                f" Got: {sorted(targets)}",
+                err=True,
+            )
+            sys.exit(1)
+        commits = {r["commit_sha"] for r in rows if r["commit_sha"]}
+        if len(commits) > 1:
+            click.echo(
+                "Warning: scans were taken at different commits"
+                f" ({sorted(commits)}); line numbers may not align.",
+                err=True,
+            )
+        return ids
+
+    if scan_id is None:
+        s = db.latest_scan()
+        if s is None:
+            click.echo("No scans found.", err=True)
+            sys.exit(1)
+        scan_id = s["id"]
+    elif db.get_scan(scan_id) is None:
+        click.echo(f"Scan {scan_id} not found.", err=True)
+        sys.exit(1)
+    return [scan_id]
+
+
+def _build_comparison(
+    db: Database,
+    scan_ids: list[int],
+    line_tolerance: int,
+    cwe: str | None,
+    confidence: str | None,
+    min_agreement: int | None,
+):
+    findings = db.findings_for_scans(scan_ids)
+    focused_cov, open_cov = db.coverage_for_scans(scan_ids)
+    clusters = compare_mod.cluster_findings(findings, line_tolerance=line_tolerance)
+    compare_mod.annotate_clusters(clusters, focused_cov, open_cov)
+    clusters = compare_mod.filter_clusters(
+        clusters, cwe=cwe, confidence=confidence, min_agreement=min_agreement
+    )
+    clusters = compare_mod.sort_clusters(clusters)
+    models = compare_mod.all_models(focused_cov, open_cov)
+    return clusters, models
+
+
+@main.command()
+@click.argument("scan_id", type=int, required=False)
+@click.option(
+    "--scans",
+    default=None,
+    help=(
+        "Comma-separated scan ids to compare across (e.g. --scans 3,5,7)."
+        " Scans must share target_dir."
+    ),
+)
+@click.option(
+    "--line-tolerance",
+    default=2,
+    type=int,
+    help="Line-number window for treating findings as the same issue. Default: 2",
+)
+@click.option(
+    "--cwe",
+    "cwe_filter",
+    default=None,
+    help="Restrict to a single CWE (e.g. --cwe CWE-89).",
+)
+@click.option(
+    "--confidence",
+    type=click.Choice(["high", "medium", "low"]),
+    default=None,
+    help="Restrict to clusters where at least one finding has this confidence.",
+)
+@click.option(
+    "--min-agreement",
+    default=None,
+    type=int,
+    help="Only show clusters where at least N models agreed.",
+)
+@click.option("--json-output", "as_json", is_flag=True, help="Output as JSON.")
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+def compare(
+    scan_id: int | None,
+    scans: str | None,
+    line_tolerance: int,
+    cwe_filter: str | None,
+    confidence: str | None,
+    min_agreement: int | None,
+    as_json: bool,
+    db_path: str,
+):
+    """Compare findings across models to see where they agree.
+
+    With a single SCAN_ID, compares the models used in that one scan.
+    With --scans 3,5,7, compares across separate scans on the same target.
+    """
+    db = Database(db_path)
+    scan_ids = _resolve_compare_scans(db, scan_id, scans)
+    clusters, models = _build_comparison(
+        db, scan_ids, line_tolerance, cwe_filter, confidence, min_agreement
+    )
+    if as_json:
+        click.echo(compare_mod.to_json(clusters, models, scan_ids))
+        return
+    if not clusters:
+        click.echo("No findings match the filters.")
+        return
+    click.echo(compare_mod.render_text(clusters, models, scan_ids))
+
+
+@main.command(name="html-compare")
+@click.argument("scan_id", type=int, required=False)
+@click.option(
+    "--scans",
+    default=None,
+    help="Comma-separated scan ids (must share target_dir).",
+)
+@click.option("--line-tolerance", default=2, type=int)
+@click.option("--cwe", "cwe_filter", default=None)
+@click.option(
+    "--confidence", type=click.Choice(["high", "medium", "low"]), default=None
+)
+@click.option("--min-agreement", default=None, type=int)
+@click.option(
+    "-o",
+    "--output",
+    "output_path",
+    default=None,
+    help="Output file path. Default: nelson-compare-<id>.html",
+)
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+def html_compare(
+    scan_id: int | None,
+    scans: str | None,
+    line_tolerance: int,
+    cwe_filter: str | None,
+    confidence: str | None,
+    min_agreement: int | None,
+    output_path: str | None,
+    db_path: str,
+):
+    """Generate an HTML model-comparison report."""
+    db = Database(db_path)
+    scan_ids = _resolve_compare_scans(db, scan_id, scans)
+    clusters, models = _build_comparison(
+        db, scan_ids, line_tolerance, cwe_filter, confidence, min_agreement
+    )
+    html = generate_compare_report(scan_ids, models, clusters)
+    if output_path:
+        out = Path(output_path)
+    elif len(scan_ids) == 1:
+        out = Path(f"nelson-compare-{scan_ids[0]}.html")
+    else:
+        out = Path("nelson-compare-" + "-".join(str(i) for i in scan_ids) + ".html")
     out.write_text(html)
     click.echo(f"Wrote {out} ({len(html):,} bytes)")
 

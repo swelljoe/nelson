@@ -510,3 +510,182 @@ def _needs_cell(n: int) -> str:
     if n > 0:
         return f'<span style="color: var(--yellow)">{n}</span>'
     return str(n)
+
+
+_COMPARE_EXTRA_CSS = """\
+.cluster {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.75rem 1rem; margin: 0.75rem 0;
+  border-left: 4px solid var(--text-muted);
+}
+.cluster-strong { border-left-color: var(--red); }
+.cluster-partial { border-left-color: var(--yellow); }
+.cluster-singleton { border-left-color: var(--text-muted); }
+.cluster-header {
+  display: flex; gap: 0.75rem; align-items: center;
+  flex-wrap: wrap; margin-bottom: 0.5rem;
+}
+.cluster-loc {
+  font-family: monospace; font-size: 0.95rem; color: var(--cyan);
+}
+.agreement-pill {
+  display: inline-block; padding: 0.15rem 0.55rem;
+  border-radius: 999px; font-weight: 700; font-size: 0.85rem;
+  background: var(--surface2); color: var(--blue);
+}
+.agreement-strong { background: rgba(233, 69, 96, 0.2); color: var(--red); }
+.agreement-partial { background: rgba(240, 192, 64, 0.2); color: var(--yellow); }
+.flag-row {
+  display: grid;
+  grid-template-columns: 1.2rem 14rem 4rem auto auto;
+  gap: 0.5rem; padding: 0.25rem 0;
+  align-items: baseline; font-size: 0.9rem;
+}
+.flag-row + .flag-row { border-top: 1px dashed var(--border); }
+.flag-row .marker { font-weight: 700; }
+.flag-row .marker.flagged { color: var(--green); }
+.flag-row .marker.missed { color: var(--red); }
+.flag-row .model { font-family: monospace; color: var(--cyan); }
+.flag-row .line { color: var(--text-muted); font-family: monospace; }
+.flag-row .expl { grid-column: 2 / -1; color: var(--text-muted); font-size: 0.85rem; padding-left: 0.5rem; }
+"""
+
+
+def _agreement_class(agreement: int, eligible: int) -> str:
+    if eligible >= 2 and agreement == eligible:
+        return "strong"
+    if agreement >= 2:
+        return "partial"
+    return "singleton"
+
+
+def generate_compare_report(scan_ids, models, clusters) -> str:
+    """Generate an HTML model-comparison report.
+
+    Args:
+        scan_ids: list[int] of scans being compared
+        models: sorted list of distinct model_ids that voted
+        clusters: list[compare.Cluster] already filtered/sorted
+    """
+    n_models = len(models)
+    label = (
+        f"Scan {scan_ids[0]}"
+        if len(scan_ids) == 1
+        else f"Scans {', '.join(str(i) for i in scan_ids)}"
+    )
+
+    # Aggregates
+    agreement_hist: dict[int, int] = {}
+    flagged_by_model: dict[str, int] = {m: 0 for m in models}
+    only_one_by_model: dict[str, int] = {m: 0 for m in models}
+    for c in clusters:
+        agreement_hist[c.agreement] = agreement_hist.get(c.agreement, 0) + 1
+        for m in c.models_flagged:
+            flagged_by_model[m] = flagged_by_model.get(m, 0) + 1
+        if c.agreement == 1 and c.models_flagged:
+            only_one_by_model[c.models_flagged[0]] = (
+                only_one_by_model.get(c.models_flagged[0], 0) + 1
+            )
+
+    strong = sum(1 for c in clusters if c.eligible >= 2 and c.agreement == c.eligible)
+    partial = sum(1 for c in clusters if c.agreement >= 2 and c.agreement < c.eligible)
+    singletons = sum(1 for c in clusters if c.agreement == 1)
+
+    parts: list[str] = []
+    parts.append(f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nelson Model Comparison — {escape(label)}</title>
+<style>{_CSS}{_COMPARE_EXTRA_CSS}</style>
+</head>
+<body>
+<h1>Model Comparison</h1>
+<p class="subtitle">{escape(label)} — {n_models} models — {len(clusters)} clusters</p>
+""")
+
+    parts.append('<div class="stats-grid">')
+    parts.append(_stat_card(str(strong), "All models agreed", "var(--red)"))
+    parts.append(_stat_card(str(partial), "Partial agreement", "var(--yellow)"))
+    parts.append(_stat_card(str(singletons), "Only one model", "var(--text-muted)"))
+    parts.append(_stat_card(str(len(clusters)), "Total clusters", "var(--blue)"))
+    parts.append("</div>")
+
+    # Per-model totals
+    parts.append("<h2>Per-model totals</h2>")
+    parts.append("<table>")
+    parts.append(
+        "<tr><th>Model</th><th>Clusters flagged</th><th>Flagged alone</th></tr>"
+    )
+    for m in models:
+        parts.append(
+            f"<tr><td>{escape(m)}</td>"
+            f"<td>{flagged_by_model.get(m, 0)}</td>"
+            f"<td>{_needs_cell(only_one_by_model.get(m, 0))}</td></tr>"
+        )
+    parts.append("</table>")
+
+    # Clusters
+    parts.append("<h2>Clusters (highest agreement first)</h2>")
+    if not clusters:
+        parts.append("<p>No findings match the filters.</p>")
+    for c in clusters:
+        klass = _agreement_class(c.agreement, c.eligible)
+        lo, hi = c.line_range
+        if lo is None:
+            line_str = "?"
+        elif lo == hi:
+            line_str = str(lo)
+        else:
+            line_str = f"{lo}-{hi}"
+
+        pill_class = (
+            "agreement-strong"
+            if klass == "strong"
+            else ("agreement-partial" if klass == "partial" else "")
+        )
+        parts.append(f'<div class="cluster cluster-{klass}">')
+        parts.append('<div class="cluster-header">')
+        parts.append(
+            f'<span class="agreement-pill {pill_class}">'
+            f"{c.agreement} / {c.eligible}</span>"
+        )
+        parts.append(
+            f'<span class="cluster-loc">{escape(c.file_path)}:{escape(line_str)}</span>'
+        )
+        parts.append(f"<span>{escape(c.cwe_id)}</span>")
+        parts.append("</div>")
+
+        for f in c.findings:
+            conf = (f.get("confidence") or "").lower()
+            verdict = f.get("verified_status")
+            ln = str(f["line_number"]) if f.get("line_number") is not None else "?"
+            expl = f.get("explanation") or ""
+            parts.append('<div class="flag-row">')
+            parts.append('<span class="marker flagged">+</span>')
+            parts.append(f'<span class="model">{escape(f["model_id"])}</span>')
+            parts.append(f'<span class="line">L{escape(ln)}</span>')
+            parts.append(_badge(conf) if conf else "")
+            parts.append(_badge(verdict) if verdict else "")
+            if expl:
+                parts.append(
+                    f'<div class="expl">{escape(expl[:600])}'
+                    f"{'…' if len(expl) > 600 else ''}</div>"
+                )
+            parts.append("</div>")
+        for m in c.models_missed:
+            parts.append('<div class="flag-row">')
+            parts.append('<span class="marker missed">-</span>')
+            parts.append(f'<span class="model">{escape(m)}</span>')
+            parts.append('<span class="line">—</span>')
+            parts.append('<span style="color: var(--text-muted)">did not flag</span>')
+            parts.append("<span></span>")
+            parts.append("</div>")
+        parts.append("</div>")
+
+    parts.append(
+        f"<footer>Generated by Nelson at {_timestamp()}</footer></body></html>"
+    )
+    return "\n".join(parts)

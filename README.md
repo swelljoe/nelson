@@ -175,6 +175,37 @@ nelson report --json-output
 nelson report --verdict confirmed --json-output
 ```
 
+### Comparing models
+
+When you scan with multiple models (in parallel or otherwise), `nelson compare` clusters findings into "same issue" groups so you can see where the models agreed:
+
+```bash
+# Compare models within a single multi-model scan (default: latest)
+nelson compare
+nelson compare 5
+
+# Compare across separate scans on the same target/commit
+nelson compare --scans 3,5,7
+
+# Tighter or looser matching (default: ±2 lines)
+nelson compare --line-tolerance 0     # exact line match only
+nelson compare --line-tolerance 5     # more forgiving
+
+# Filters
+nelson compare --min-agreement 2      # only show clusters >= 2 models flagged
+nelson compare --cwe CWE-89
+nelson compare --confidence high
+
+# JSON for scripting / your own benchmarking
+nelson compare --json-output
+
+# HTML version
+nelson html-compare
+nelson html-compare --scans 3,5,7 -o my-comparison.html
+```
+
+A "cluster" is one apparent issue: same file, same CWE, line numbers within the tolerance window. For each cluster the report shows which models flagged it and which models had a chance to flag it but didn't (the eligible voter set is every model that ran a relevant job — focused on that CWE, or any open-mode job on that file). High-agreement clusters (e.g. 3/3) are strong signal; lone-model clusters are usually false positives. Useful for both filtering noise and seeing how a small local model stacks up against a frontier one.
+
 ### HTML reports
 
 ![Example HTML report showing totals and reviewed results](static/html-report.png)
