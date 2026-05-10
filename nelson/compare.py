@@ -86,7 +86,7 @@ def cluster_findings(
         with_line.sort(key=lambda x: x["line_number"])
 
         cur: list[dict] = []
-        cur_max = -10**9
+        cur_max = -(10**9)
         for it in with_line:
             ln = it["line_number"]
             if cur and ln - cur_max <= line_tolerance:
@@ -158,9 +158,11 @@ def filter_clusters(
 
 def sort_clusters(clusters: list[Cluster]) -> list[Cluster]:
     """Highest-agreement clusters first, then by file/line."""
+
     def key(c: Cluster):
         lo, _hi = c.line_range
         return (-c.agreement, c.file_path, c.cwe_id, lo if lo is not None else 10**9)
+
     return sorted(clusters, key=key)
 
 
@@ -291,9 +293,7 @@ def render_text(
             if expl_first:
                 out.append(f"      {expl_first}")
         for m in c.models_missed:
-            out.append(
-                f"    {click.style('-', fg='red')} {m:<24} did not flag"
-            )
+            out.append(f"    {click.style('-', fg='red')} {m:<24} did not flag")
         out.append("")
 
     return "\n".join(out)

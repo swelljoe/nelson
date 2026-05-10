@@ -286,9 +286,9 @@ class Database:
             if r["cwe_id"] == "OPEN":
                 open_.setdefault(r["file_path"], set()).add(r["model_id"])
             else:
-                focused.setdefault(
-                    (r["file_path"], r["cwe_id"]), set()
-                ).add(r["model_id"])
+                focused.setdefault((r["file_path"], r["cwe_id"]), set()).add(
+                    r["model_id"]
+                )
         return focused, open_
 
     def findings_summary(self, scan_id: int) -> list[sqlite3.Row]:
