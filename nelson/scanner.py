@@ -238,8 +238,7 @@ def _model_worker(
             backoff = 0.0
             progress_event.set()
 
-            if delay > 0 and adapter.needs_pacing:
-                if cancel_event.wait(delay):
+            if delay > 0 and adapter.needs_pacing and cancel_event.wait(delay):
                     break
     finally:
         if current_job_id is not None:
