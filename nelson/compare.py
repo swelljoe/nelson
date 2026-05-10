@@ -28,10 +28,12 @@ _CWE_PREFIX = re.compile(r"^\[(CWE-\d+|unknown)\]\s*", re.IGNORECASE)
 def effective_cwe(row) -> str:
     """The CWE that should be used for clustering this finding."""
     cwe = row["cwe_id"]
-    if cwe and cwe != "OPEN":
-        return cwe
+    if cwe:
+        cwe = cwe.upper()
+        if cwe != "OPEN":
+            return cwe
     m = _CWE_PREFIX.match(row["explanation"] or "")
-    return m.group(1).upper() if m else "unknown"
+    return m.group(1).upper() if m else "UNKNOWN"
 
 
 @dataclass
