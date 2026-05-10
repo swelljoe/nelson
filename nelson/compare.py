@@ -2,10 +2,12 @@
 score agreement, and render text/JSON reports.
 
 A cluster is a maximal set of findings sharing the same file_path and
-effective CWE whose line numbers fall inside a sliding window of
-``line_tolerance``. The voter denominator for a cluster is the set of
-distinct models that ran a *completed* job covering that (file, cwe) —
-either as a focused per-CWE job or as an OPEN-mode job on that file.
+effective CWE, grouped by single-link line proximity: when ordered by
+line number, each successive finding in the cluster is within
+``line_tolerance`` of the previous finding. The voter denominator for a
+cluster is the set of distinct models that ran a *completed* job
+covering that (file, cwe) — either as a focused per-CWE job or as an
+OPEN-mode job on that file.
 """
 
 from __future__ import annotations
