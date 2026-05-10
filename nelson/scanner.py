@@ -284,6 +284,8 @@ def run_scan(
 
     cancel_event = threading.Event()
     progress_event = threading.Event()
+    worker_exceptions: dict[str, Exception] = {}
+    worker_exceptions_lock = threading.Lock()
 
     original_handler = signal.getsignal(signal.SIGINT)
 
@@ -292,10 +294,10 @@ def run_scan(
 
     signal.signal(signal.SIGINT, _interrupt)
 
-    def _spawn(spec: str) -> threading.Thread:
-        t = threading.Thread(
-            target=_model_worker,
-            args=(
+    def _worker_wrapper(spec: str):
+        """Wrapper that catches and stores worker exceptions."""
+        try:
+            _model_worker(
                 db_path,
                 scan_id,
                 spec,
@@ -304,7 +306,16 @@ def run_scan(
                 max_backoff,
                 cancel_event,
                 progress_event,
-            ),
+            )
+        except Exception as e:
+            log.error("Worker for %s failed: %s", spec, e, exc_info=True)
+            with worker_exceptions_lock:
+                worker_exceptions[spec] = e
+
+    def _spawn(spec: str) -> threading.Thread:
+        t = threading.Thread(
+            target=_worker_wrapper,
+            args=(spec,),
             name=f"nelson-worker-{spec}",
             daemon=True,
         )
@@ -336,5 +347,28 @@ def run_scan(
     if cancel_event.is_set():
         log.warning("Scan interrupted by user")
         raise KeyboardInterrupt
+
+    # Check for worker failures
+    if worker_exceptions:
+        log.error("One or more workers failed:")
+        for spec, exc in worker_exceptions.items():
+            log.error("  %s: %s", spec, exc)
+        raise RuntimeError(
+            f"Worker failures: {', '.join(worker_exceptions.keys())}"
+        )
+
+    # Verify all jobs reached a terminal state before marking scan complete
+    job_counts = db.job_counts(scan_id)
+    pending = job_counts.get("pending", 0)
+    running = job_counts.get("running", 0)
+    if pending > 0 or running > 0:
+        log.error(
+            "Scan has %d pending and %d running jobs, not marking complete",
+            pending,
+            running,
+        )
+        raise RuntimeError(
+            f"Scan incomplete: {pending} pending, {running} running jobs remain"
+        )
 
     db.complete_scan(scan_id)
