@@ -6,6 +6,7 @@ import subprocess
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import httpx
 
@@ -316,8 +317,9 @@ class OpenAIAPIAdapter(AgentAdapter):
         timeout: int = 300,
     ):
         self.model = model
-        self.name = f"local-{model}"
         self.base_url = base_url.rstrip("/")
+        netloc = urlparse(self.base_url).netloc or self.base_url or "local"
+        self.name = f"{netloc}/{model}"
         self.timeout = timeout
 
     def run(
