@@ -551,8 +551,8 @@ _COMPARE_EXTRA_CSS = """\
 """
 
 
-def _agreement_class(agreement: int, total_models: int) -> str:
-    if total_models >= 2 and agreement >= total_models:
+def _agreement_class(agreement: int, eligible: int) -> str:
+    if eligible >= 2 and agreement == eligible:
         return "strong"
     if agreement >= 2:
         return "partial"
@@ -636,7 +636,7 @@ def generate_compare_report(scan_ids, models, clusters) -> str:
     if not clusters:
         parts.append("<p>No findings match the filters.</p>")
     for c in clusters:
-        klass = _agreement_class(c.agreement, n_models)
+        klass = _agreement_class(c.agreement, c.eligible)
         lo, hi = c.line_range
         if lo is None:
             line_str = "?"
