@@ -228,9 +228,7 @@ def render_text(
     for c in clusters:
         by_agreement_eligible[(c.agreement, c.eligible)] += 1
     out.append("Agreement summary:")
-    for agreement, eligible in sorted(
-        by_agreement_eligible.keys(), reverse=True
-    ):
+    for agreement, eligible in sorted(by_agreement_eligible.keys(), reverse=True):
         n = by_agreement_eligible[(agreement, eligible)]
         marker = (
             click.style("strong signal", fg="red", bold=True)

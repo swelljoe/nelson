@@ -587,12 +587,8 @@ def generate_compare_report(scan_ids, models, clusters) -> str:
                 only_one_by_model.get(c.models_flagged[0], 0) + 1
             )
 
-    strong = sum(
-        1 for c in clusters if c.eligible >= 2 and c.agreement == c.eligible
-    )
-    partial = sum(
-        1 for c in clusters if c.agreement >= 2 and c.agreement < c.eligible
-    )
+    strong = sum(1 for c in clusters if c.eligible >= 2 and c.agreement == c.eligible)
+    partial = sum(1 for c in clusters if c.agreement >= 2 and c.agreement < c.eligible)
     singletons = sum(1 for c in clusters if c.agreement == 1)
 
     parts: list[str] = []
