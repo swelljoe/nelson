@@ -129,6 +129,14 @@ def inventory(paths: tuple[str, ...]):
     help="'focused': per-CWE (default). 'open': find any vuln per file.",
 )
 @click.option(
+    "--parallel/--no-parallel",
+    default=True,
+    help=(
+        "With multiple -m models, run one worker per model concurrently"
+        " (default). Single-model scans are unaffected."
+    ),
+)
+@click.option(
     "--db",
     "db_path",
     default="nelson.db",
@@ -141,6 +149,7 @@ def scan(
     delay: float,
     resume: int | None,
     mode: str,
+    parallel: bool,
     db_path: str,
 ):
     """Scan PATHS for vulnerabilities.
@@ -203,7 +212,10 @@ def scan(
             err=True,
         )
 
-    click.echo("Starting scan...")
+    if parallel and len(models) > 1:
+        click.echo(f"Starting scan ({len(models)} models in parallel)...")
+    else:
+        click.echo("Starting scan...")
     run_scan(
         db,
         scan_id,
@@ -211,6 +223,8 @@ def scan(
         target_dir,
         delay=delay,
         on_progress=on_progress,
+        parallel=parallel,
+        db_path=db_path,
     )
 
     counts = db.job_counts(scan_id)
@@ -644,6 +658,7 @@ def haha(
         target_dir,
         delay=delay,
         on_progress=on_scan_progress,
+        db_path=db_path,
     )
     focused_findings = db.findings_for_scan(focused_id)
     click.echo(f"  {len(focused_findings)} findings\n")
@@ -670,6 +685,7 @@ def haha(
         target_dir,
         delay=delay,
         on_progress=on_scan_progress,
+        db_path=db_path,
     )
     open_findings = db.findings_for_scan(open_id)
     click.echo(f"  {len(open_findings)} findings\n")
