@@ -1,16 +1,95 @@
-"""Agent adapters for invoking AI models via CLI or API."""
+"""Agent adapters for invoking AI models via CLI or API.
+
+The unit of evaluation in the benchmark is a *competitor* = (model x runtime x
+tool-profile). An adapter here is a **runtime**: an invocation method (Claude
+Code, Gemini CLI, a raw OpenAI-compatible API call) carrying a ``model_id`` and
+a ``tool_profile``. The legacy single-shot behavior (full file pasted in, JSON
+array out, no tool use) is the ``"single-shot"`` tool profile.
+
+Integrity rule (non-negotiable): auth / rate-cap / infra failures are reported
+via :class:`FailureKind` and must never be scored as "the model looked and found
+nothing." See :func:`classify_failure`.
+"""
 
 import json
 import logging
+import os
 import subprocess
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import StrEnum
 from urllib.parse import urlparse
 
 import httpx
 
+from .auth import AuthProfile, MissingSecretError
+
 log = logging.getLogger(__name__)
+
+
+class FailureKind(StrEnum):
+    """Why a run did not produce a scorable result.
+
+    The string values match the ``runs``/``jobs`` status vocabulary so they can
+    be stored directly. ``RATE_LIMIT`` is recoverable (retry after backoff);
+    ``AUTH`` and ``INFRA`` are terminal for the job but, crucially, are *not*
+    misses — the model never got a fair look at the code.
+    """
+
+    AUTH = "auth_failed"
+    INFRA = "infra_error"
+    RATE_LIMIT = "rate_limited"
+
+
+# Substrings (lower-cased) that identify each failure class in CLI/API output.
+# Order of checks matters: a 429 mentioning "key" is rate-limited, not auth.
+_RATE_MARKERS = (
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "429",
+    "overloaded",
+    "quota",
+    "too many requests",
+    "resource_exhausted",
+)
+_AUTH_MARKERS = (
+    "not logged in",
+    "please run /login",
+    "oauth token has expired",
+    "token has expired",
+    "invalid api key",
+    "invalid x-api-key",
+    "invalid_api_key",
+    "authentication_error",
+    "authentication failed",
+    "unauthorized",
+    "401",
+    "403",
+    "no api key",
+    "missing api key",
+    "api key not found",
+)
+
+
+def classify_failure(text: str, *, failed: bool = True) -> FailureKind | None:
+    """Classify runtime output into a :class:`FailureKind`, or ``None``.
+
+    ``text`` is the combined stdout/stderr (or response body). ``failed`` is
+    whether the invocation reported failure (non-zero exit, non-200 status, a
+    raised transport error). Rate-limit markers win over auth markers; an
+    unexplained failure with no recognizable marker is ``INFRA`` (never a miss).
+    A successful invocation with no markers returns ``None``.
+    """
+    blob = text.lower()
+    if any(m in blob for m in _RATE_MARKERS):
+        return FailureKind.RATE_LIMIT
+    if any(m in blob for m in _AUTH_MARKERS):
+        return FailureKind.AUTH
+    if failed:
+        return FailureKind.INFRA
+    return None
 
 
 @dataclass
@@ -31,6 +110,32 @@ class AgentResult:
     cost_usd: float | None = None
     rate_limited: bool = False
     error: str | None = None
+    failure_kind: FailureKind | None = None
+
+    def __post_init__(self):
+        # Keep the legacy rate_limited bool and the richer failure_kind in sync
+        # so existing callers (scanner, review) and new ones agree.
+        if self.failure_kind is FailureKind.RATE_LIMIT:
+            self.rate_limited = True
+        elif self.failure_kind is not None:
+            # Any non-rate-limit failure is not "rate limited".
+            self.rate_limited = False
+        elif self.rate_limited:
+            self.failure_kind = FailureKind.RATE_LIMIT
+
+
+@dataclass
+class PreflightResult:
+    """Outcome of a cheap per-competitor auth/reachability check."""
+
+    ok: bool
+    status: str  # "ok" | "auth_failed" | "infra_error" | "rate_limited"
+    detail: str = ""
+
+
+# A trivial prompt whose only purpose is to make the runtime contact its backend
+# so auth/reachability problems surface before any scored work begins.
+PREFLIGHT_PROMPT = "Reply with exactly: ok"
 
 
 def parse_findings(text: str) -> list[Finding]:
@@ -90,6 +195,7 @@ def _run_cli(
     timeout: int,
     input_text: str | None = None,
     cancel_event: threading.Event | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a CLI subprocess that can be cancelled via a threading.Event.
 
@@ -98,6 +204,10 @@ def _run_cli(
     terminates the child the moment ``cancel_event`` is set. Callers in
     worker threads must use this rather than installing a signal handler,
     since Python only allows signal.signal() on the main thread.
+
+    ``env`` is passed straight to Popen; ``None`` (the default) means the child
+    inherits this process's environment unchanged. Auth profiles supply a merged
+    environment (parent env + resolved secrets) here.
     """
     proc = subprocess.Popen(
         cmd,
@@ -105,6 +215,7 @@ def _run_cli(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=env,
     )
 
     watchdog_stop = threading.Event()
@@ -147,9 +258,20 @@ def _run_cli(
 
 
 class AgentAdapter(ABC):
-    """Base class for agent adapters."""
+    """Base class for runtimes (invocation methods).
+
+    A runtime carries the three competitor dimensions as data:
+    ``runtime`` (this invocation method, e.g. ``claude-code``), ``model_id``
+    (the bare model the runtime drives), and ``tool_profile`` (what the model
+    can do — ``single-shot`` today). ``name`` remains the unique identifier used
+    as the DB ``model_id`` so existing scans are unaffected.
+    """
 
     name: str
+    runtime: str = "unknown"
+    model_id: str = "unknown"
+    tool_profile: str = "single-shot"
+    auth_profile: AuthProfile | None = None
     needs_pacing: bool = False  # CLI tools with rolling subscription limits need delays
 
     @abstractmethod
@@ -157,13 +279,51 @@ class AgentAdapter(ABC):
         self, prompt: str, cancel_event: threading.Event | None = None
     ) -> AgentResult: ...
 
+    def _resolve_env(self) -> dict[str, str] | None:
+        """Build the child environment for this runtime.
+
+        Returns ``None`` when no auth profile is attached, so the subprocess
+        inherits this process's environment exactly as before. With a profile,
+        returns the parent environment merged with the profile's resolved
+        secrets (profile values win). Propagates :class:`MissingSecretError`,
+        which callers translate into an ``auth_failed`` result.
+        """
+        if self.auth_profile is None:
+            return None
+        resolved = self.auth_profile.resolve_env()
+        return {**os.environ, **resolved}
+
+    def preflight(self, cancel_event: threading.Event | None = None) -> PreflightResult:
+        """Cheap auth/reachability check run before any scored work.
+
+        Sends a trivial prompt and inspects the failure classification. A clean
+        response is ``ok``; an auth failure is reported as such (never as a model
+        that found nothing). Runtimes may override for a cheaper probe.
+        """
+        result = self.run(PREFLIGHT_PROMPT, cancel_event=cancel_event)
+        if result.failure_kind is FailureKind.AUTH:
+            return PreflightResult(False, "auth_failed", result.error or "auth failed")
+        if result.failure_kind is not None:
+            return PreflightResult(False, result.failure_kind.value, result.error or "")
+        if result.error:
+            return PreflightResult(False, "infra_error", result.error)
+        return PreflightResult(True, "ok")
+
 
 class ClaudeCLIAdapter(AgentAdapter):
     """Invoke Claude via the claude CLI tool."""
 
-    def __init__(self, model: str = "haiku", timeout: int = 120):
+    def __init__(
+        self,
+        model: str = "haiku",
+        timeout: int = 120,
+        auth_profile: AuthProfile | None = None,
+    ):
         self.model = model
         self.name = f"claude-{model}"
+        self.runtime = "claude-code"
+        self.model_id = model
+        self.auth_profile = auth_profile
         self.needs_pacing = True
         self.timeout = timeout
 
@@ -181,29 +341,47 @@ class ClaudeCLIAdapter(AgentAdapter):
         ]
 
         try:
+            env = self._resolve_env()
+        except MissingSecretError as e:
+            return AgentResult(
+                findings=[],
+                raw_output="",
+                failure_kind=FailureKind.AUTH,
+                error=str(e),
+            )
+
+        try:
             result = _run_cli(
-                cmd, self.timeout, input_text=prompt, cancel_event=cancel_event
+                cmd,
+                self.timeout,
+                input_text=prompt,
+                cancel_event=cancel_event,
+                env=env,
             )
         except subprocess.TimeoutExpired:
-            return AgentResult(findings=[], raw_output="", error="timeout")
+            return AgentResult(
+                findings=[],
+                raw_output="",
+                failure_kind=FailureKind.INFRA,
+                error="timeout",
+            )
 
         raw = result.stdout
         stderr = result.stderr
 
-        # Detect rate limiting
         if result.returncode != 0:
-            combined = raw + stderr
-            if any(s in combined.lower() for s in ["rate limit", "429", "overloaded"]):
-                return AgentResult(
-                    findings=[],
-                    raw_output=raw,
-                    rate_limited=True,
-                    error="rate limited",
-                )
+            kind = classify_failure(raw + stderr, failed=True)
+            combined_output = (raw + stderr)[:500]
+            error = (
+                f"exit code {result.returncode}: {combined_output}"
+                if combined_output
+                else f"exit code {result.returncode}"
+            )
             return AgentResult(
                 findings=[],
                 raw_output=raw,
-                error=f"exit code {result.returncode}: {stderr[:500]}",
+                failure_kind=kind,
+                error=error,
             )
 
         # Parse the JSON output from claude --output-format json
@@ -237,9 +415,17 @@ class ClaudeCLIAdapter(AgentAdapter):
 class GeminiCLIAdapter(AgentAdapter):
     """Invoke Gemini via the gemini CLI tool."""
 
-    def __init__(self, model: str | None = None, timeout: int = 120):
+    def __init__(
+        self,
+        model: str | None = None,
+        timeout: int = 120,
+        auth_profile: AuthProfile | None = None,
+    ):
         self.model = model
         self.name = f"gemini-{model}" if model else "gemini"
+        self.runtime = "gemini-cli"
+        self.model_id = model or "default"
+        self.auth_profile = auth_profile
         self.needs_pacing = True
         self.timeout = timeout
 
@@ -251,29 +437,41 @@ class GeminiCLIAdapter(AgentAdapter):
             cmd.extend(["-m", self.model])
 
         try:
-            result = _run_cli(cmd, self.timeout, cancel_event=cancel_event)
+            env = self._resolve_env()
+        except MissingSecretError as e:
+            return AgentResult(
+                findings=[],
+                raw_output="",
+                failure_kind=FailureKind.AUTH,
+                error=str(e),
+            )
+
+        try:
+            result = _run_cli(cmd, self.timeout, cancel_event=cancel_event, env=env)
         except subprocess.TimeoutExpired:
-            return AgentResult(findings=[], raw_output="", error="timeout")
+            return AgentResult(
+                findings=[],
+                raw_output="",
+                failure_kind=FailureKind.INFRA,
+                error="timeout",
+            )
 
         raw = result.stdout
         stderr = result.stderr
 
         if result.returncode != 0:
-            combined = raw + stderr
-            if any(
-                s in combined.lower()
-                for s in ["rate limit", "429", "overloaded", "quota"]
-            ):
-                return AgentResult(
-                    findings=[],
-                    raw_output=raw,
-                    rate_limited=True,
-                    error="rate limited",
-                )
+            kind = classify_failure(raw + stderr, failed=True)
+            combined_output = (raw + stderr)[:500]
+            error = (
+                f"exit code {result.returncode}: {combined_output}"
+                if combined_output
+                else f"exit code {result.returncode}"
+            )
             return AgentResult(
                 findings=[],
                 raw_output=raw,
-                error=f"exit code {result.returncode}: {stderr[:500]}",
+                failure_kind=kind,
+                error=error,
             )
 
         # Parse the JSON output from gemini --output-format json
@@ -316,12 +514,32 @@ class OpenAIAPIAdapter(AgentAdapter):
         model: str,
         base_url: str = "http://localhost:8080/v1",
         timeout: int = 300,
+        auth_profile: AuthProfile | None = None,
     ):
         self.model = model
         self.base_url = base_url.rstrip("/")
         netloc = urlparse(self.base_url).netloc or self.base_url or "local"
         self.name = f"{netloc}/{model}"
+        self.runtime = "openai-api"
+        self.model_id = model
+        self.auth_profile = auth_profile
         self.timeout = timeout
+
+    def _bearer_token(self) -> str | None:
+        """Resolve the profile to a bearer token, or ``None`` if no profile.
+
+        Local servers (llama.cpp, LM Studio, Ollama) need no key, so the default
+        is no Authorization header. Hosted OpenAI-compatible endpoints attach a
+        profile; we use the resolved ``OPENAI_API_KEY`` (or the sole resolved
+        value). Raises :class:`MissingSecretError` for a configured-but-absent
+        secret so it becomes ``auth_failed``, not a silent unauthenticated call.
+        """
+        if self.auth_profile is None:
+            return None
+        resolved = self.auth_profile.resolve_env()
+        if "OPENAI_API_KEY" in resolved:
+            return resolved["OPENAI_API_KEY"]
+        return next(iter(resolved.values()), None)
 
     def run(
         self, prompt: str, cancel_event: threading.Event | None = None
@@ -337,24 +555,52 @@ class OpenAIAPIAdapter(AgentAdapter):
             raise KeyboardInterrupt
 
         try:
-            resp = httpx.post(url, json=payload, timeout=self.timeout)
+            token = self._bearer_token()
+        except MissingSecretError as e:
+            return AgentResult(
+                findings=[],
+                raw_output="",
+                failure_kind=FailureKind.AUTH,
+                error=str(e),
+            )
+        headers = {"Authorization": f"Bearer {token}"} if token else None
+
+        try:
+            resp = httpx.post(url, json=payload, timeout=self.timeout, headers=headers)
         except httpx.TimeoutException:
-            return AgentResult(findings=[], raw_output="", error="timeout")
+            return AgentResult(
+                findings=[],
+                raw_output="",
+                failure_kind=FailureKind.INFRA,
+                error="timeout",
+            )
         except httpx.ConnectError as e:
             return AgentResult(
                 findings=[],
                 raw_output="",
+                failure_kind=FailureKind.INFRA,
                 error=f"connection error: {e}",
             )
 
         if resp.status_code == 429:
             return AgentResult(
-                findings=[], raw_output="", rate_limited=True, error="rate limited"
+                findings=[],
+                raw_output="",
+                failure_kind=FailureKind.RATE_LIMIT,
+                error="rate limited",
+            )
+        if resp.status_code in (401, 403):
+            return AgentResult(
+                findings=[],
+                raw_output=resp.text,
+                failure_kind=FailureKind.AUTH,
+                error=f"HTTP {resp.status_code}: {resp.text[:500]}",
             )
         if resp.status_code != 200:
             return AgentResult(
                 findings=[],
                 raw_output=resp.text,
+                failure_kind=classify_failure(resp.text, failed=True),
                 error=f"HTTP {resp.status_code}: {resp.text[:500]}",
             )
 
@@ -379,8 +625,13 @@ ADAPTERS: dict[str, type[AgentAdapter]] = {
 }
 
 
-def create_adapter(spec: str) -> AgentAdapter:
+def create_adapter(spec: str, auth_profile: AuthProfile | None = None) -> AgentAdapter:
     """Create an adapter from a spec string.
+
+    ``auth_profile`` is optional and defaults to ``None``: with no profile the
+    runtime inherits this process's environment unchanged (the existing
+    behavior). A competitor in the benchmark attaches a profile so its secrets
+    are injected into the run; ad-hoc CLI scans leave it unset.
 
     Examples:
         "claude:haiku"              -> Claude CLI with Haiku
@@ -400,18 +651,30 @@ def create_adapter(spec: str) -> AgentAdapter:
     adapter_type, model_spec = parts
 
     if adapter_type == "claude":
-        return ClaudeCLIAdapter(model=model_spec)
+        return ClaudeCLIAdapter(model=model_spec, auth_profile=auth_profile)
     elif adapter_type == "gemini":
-        return GeminiCLIAdapter(model=model_spec if model_spec else None)
+        return GeminiCLIAdapter(
+            model=model_spec if model_spec else None, auth_profile=auth_profile
+        )
     elif adapter_type == "openai":
         if "@" in model_spec:
             model, url = model_spec.split("@", 1)
-            return OpenAIAPIAdapter(model=model, base_url=url)
-        return OpenAIAPIAdapter(model=model_spec)
+            return OpenAIAPIAdapter(
+                model=model, base_url=url, auth_profile=auth_profile
+            )
+        return OpenAIAPIAdapter(model=model_spec, auth_profile=auth_profile)
     elif adapter_type == "lmstudio":
-        return OpenAIAPIAdapter(model=model_spec, base_url="http://localhost:1234/v1")
+        return OpenAIAPIAdapter(
+            model=model_spec,
+            base_url="http://localhost:1234/v1",
+            auth_profile=auth_profile,
+        )
     elif adapter_type == "ollama":
-        return OpenAIAPIAdapter(model=model_spec, base_url="http://localhost:11434/v1")
+        return OpenAIAPIAdapter(
+            model=model_spec,
+            base_url="http://localhost:11434/v1",
+            auth_profile=auth_profile,
+        )
     else:
         raise ValueError(
             f"Unknown adapter type '{adapter_type}'. "
