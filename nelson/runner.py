@@ -532,10 +532,17 @@ class BenchRunner:
         run_id = self.db.create_run(case_id, comp_id)
 
         try:
+            safe_ext = "".join(
+                ch if (ch.isalnum() or ch in ("-", "_", ".")) else "_" for ch in case.ext_id
+            )
+            checkout_root = self.cache_dir.resolve()
+            checkout_dir = (checkout_root / safe_ext).resolve()
+            if checkout_root != checkout_dir and checkout_root not in checkout_dir.parents:
+                raise RunnerError(f"unsafe case ext_id for cache dir: {case.ext_id!r}")
             checkout = prepare_checkout(
                 case.repo_url,
                 case.vuln_commit,
-                self.cache_dir / case.ext_id,
+                checkout_dir,
             )
             self.backend.ensure_image()
         except (RunnerError, subprocess.TimeoutExpired) as e:
