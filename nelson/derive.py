@@ -107,6 +107,9 @@ class Derivation:
     gt_files: list[str] = field(default_factory=list)
     gt_hunks: list[dict[str, Any]] = field(default_factory=list)
     reason: str = ""
+    # Raw fix diff, kept in memory as evidence for the pre-vet judge. Not a DB
+    # column (see updates()), since the repo can reproduce it on demand.
+    diff: str = ""
 
     def updates(self) -> dict[str, Any]:
         """Persistable case fields (only meaningful when ``ok``)."""
@@ -194,8 +197,10 @@ def derive_ground_truth(
 
     files, hunks = parse_diff_hunks(diff_text)
     if not files:
-        return Derivation(ok=False, reason="empty or binary-only diff")
-    return Derivation(ok=True, vuln_commit=parent, gt_files=files, gt_hunks=hunks)
+        return Derivation(ok=False, reason="empty or binary-only diff", diff=diff_text)
+    return Derivation(
+        ok=True, vuln_commit=parent, gt_files=files, gt_hunks=hunks, diff=diff_text
+    )
 
 
 def _repo_slug(repo_url: str) -> str:

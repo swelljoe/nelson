@@ -23,9 +23,13 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import yaml
 
 from .db import CASE_COLUMNS, Database
+from .derive import Derivation, GitRunner, derive_ground_truth
+from .enrich import Enricher, enrich_case
+from .prevet import Judge, VetVerdict
 
 if TYPE_CHECKING:
     import sqlite3
+    from collections.abc import Sequence
 
 # Ordered worst-first so max_severity can pick the headline severity of a
 # multi-finding advisory. Unknown/missing sorts last.
@@ -239,3 +243,158 @@ def load_manifest_dir(cases_dir: str | Path) -> list[Case]:
     if not cases_dir.is_dir():
         return []
     return [load_case_manifest(p) for p in sorted(cases_dir.glob("*.yaml"))]
+
+
+# -- Pipeline ----------------------------------------------------------------
+
+
+@dataclass
+class BuildSummary:
+    """Counts from one corpus build pass (all stages are idempotent)."""
+
+    seeded: int = 0
+    enriched: int = 0
+    derived: int = 0
+    vetted: int = 0
+    retired: int = 0
+    skipped: int = 0  # candidates that couldn't progress this pass
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "seeded": self.seeded,
+            "enriched": self.enriched,
+            "derived": self.derived,
+            "vetted": self.vetted,
+            "retired": self.retired,
+            "skipped": self.skipped,
+        }
+
+
+class CorpusPipeline:
+    """Wires seed -> enrich -> derive -> pre-vet over the cases in a DB.
+
+    Every component is optional and injected, so the pipeline runs in whatever
+    stages are available: enrichers (HTTP), a :class:`GitRunner` (derivation),
+    and a :class:`Judge` (pre-vet). With none wired, ``build`` only seeds. Each
+    stage is idempotent and only advances ``candidate`` rows, so a re-run resumes
+    where sources or budget last allowed — important because fresh advisories
+    aren't in OSV yet and only become derivable later.
+    """
+
+    def __init__(
+        self,
+        db: Database,
+        *,
+        enrichers: Sequence[Enricher] = (),
+        git: GitRunner | None = None,
+        judge: Judge | None = None,
+        cache_dir: str | Path = "corpus-cache",
+        vet_threshold: float = 0.5,
+    ):
+        self.db = db
+        self.enrichers = list(enrichers)
+        self.git = git
+        self.judge = judge
+        self.cache_dir = Path(cache_dir)
+        self.vet_threshold = vet_threshold
+
+    def import_seeds(self, source: SeedSource) -> int:
+        return import_seeds(source, self.db)
+
+    def _reload(self, ext_id: str) -> Case:
+        row = self.db.get_case(ext_id)
+        if row is None:  # only ever called for a case we just persisted
+            raise RuntimeError(f"case {ext_id} disappeared after write")
+        return Case.from_row(row)
+
+    def enrich_one(self, case: Case) -> dict[str, Any]:
+        updates = enrich_case(case, self.enrichers)
+        if updates:
+            self.db.update_case_fields(case.ext_id, updates)
+        return updates
+
+    def derive_one(self, case: Case) -> Derivation:
+        if self.git is None:
+            raise RuntimeError("derive_one requires a GitRunner")
+        der = derive_ground_truth(case, self.git, self.cache_dir)
+        if der.ok:
+            self.db.update_case_fields(case.ext_id, der.updates())
+        elif der.reason:
+            self.db.update_case_fields(case.ext_id, {"vet_notes": der.reason})
+        return der
+
+    def prevet_one(self, case: Case, diff: str) -> VetVerdict:
+        if self.judge is None:
+            raise RuntimeError("prevet_one requires a Judge")
+        verdict = self.judge.vet(case, diff)
+        if verdict.error:
+            # A judge failure is not a verdict: keep the case a candidate to
+            # retry, recording why (mirrors the auth/infra integrity rule).
+            self.db.update_case_fields(
+                case.ext_id, {"vet_notes": f"prevet failed: {verdict.error}"}
+            )
+            return verdict
+        status = "vetted" if verdict.confidence >= self.vet_threshold else "retired"
+        self.db.update_case_fields(
+            case.ext_id,
+            {
+                "status": status,
+                "vet_confidence": verdict.confidence,
+                "vet_notes": verdict.notes,
+            },
+        )
+        return verdict
+
+    def build(self, source: SeedSource | None = None) -> BuildSummary:
+        """Run every wired stage over candidate cases; return what changed."""
+        summary = BuildSummary()
+        if source is not None:
+            summary.seeded = self.import_seeds(source)
+
+        for row in self.db.list_cases(status="candidate"):
+            case = Case.from_row(row)
+
+            # 1. Enrich until we have a repo + fix commit to work from.
+            if (
+                self.enrichers
+                and not (case.fix_commit and case.repo_url)
+                and self.enrich_one(case)
+            ):
+                summary.enriched += 1
+                case = self._reload(case.ext_id)
+            if not (case.fix_commit and case.repo_url):
+                summary.skipped += 1  # not resolvable yet (e.g. too fresh for OSV)
+                continue
+
+            # 2. Derive ground truth. Re-run is cheap (repo is cached) and yields
+            #    the fix diff the judge needs; count it only when newly derived.
+            der: Derivation | None = None
+            if self.git is not None:
+                was_derived = bool(case.vuln_commit)
+                der = self.derive_one(case)
+                if not der.ok:
+                    summary.skipped += 1
+                    continue
+                if not was_derived:
+                    summary.derived += 1
+                case = self._reload(case.ext_id)
+
+            # 3. Pre-vet (needs both ground truth and the fix diff as evidence).
+            if self.judge is not None and case.vuln_commit and der is not None:
+                verdict = self.prevet_one(case, der.diff)
+                if verdict.error:
+                    summary.skipped += 1
+                elif verdict.confidence >= self.vet_threshold:
+                    summary.vetted += 1
+                else:
+                    summary.retired += 1
+
+        return summary
+
+    def export_manifest(self, cases_dir: str | Path, status: str = "vetted") -> int:
+        """Pin every case with ``status`` to ``cases/<ext_id>.yaml``; return count."""
+        count = 0
+        for row in self.db.list_cases(status=status):
+            write_case_manifest(Case.from_row(row), cases_dir)
+            count += 1
+        return count
