@@ -63,9 +63,7 @@ _GOOD_DIFF = (
 
 
 def _candidate(db, ext_id="GHSA-x", **kw):
-    db.upsert_case(
-        {"source": "cvd", "ext_id": ext_id, "project": "p", **kw}
-    )
+    db.upsert_case({"source": "cvd", "ext_id": ext_id, "project": "p", **kw})
 
 
 def test_build_only_seeds_when_nothing_wired(tmp_path):

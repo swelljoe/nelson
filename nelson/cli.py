@@ -968,9 +968,7 @@ def corpus_import(url: str, db_path: str):
 
 @corpus.command()
 @click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
-@click.option(
-    "--cache-dir", default="corpus-cache", help="Where repos are fetched."
-)
+@click.option("--cache-dir", default="corpus-cache", help="Where repos are fetched.")
 @click.option("--judge-model", default="opus", help="Model for the pre-vet judge.")
 @click.option("--vet-threshold", default=0.5, type=float, help="Min confidence to vet.")
 @click.option("--limit", default=0, type=int, help="Max candidates per pass (0=all).")

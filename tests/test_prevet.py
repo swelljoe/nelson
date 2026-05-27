@@ -81,9 +81,7 @@ def _envelope(result_text, tin=10, tout=5, cost=0.01):
 
 def test_claude_judge_parses_verdict_and_usage(monkeypatch):
     env = _envelope('{"confidence": 0.9, "reasoning": "sound"}')
-    monkeypatch.setattr(
-        "nelson.prevet._run_cli", lambda *a, **k: _completed(0, env)
-    )
+    monkeypatch.setattr("nelson.prevet._run_cli", lambda *a, **k: _completed(0, env))
     v = ClaudeCLIJudge().vet(Case(source="x", ext_id="CVE-1"), "diff")
     assert v.error is None
     assert v.confidence == 0.9

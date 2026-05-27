@@ -62,9 +62,7 @@ def test_osv_aliases_and_cwe_without_commit():
 def test_osv_reference_commit_path():
     # moby: no GIT range, but a GitHub /commit/ reference -> repo + fix commit.
     case = Case(source="cvd", ext_id="GHSA-jq35-85cj-fj4p")
-    http = FakeHttp(
-        {OSV_VULN_URL + "GHSA-jq35-85cj-fj4p": (200, _fx("osv_refs_only"))}
-    )
+    http = FakeHttp({OSV_VULN_URL + "GHSA-jq35-85cj-fj4p": (200, _fx("osv_refs_only"))})
     updates = OSVEnricher(http).enrich(case)
     assert updates["fix_commit"]
     assert updates["repo_url"] == "https://github.com/moby/moby"
@@ -100,9 +98,12 @@ def test_nvd_fills_missing_cwe():
 def test_nvd_skips_when_cwe_present_or_no_cve():
     http = FakeHttp({NVD_CVE_URL: (200, _fx("nvd_cve"))})
     # Already classified: don't call NVD.
-    assert NVDEnricher(http).enrich(
-        Case(source="x", ext_id="a", cve_id="CVE-2021-44228", cwe="CWE-79")
-    ) == {}
+    assert (
+        NVDEnricher(http).enrich(
+            Case(source="x", ext_id="a", cve_id="CVE-2021-44228", cwe="CWE-79")
+        )
+        == {}
+    )
     # No CVE id: NVD is CVE-keyed.
     assert NVDEnricher(http).enrich(Case(source="x", ext_id="GHSA-only")) == {}
     assert http.calls == []
