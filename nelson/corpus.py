@@ -329,10 +329,12 @@ class CorpusPipeline:
         verdict = self.judge.vet(case, diff)
         if verdict.error:
             # A judge failure is not a verdict: keep the case a candidate to
-            # retry, recording why (mirrors the auth/infra integrity rule).
-            self.db.update_case_fields(
-                case.ext_id, {"vet_notes": f"prevet failed: {verdict.error}"}
-            )
+            # retry, recording why (mirrors the auth/infra integrity rule). Keep
+            # the raw reply too — an unattended run needs it to be diagnosable.
+            note = f"prevet failed: {verdict.error}"
+            if verdict.notes:
+                note += f" | reply: {verdict.notes}"
+            self.db.update_case_fields(case.ext_id, {"vet_notes": note})
             return verdict
         status = "vetted" if verdict.confidence >= self.vet_threshold else "retired"
         self.db.update_case_fields(

@@ -103,27 +103,86 @@ def build_prevet_prompt(case: Case, diff: str) -> str:
     )
 
 
+# JSON permits only these escapes after a backslash. A model quoting code in its
+# reasoning (e.g. a JS template literal's escaped backtick, ``\` ``) routinely
+# emits others, which makes json.loads reject the *whole* verdict. We repair such
+# replies rather than discard a real assessment over a stray backslash.
+_VALID_JSON_ESCAPES = '"\\/bfnrtu'
+_HEX_CHARS = set("0123456789abcdefABCDEF")
+# Last-resort salvage: the confidence is the field that gates vetting, and it is
+# readable on its own even when the surrounding object won't parse.
+_CONFIDENCE_RE = re.compile(r'"confidence"\s*:\s*(-?\d+(?:\.\d+)?)')
+
+
+def _sanitize_escapes(s: str) -> str:
+    """Double any lone/invalid backslash, leaving valid escape pairs intact.
+
+    Scans pair-by-pair (rather than a naive regex) so an already-valid ``\\\\``
+    sequence followed by an invalid escape isn't itself corrupted.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        if s[i] == "\\" and i + 1 < len(s) and s[i + 1] in _VALID_JSON_ESCAPES:
+            if s[i + 1] == "u" and (
+                i + 6 > len(s) or any(ch not in _HEX_CHARS for ch in s[i + 2 : i + 6])
+            ):
+                out.append("\\\\")  # invalid \uXXXX: escape the backslash
+                i += 1
+            else:
+                out.append(s[i : i + 2])  # valid escape: keep the pair verbatim
+                i += 2
+        elif s[i] == "\\":
+            out.append("\\\\")  # lone/invalid backslash: escape it
+            i += 1
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+
+def _loads_object(span: str) -> dict | None:
+    """json.loads ``span`` into a dict, retrying once with escapes repaired."""
+    for candidate in (span, _sanitize_escapes(span)):
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _clamp_confidence(value: float | int | str) -> float | None:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_verdict(text: str) -> tuple[float, str] | None:
     """Extract (confidence, reasoning) from the judge's reply, or None if absent.
 
-    Tolerant of prose or code-fences around the JSON. Returns None (not a
-    zero-confidence verdict) when nothing parseable is found, so the caller can
-    distinguish "judge said low" from "judge reply unusable".
+    Tolerant of prose or code-fences around the JSON, and of the invalid escape
+    sequences models emit when quoting code. Returns None (not a zero-confidence
+    verdict) when nothing parseable is found, so the caller can distinguish
+    "judge said low" from "judge reply unusable".
     """
     match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        return None
-    try:
-        data = json.loads(match.group(0))
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(data, dict) or "confidence" not in data:
-        return None
-    try:
-        confidence = max(0.0, min(1.0, float(data["confidence"])))
-    except (TypeError, ValueError):
-        return None
-    return confidence, str(data.get("reasoning", ""))
+    if match:
+        data = _loads_object(match.group(0))
+        if data is not None and "confidence" in data:
+            confidence = _clamp_confidence(data["confidence"])
+            if confidence is not None:
+                return confidence, str(data.get("reasoning", ""))
+    # The object wouldn't parse even repaired, but the gating field may still be
+    # recoverable on its own. Salvage confidence; reasoning is lost.
+    fallback = _CONFIDENCE_RE.search(text)
+    if fallback:
+        confidence = _clamp_confidence(fallback.group(1))
+        if confidence is not None:
+            return confidence, ""
+    return None
 
 
 class ClaudeCLIJudge:
