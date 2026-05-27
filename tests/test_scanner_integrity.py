@@ -6,13 +6,13 @@ terminal job status, with no subprocess or network — the adapter is faked.
 
 import threading
 
-from nelson.agents import AgentResult, FailureKind, Finding
+from nelson.agents import AgentAdapter, AgentResult, FailureKind, Finding
 from nelson.cwe import CWE_OPEN
 from nelson.db import Database
 from nelson.scanner import _process_one_job
 
 
-class _CannedAdapter:
+class _CannedAdapter(AgentAdapter):
     """Minimal runtime stand-in returning a fixed AgentResult."""
 
     name = "fake-model"
