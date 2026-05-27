@@ -1,6 +1,6 @@
 # Nelson Benchmark Harness — Implementation Plan
 
-> Status: P0 landed (2026-05-26); P1 next. Written 2026-05-26.
+> Status: P1 landed (2026-05-26); P2 next. Written 2026-05-26.
 > This document is the durable source of truth for the benchmark effort. Update it as phases land.
 
 ## 1. Goal
@@ -140,8 +140,30 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
   `preflight()` ping; DB `mark_job_auth_failed` / `mark_job_infra_error` (terminal,
   excluded from `coverage_for_scans` so they can never become a miss); scanner routing
   of the three failure kinds; `tests/` (36 tests, pytest added to dev deps).
-- **P1 — Corpus foundation**: importer + OSV/GHSA/NVD enrichment + pre-patch derivation +
-  Opus pre-vet → vetted manifest. *Gate: hand-check ~5 derived cases vs their advisories.*
+- **P1 — Corpus foundation** ✅ *(branch `bench-p1-corpus`)*. Source-pluggable importer +
+  OSV/NVD enrichment + pre-patch derivation + Opus pre-vet → vetted manifest.
+  *Gate met: 5 cases derived live from the 2026 CVD seed and hand-checked (below).*
+  Delivered: schema migration path + `cases` table (`db.py`); `Case` model, `CVDSeedSource`,
+  and `cases/*.yaml` manifest I/O (`corpus.py`); OSV/NVD enrichment behind an injectable
+  HTTP client — GIT-range fix SHA, `/commit/` reference fallback, CVE↔GHSA aliases, CWE
+  (`enrich.py`); pre-patch derivation — `vuln_commit = fix^1`, `gt_files`/`gt_hunks` from the
+  OLD side of each hunk, behind an injectable `GitRunner` doing depth=2 SHA fetches
+  (`derive.py`); `ClaudeCLIJudge` pre-vet with the integrity rule that a judge *failure* never
+  retires a case (`prevet.py`); `CorpusPipeline` (idempotent, resumable, per-stage optional)
+  + `nelson corpus import/build/list/show/export` CLI. Tested offline against captured
+  OSV/NVD/CVD fixtures + a real local git repo.
+  - **Real-world findings.** The 2026 CVD payload lists 26 published advisories (14 CVE +
+    12 GHSA). A live build enriched 17 and derived 5 — so OSV/NVD already cover a chunk of
+    the fresh set, but ~⅓ aren't resolvable to a fix commit yet (no GIT range / no `/commit/`
+    reference, e.g. Maven-style ecosystem advisories like log4shell). Enrichment is therefore
+    idempotent and re-runnable as sources catch up; un-resolvable seeds stay `candidate`.
+  - **Gate hand-check (all 5: `vuln_commit` verified == `fix^1`).** ImageMagick GHSA-x9h5
+    (CWE-122 → `MagickCore/draw.c`), junrar GHSA-j273 (CWE-22 path traversal), Ghost
+    GHSA-w52v (CWE-89 SQLi), CraftCMS GHSA-cc7p (CWE-863) all derived coherent source-file
+    ground truth. MapServer CVE-2026-33721 mis-derived to a *release* commit ("update for
+    8.6.1 release"; files `CITATION.cff/CMakeLists.txt/HISTORY.md`) — OSV pointed at the
+    release, not the patch. This is precisely the noise the Opus pre-vet step is designed to
+    retire, and validates keeping a human-vettable `vetted/retired` manifest.
 - **P2 — One competitor end-to-end**: podman runner + one runtime on a few cases.
   *Gate: a real 0-day found and transcript captured inside a container.*
 - **P3 — Scoring**: localization gate + truth judge → detection reporting.
