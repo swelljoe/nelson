@@ -29,8 +29,7 @@ class MissingSecretError(Exception):
         self.profile_name = profile_name
         self.missing = missing
         super().__init__(
-            f"auth profile '{profile_name}' is missing secret(s): "
-            f"{', '.join(missing)}"
+            f"auth profile '{profile_name}' is missing secret(s): {', '.join(missing)}"
         )
 
 

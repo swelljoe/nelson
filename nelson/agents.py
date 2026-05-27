@@ -73,9 +73,7 @@ _AUTH_MARKERS = (
 )
 
 
-def classify_failure(
-    text: str, *, failed: bool = True
-) -> FailureKind | None:
+def classify_failure(text: str, *, failed: bool = True) -> FailureKind | None:
     """Classify runtime output into a :class:`FailureKind`, or ``None``.
 
     ``text`` is the combined stdout/stderr (or response body). ``failed`` is
@@ -292,9 +290,7 @@ class AgentAdapter(ABC):
         resolved = self.auth_profile.resolve_env()
         return {**os.environ, **resolved}
 
-    def preflight(
-        self, cancel_event: threading.Event | None = None
-    ) -> PreflightResult:
+    def preflight(self, cancel_event: threading.Event | None = None) -> PreflightResult:
         """Cheap auth/reachability check run before any scored work.
 
         Sends a trivial prompt and inspects the failure classification. A clean
@@ -305,9 +301,7 @@ class AgentAdapter(ABC):
         if result.failure_kind is FailureKind.AUTH:
             return PreflightResult(False, "auth_failed", result.error or "auth failed")
         if result.failure_kind is not None:
-            return PreflightResult(
-                False, result.failure_kind.value, result.error or ""
-            )
+            return PreflightResult(False, result.failure_kind.value, result.error or "")
         if result.error:
             return PreflightResult(False, "infra_error", result.error)
         return PreflightResult(True, "ok")
@@ -616,9 +610,7 @@ ADAPTERS: dict[str, type[AgentAdapter]] = {
 }
 
 
-def create_adapter(
-    spec: str, auth_profile: AuthProfile | None = None
-) -> AgentAdapter:
+def create_adapter(spec: str, auth_profile: AuthProfile | None = None) -> AgentAdapter:
     """Create an adapter from a spec string.
 
     ``auth_profile`` is optional and defaults to ``None``: with no profile the
