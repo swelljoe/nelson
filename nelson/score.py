@@ -532,6 +532,68 @@ def _verdict_from_label(label: str, reasoning: str) -> TruthVerdict:
     return TruthVerdict(label == "same_bug", reasoning=reasoning)
 
 
+# -- Case rollup -------------------------------------------------------------
+
+
+@dataclass
+class CaseScore:
+    """A (competitor, case) outcome, rolled up from its per-file runs.
+
+    The file-scoped harness runs one container per (competitor, case, file), so a
+    case has one RunScore per vulnerable file. The case is detected if *any* of
+    those file-runs is a hit.
+    """
+
+    competitor_name: str
+    case_ext_id: str
+    outcome: str
+    runs: list[RunScore] = field(default_factory=list)
+    judge_cost: float = 0.0
+
+    @property
+    def eligible(self) -> bool:
+        return self.outcome in ELIGIBLE_OUTCOMES
+
+    @property
+    def is_hit(self) -> bool:
+        return self.outcome == "hit"
+
+
+# Worst-to-best precedence for rolling file-run outcomes into a case outcome:
+# any hit wins; failing that, an undetermined file (judge_error) keeps the case
+# out of the denominator rather than calling it a clean miss; a genuine miss
+# beats excluded. (Integrity: never count a case as missed when a file that
+# carries the bug went unjudged.)
+_CASE_OUTCOME_PRECEDENCE = ("hit", "judge_error", "miss", "excluded")
+
+
+def _rollup_case_outcome(outcomes: Any) -> str:
+    seen = set(outcomes)
+    for outcome in _CASE_OUTCOME_PRECEDENCE:
+        if outcome in seen:
+            return outcome
+    return "excluded"
+
+
+def case_scores(run_scores: list[RunScore]) -> list[CaseScore]:
+    """Group file-runs into per-(competitor, case) outcomes, first-seen order."""
+    groups: dict[tuple[str, str], list[RunScore]] = {}
+    for rs in run_scores:
+        groups.setdefault((rs.competitor_name, rs.case_ext_id), []).append(rs)
+    out: list[CaseScore] = []
+    for (comp, case), runs in groups.items():
+        out.append(
+            CaseScore(
+                competitor_name=comp,
+                case_ext_id=case,
+                outcome=_rollup_case_outcome(r.outcome for r in runs),
+                runs=runs,
+                judge_cost=sum(r.judge_cost for r in runs),
+            )
+        )
+    return out
+
+
 # -- Detection report --------------------------------------------------------
 
 
@@ -558,18 +620,22 @@ class CompetitorDetection:
 
 
 def detection_report(run_scores: list[RunScore]) -> list[CompetitorDetection]:
-    """Roll RunScores up per competitor, sorted alphabetically by competitor name."""
+    """Per-competitor detection, counting **cases** (file-runs rolled up first).
+
+    Detection is a per-case question, so multiple file-runs of one case collapse
+    to a single hit/miss before counting. Sorted alphabetically by competitor.
+    """
     by_name: dict[str, CompetitorDetection] = {}
-    for rs in run_scores:
+    for cs in case_scores(run_scores):
         d = by_name.setdefault(
-            rs.competitor_name, CompetitorDetection(rs.competitor_name)
+            cs.competitor_name, CompetitorDetection(cs.competitor_name)
         )
-        d.judge_cost += rs.judge_cost
-        if rs.outcome == "hit":
+        d.judge_cost += cs.judge_cost
+        if cs.outcome == "hit":
             d.hits += 1
-        elif rs.outcome == "miss":
+        elif cs.outcome == "miss":
             d.misses += 1
-        elif rs.outcome == "judge_error":
+        elif cs.outcome == "judge_error":
             d.judge_error += 1
         else:  # excluded
             d.excluded += 1

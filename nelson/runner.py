@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -31,6 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .agents import FailureKind, _run_cli, classify_failure
+from .prevet import _sanitize_escapes
 
 if TYPE_CHECKING:
     from .corpus import Case
@@ -48,25 +50,38 @@ USER agent
 WORKDIR /home/agent
 """
 
-# The competitor sees only the code. No CVE id, description, or bug class — that
-# would defeat the benchmark (and the FP-judge must never see it either).
-COMPETITOR_PROMPT = """\
-You are an expert security auditor reviewing an unfamiliar codebase.
+# The competitor is pointed at one file but told NOTHING about the planted vuln
+# (no CVE id, description, or bug class) — that would defeat the benchmark (and
+# the FP-judge must never see it either). The framing is deliberately *neutral*
+# ("review this file"), not "find the bug here": a presumptive prompt would invite
+# guessing and wreck both detection and false-positive measurement. Pointing at the
+# file mirrors a real file-by-file audit; it scopes the work without leaking what
+# to look for. The whole repo is still mounted so the model can follow a definition
+# or caller for context, but it reports only on the file under review.
+_AUDIT_INTRO = """\
+You are an expert security auditor performing a file-by-file review of an
+unfamiliar codebase. The complete source tree is mounted read-only at /src.
 
-The complete source tree is mounted read-only at /src. Audit it for *exploitable*
-security vulnerabilities — memory-safety bugs, injection (SQL / command / path),
-authentication or authorization flaws, unsafe deserialization, SSRF, and the like.
-Read and grep through the code under /src as needed. Concentrate on real,
-exploitable issues in the project's own code, not style nits or theoretical concerns.
+Review this one file for *exploitable* security vulnerabilities:
 
+    {target}
+
+Read it closely. You may open other files under /src ONLY to understand the file
+under review (the definitions, callers, and helpers it depends on) — but report
+only vulnerabilities in {target} itself. Look for memory-safety bugs, injection
+(SQL / command / path), authentication or authorization flaws, unsafe
+deserialization, SSRF, and the like. Report only real, exploitable issues — not
+style nits or theoretical concerns. Many files in a codebase are perfectly clean:
+if {target} has no exploitable vulnerability, that is a valid and expected answer."""
+
+_OUTPUT_SPEC = """\
 When you are done, output ONLY a JSON array as your final message, with no prose
 around it. Each element must be:
 {"file": "<path relative to /src>", "line": <int>, "code": "<the vulnerable line>",
  "explanation": "<why it is exploitable>", "confidence": "high|medium|low",
  "cwe": "<CWE-id if known, else null>"}
 
-If you find no vulnerabilities, output [].
-"""
+If you find no vulnerabilities in the file, output []."""
 
 
 class RunnerError(RuntimeError):
@@ -348,10 +363,49 @@ class PodmanBackend:
 # -- claude-code runtime -----------------------------------------------------
 
 
-def build_competitor_prompt(case: Case) -> str:
-    """The audit prompt. Takes ``case`` for future per-profile scoping, but
-    deliberately reveals nothing about the planted vulnerability today."""
-    return COMPETITOR_PROMPT
+# Path fragments that mark a file as a test rather than vulnerable product code.
+# Test files routinely appear in a fix diff (the regression test for the bug), but
+# we audit the code that *had* the bug, not the test that demonstrates the fix.
+_TEST_PATH_MARKERS = ("/test/", "/tests/", "/testing/", "__tests__")
+_TEST_NAME_RE = re.compile(
+    r"(^|[._-])test([._-]|$)|test\.(java|py|js|ts|go|rb)$|"
+    r"(test|spec)s?\.(jsx?|tsx?)$|_(test|spec)\.|\.(test|spec)\.",
+    re.IGNORECASE,
+)
+
+
+def _is_test_path(path: str) -> bool:
+    lower = path.lower()
+    if any(marker in lower for marker in _TEST_PATH_MARKERS):
+        return True
+    name = path.rsplit("/", 1)[-1]
+    return bool(_TEST_NAME_RE.search(name))
+
+
+def vulnerable_files(case: Case) -> list[str]:
+    """The product files to point a competitor at: distinct, non-test files that
+    carry a real pre-patch hunk.
+
+    Derived ground truth lists every file the fix touched, including the added
+    regression test; we audit the files that actually *contained* the bug. Falls
+    back to all hunk files (then ``gt_files``) if filtering would leave nothing,
+    so a case is never silently un-runnable.
+    """
+    hunk_files = list(dict.fromkeys(h["file"] for h in case.gt_hunks if h.get("file")))
+    product = [f for f in hunk_files if not _is_test_path(f)]
+    if product:
+        return product
+    if hunk_files:
+        return hunk_files  # all hunks were in test files; audit them anyway
+    return [f for f in case.gt_files if not _is_test_path(f)] or list(case.gt_files)
+
+
+def build_competitor_prompt(case: Case, target_file: str) -> str:
+    """The neutral, file-scoped audit prompt for ``target_file``.
+
+    Takes ``case`` for parity with other builders, but deliberately reveals
+    nothing about the planted vulnerability — only which file to review."""
+    return f"{_AUDIT_INTRO.format(target=target_file)}\n\n{_OUTPUT_SPEC}"
 
 
 def claude_code_spec(
@@ -362,6 +416,7 @@ def claude_code_spec(
     auth: AuthMaterial,
     name: str,
     network: bool = True,
+    max_budget_usd: float | None = None,
 ) -> ContainerSpec:
     """Build the ContainerSpec that runs ``claude -p`` over /src as a competitor.
 
@@ -369,6 +424,8 @@ def claude_code_spec(
     which we keep verbatim; the trailing ``result`` event carries the final text,
     token usage, and cost. ``--add-dir /src`` grants read access to the mounted
     (read-only) source while the agent's writable cwd stays in its home.
+    ``max_budget_usd`` is a backstop against a runaway wander (the prompt scoping
+    is the primary cost control); ``--max-budget-usd`` only takes effect with -p.
     """
     argv = [
         "claude",
@@ -382,6 +439,8 @@ def claude_code_spec(
         "--add-dir",
         "/src",
     ]
+    if max_budget_usd is not None:
+        argv += ["--max-budget-usd", str(max_budget_usd)]
     mounts = [
         (str(claude_bin), "/usr/local/bin/claude", "ro"),
         (str(src_dir), "/src", "ro"),
@@ -462,37 +521,79 @@ def _sum_input_tokens(usage: dict[str, Any]) -> int | None:
     return sum(present) if present else None
 
 
+_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL)
+
+
+def _load_findings_list(span: str) -> list[dict[str, Any]] | None:
+    """json.loads ``span`` into a list of finding dicts, or None if it isn't one.
+
+    Retries once with invalid backslash escapes repaired — models routinely emit
+    them when quoting vulnerable code into the ``code`` / ``explanation`` fields.
+    Only arrays carrying at least one object count: a bare ``[]`` (no findings) or
+    a prose array of strings (e.g. ``["..","evil.txt"]``) is not a findings list.
+    """
+    for candidate in (span, _sanitize_escapes(span)):
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(data, list):
+            dicts = [d for d in data if isinstance(d, dict)]
+            if dicts:
+                return dicts
+            if data == []:
+                return []  # explicit "no findings"
+    return None
+
+
+def _balanced_arrays(text: str) -> list[str]:
+    """Every brace-balanced ``[...]`` span in ``text``, outermost, in order."""
+    spans: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "[":
+            depth = 0
+            for j in range(i, n):
+                if text[j] == "[":
+                    depth += 1
+                elif text[j] == "]":
+                    depth -= 1
+                    if depth == 0:
+                        spans.append(text[i : j + 1])
+                        i = j
+                        break
+        i += 1
+    return spans
+
+
 def parse_competitor_findings(text: str) -> list[dict[str, Any]]:
     """Extract the reported findings (JSON array of dicts) from the final text.
 
-    Tolerant of markdown fences / preamble, like ``parse_findings``, but keeps
-    the ``file`` field the run layer needs (which the Finding dataclass drops).
+    The model is asked for a bare JSON array, but in practice often wraps it in a
+    reasoning summary and a ```json fence — and that prose can itself contain
+    bracketed text (``["..","evil.txt"]``) that looks like, but isn't, the answer.
+    So: try the whole text; then any fenced block; then every balanced ``[...]``
+    span — and accept only an array that actually carries finding objects,
+    preferring the *last* such (a model's final answer comes last).
     """
     text = text.strip()
-    try:
-        data = json.loads(text)
-        if isinstance(data, list):
-            return [d for d in data if isinstance(d, dict)]
-    except json.JSONDecodeError:
-        pass
-    start = text.find("[")
-    if start == -1:
-        return []
-    depth = 0
-    for i in range(start, len(text)):
-        if text[i] == "[":
-            depth += 1
-        elif text[i] == "]":
-            depth -= 1
-            if depth == 0:
-                try:
-                    data = json.loads(text[start : i + 1])
-                    if isinstance(data, list):
-                        return [d for d in data if isinstance(d, dict)]
-                except json.JSONDecodeError:
-                    pass
-                break
-    return []
+    whole = _load_findings_list(text)
+    if whole is not None:
+        return whole
+
+    best: list[dict[str, Any]] | None = None
+    for fenced in _FENCE_RE.findall(text):
+        parsed = _load_findings_list(fenced.strip())
+        if parsed:  # non-empty findings in a fence win outright
+            best = parsed
+    if best is not None:
+        return best
+
+    for span in _balanced_arrays(text):
+        parsed = _load_findings_list(span)
+        if parsed:
+            best = parsed  # keep the last array that carries findings
+    return best or []
 
 
 # -- Orchestrator ------------------------------------------------------------
@@ -512,6 +613,7 @@ class BenchRunner:
         runs_dir: str | Path = "bench-runs",
         network: bool = True,
         run_timeout: float = 1800.0,
+        max_budget_usd: float | None = 0.50,
     ):
         self.db = db
         self.backend = backend or PodmanBackend()
@@ -521,15 +623,19 @@ class BenchRunner:
         self.runs_dir = Path(runs_dir)
         self.network = network
         self.run_timeout = run_timeout
+        self.max_budget_usd = max_budget_usd
 
-    def run_case(self, case: Case, competitor: Competitor) -> RunResult:
+    def run_case(
+        self, case: Case, competitor: Competitor, target_file: str
+    ) -> RunResult:
+        """Point ``competitor`` at ``target_file`` of ``case`` in a container."""
         if not case.repo_url or not case.vuln_commit:
             raise RunnerError(
                 f"case {case.ext_id} lacks repo_url/vuln_commit; not derived yet"
             )
         comp_id = self.db.upsert_competitor(competitor.to_db_fields())
         case_id = case.id if case.id is not None else self._case_id(case)
-        run_id = self.db.create_run(case_id, comp_id)
+        run_id = self.db.create_run(case_id, comp_id, target_file)
 
         try:
             safe_ext = "".join(
@@ -567,12 +673,13 @@ class BenchRunner:
 
             spec = claude_code_spec(
                 competitor,
-                build_competitor_prompt(case),
+                build_competitor_prompt(case, target_file),
                 checkout,
                 self.claude_bin,
                 material,
                 name=name,
                 network=self.network,
+                max_budget_usd=self.max_budget_usd,
             )
             self.db.start_run(run_id, container_id=name)
             started = time.monotonic()

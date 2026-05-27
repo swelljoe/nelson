@@ -313,6 +313,51 @@ def test_competitor_detection_zero_eligible_is_zero_rate():
     assert d.detection_rate == 0.0
 
 
+# -- Case rollup (one run per file) ------------------------------------------
+
+
+def test_case_scores_rolls_files_up_any_hit_wins():
+    from nelson.score import RunScore, case_scores
+
+    # Same case, two file-runs: a miss and a hit -> the case is a hit.
+    runs = [
+        RunScore(1, "GHSA-a", "alpha", "complete", "miss"),
+        RunScore(2, "GHSA-a", "alpha", "complete", "hit", judge_cost=0.03),
+    ]
+    cases = case_scores(runs)
+    assert len(cases) == 1
+    assert cases[0].outcome == "hit"
+    assert cases[0].judge_cost == pytest.approx(0.03)
+
+
+def test_case_scores_undetermined_beats_miss():
+    from nelson.score import RunScore, case_scores
+
+    # No hit; one file undetermined -> the case is judge_error, never a miss.
+    runs = [
+        RunScore(1, "GHSA-b", "alpha", "complete", "miss"),
+        RunScore(2, "GHSA-b", "alpha", "complete", "judge_error"),
+    ]
+    assert case_scores(runs)[0].outcome == "judge_error"
+
+
+def test_detection_report_counts_cases_not_runs():
+    from nelson.score import RunScore
+
+    # One case, three file-runs (2 miss + 1 hit). Detection is per *case*: 1/1.
+    runs = [
+        RunScore(1, "GHSA-c", "alpha", "complete", "miss"),
+        RunScore(2, "GHSA-c", "alpha", "complete", "hit"),
+        RunScore(3, "GHSA-c", "alpha", "complete", "miss"),
+    ]
+    report = detection_report(runs)
+    assert len(report) == 1
+    assert report[0].hits == 1
+    assert report[0].misses == 0
+    assert report[0].eligible == 1
+    assert report[0].detection_rate == 1.0
+
+
 # -- Real judge wiring (no network) ------------------------------------------
 
 

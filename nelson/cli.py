@@ -1131,10 +1131,22 @@ def bench():
     help="Also resolve the case from this cases/ manifest dir if not in the DB.",
 )
 @click.option(
+    "--file",
+    "target_file",
+    default=None,
+    help="Audit only this file (default: every vulnerable file in the case).",
+)
+@click.option(
     "--no-network", is_flag=True, help="Run the container with no network (offline)."
 )
 @click.option(
     "--timeout", default=1800.0, type=float, help="Per-run wall-clock cap (s)."
+)
+@click.option(
+    "--max-budget-usd",
+    default=0.50,
+    type=float,
+    help="Per-run cost backstop passed to claude -p (0 to disable).",
 )
 def bench_run(
     ext_id: str,
@@ -1143,15 +1155,27 @@ def bench_run(
     cache_dir: str,
     runs_dir: str,
     from_manifest: str | None,
+    target_file: str | None,
     no_network: bool,
     timeout: float,
+    max_budget_usd: float,
 ):
-    """Run one competitor against case EXT_ID inside a container."""
-    from .runner import BenchRunner
+    """Point one competitor at case EXT_ID's vulnerable file(s), one run each.
+
+    A run audits a single file (the model is told which file, never what bug). By
+    default every vulnerable (non-test) file in the case is run; --file scopes to
+    one. The case counts as detected (P3) if any of its file-runs is a hit.
+    """
+    from .runner import BenchRunner, vulnerable_files
 
     db = Database(db_path)
     competitor = _parse_competitor(competitor_spec)
     case = _resolve_case(ext_id, db, from_manifest)
+    files = [target_file] if target_file else vulnerable_files(case)
+    if not files:
+        raise click.ClickException(
+            f"case {case.ext_id} has no vulnerable files to audit (not derived?)"
+        )
 
     runner = BenchRunner(
         db,
@@ -1159,21 +1183,29 @@ def bench_run(
         runs_dir=runs_dir,
         network=not no_network,
         run_timeout=timeout,
+        max_budget_usd=max_budget_usd or None,
     )
-    click.echo(f"Running {competitor.name} against {case.ext_id} ({case.project})…")
-    result = runner.run_case(case, competitor)
-
-    click.echo(f"Status:    {result.status}")
-    if result.error:
-        click.echo(f"Error:     {result.error}")
-    click.echo(f"Findings:  {len(result.findings)}")
-    if result.wall_clock_s is not None:
-        click.echo(f"Wall:      {result.wall_clock_s:.1f}s")
-    if result.tokens_in is not None:
-        click.echo(f"Tokens:    in={result.tokens_in} out={result.tokens_out}")
-    if result.cost_usd is not None:
-        click.echo(f"Cost:      ${result.cost_usd:.4f}")
-    if result.status != "complete":
+    click.echo(
+        f"Running {competitor.name} against {case.ext_id} ({case.project}) — "
+        f"{len(files)} file(s)…"
+    )
+    worst = 0
+    for f in files:
+        click.echo(f"\n• {f}")
+        result = runner.run_case(case, competitor, f)
+        click.echo(f"  status:   {result.status}")
+        if result.error:
+            click.echo(f"  error:    {result.error}")
+        click.echo(f"  findings: {len(result.findings)}")
+        if result.wall_clock_s is not None:
+            click.echo(f"  wall:     {result.wall_clock_s:.1f}s")
+        if result.tokens_in is not None:
+            click.echo(f"  tokens:   in={result.tokens_in} out={result.tokens_out}")
+        if result.cost_usd is not None:
+            click.echo(f"  cost:     ${result.cost_usd:.4f}")
+        if result.status != "complete":
+            worst = 1
+    if worst:
         sys.exit(1)
 
 
