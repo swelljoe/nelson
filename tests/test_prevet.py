@@ -149,9 +149,7 @@ def test_unwrap_claude_json_sums_cache_and_reads_total_cost():
 def test_unwrap_claude_json_falls_back_to_legacy_cost_key():
     from nelson.prevet import _unwrap_claude_json
 
-    raw = json.dumps(
-        {"type": "result", "result": "ok", "usage": {}, "cost_usd": 0.05}
-    )
+    raw = json.dumps({"type": "result", "result": "ok", "usage": {}, "cost_usd": 0.05})
     _, _, _, cost = _unwrap_claude_json(raw)
     assert cost == 0.05
 
