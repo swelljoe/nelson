@@ -281,9 +281,10 @@ class Database:
                 except sqlite3.OperationalError as exc:
                     # Migration 5 may be partially applied if ALTER TABLE succeeds
                     # but writing schema_version does not; tolerate reruns.
-                    if version == 5 and "duplicate column name: target_file" in str(
-                        exc
-                    ).lower():
+                    if (
+                        version == 5
+                        and "duplicate column name: target_file" in str(exc).lower()
+                    ):
                         continue
                     raise
         self.conn.execute(
