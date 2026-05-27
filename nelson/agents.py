@@ -465,7 +465,7 @@ class GeminiCLIAdapter(AgentAdapter):
                 findings=[],
                 raw_output=raw,
                 failure_kind=kind,
-                error=f"exit code {result.returncode}: {stderr[:500]}",
+                error=error,
             )
 
         # Parse the JSON output from gemini --output-format json
