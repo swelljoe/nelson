@@ -1,0 +1,36 @@
+{
+  "id": "OSV-2017-1",
+  "aliases": null,
+  "affected": [
+    {
+      "package": {
+        "name": "curl",
+        "ecosystem": "OSS-Fuzz",
+        "purl": "pkg:generic/curl"
+      },
+      "ranges": [
+        {
+          "type": "GIT",
+          "repo": "https://github.com/curl/curl.git",
+          "events": [
+            {
+              "introduced": "7ee59512f875604eb468fb6f3d26e39290f781c9"
+            },
+            {
+              "fixed": "544bfdebea2a9e8be1c01fc7954cd49638fe2803"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "references": [
+    {
+      "type": "REPORT",
+      "url": "https://bugs.chromium.org/p/oss-fuzz/issues/detail?id=3956"
+    }
+  ],
+  "database_specific": {
+    "cwe_ids": []
+  }
+}

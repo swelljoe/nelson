@@ -1,0 +1,56 @@
+{
+  "as_of": "2026-05-22T17:27:03.605363Z",
+  "cve_records": [
+    {
+      "findings": [
+        {
+          "ant_id": "ANT-2026-HY56VRSB",
+          "bug_class": "heap-buffer-overflow",
+          "project": "nginx",
+          "severity": "high",
+          "title": "Heap buffer overflow in DAV COPY/MOVE with alias directive. Destination URI shorter than alias length causes size_t underflow in ngx_http_map_uri_to_path buffer calculation, then ngx_copy overflows th"
+        },
+        {
+          "ant_id": "ANT-2026-VS18SA90",
+          "bug_class": "arbitrary-file-write",
+          "project": "nginx",
+          "severity": "critical",
+          "title": "unauthenticated remote file write in nginx WebDAV module"
+        }
+      ],
+      "identifier": "CVE-2026-27654",
+      "kind": "cve",
+      "revealed_at": "2026-05-20T07:40:37.681447Z"
+    },
+    {
+      "findings": [
+        {
+          "ant_id": "ANT-2026-EBDTPNVH",
+          "bug_class": "heap-buffer-overflow",
+          "project": "jq",
+          "severity": "medium",
+          "title": "Integer overflow in string concatenation leading to 1 GB memcpy heap buffer overflow"
+        }
+      ],
+      "identifier": "CVE-2026-32316",
+      "kind": "cve",
+      "revealed_at": "2026-05-20T07:40:37.681447Z"
+    }
+  ],
+  "ghsa_records": [
+    {
+      "findings": [
+        {
+          "ant_id": "ANT-2026-TZQ1KH7E",
+          "bug_class": "use-after-free",
+          "project": "libyang",
+          "severity": "medium",
+          "title": "Heap use-after-free write in metadata list management during XML data parsing due to incorrect list head pointer update"
+        }
+      ],
+      "identifier": "GHSA-9f49-8x56-jmjc",
+      "kind": "ghsa",
+      "revealed_at": "2026-05-20T07:40:37.681447Z"
+    }
+  ]
+}

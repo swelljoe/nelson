@@ -1,6 +1,6 @@
 # Nelson Benchmark Harness — Implementation Plan
 
-> Status: P0 landed (2026-05-26); P1 next. Written 2026-05-26.
+> Status: P1 landed (2026-05-26); P2 next. Written 2026-05-26.
 > This document is the durable source of truth for the benchmark effort. Update it as phases land.
 
 ## 1. Goal
@@ -49,13 +49,21 @@ via hosted API):
 | MiMo v2.5 | agent-agnostic | raw-API loop or `pi`-based custom agent | API key (env var) |
 | DeepSeek | yes | its native agent CLI | API key (env var) |
 | Kimi k2.6 | yes | its native agent CLI | API key (env var) |
-| Claude (Opus 4.7) | yes (Claude Code) | **judge**, used sparingly as competitor | `ANTHROPIC_API_KEY`, API-billed |
+| Gemini | yes (gemini CLI) | `gemini` CLI | subscription (CLI sign-in, **no key**) |
+| Claude (Opus 4.7) | yes (Claude Code) | **judge**, used sparingly as competitor | subscription via `claude -p` (CLI sign-in, **no key**) |
 
-- All three seed competitors are **API-key auth** → no OAuth dance for the initial set, so
-  the OAuth-bootstrap machinery is *designed for* but *deferred*.
-- **Claude is primarily the judge** (`claude -p`, billed at API rates — rolling subscription
-  limits no longer apply to `-p`). Judge token cost is tracked **separately** from competitor
-  cost so it never distorts the Pareto picture.
+- The MiMo / DeepSeek / Kimi seed competitors are **API-key auth** (env var) → no OAuth dance
+  for that set, so the OAuth-bootstrap machinery is *designed for* but *deferred*.
+- **Claude and Gemini use CLI subscription auth, not an API key.** `claude -p` (and the
+  `gemini` CLI) run against the already-signed-in subscription on the host; for Claude the
+  per-token usage draws against the plan's **included monthly budget** (e.g. $100/mo) — it is
+  *not* billed via `ANTHROPIC_API_KEY`. So a no-profile competitor/runtime simply inherits the
+  host's authenticated CLI session (the P0 default).
+- **Claude is primarily the judge** (`claude -p`). The judge runs on the **host, not in a
+  container**, so it needs no credential injection — the CLI is already authenticated. Judge
+  token cost is tracked **separately** from competitor cost so it never distorts the Pareto
+  picture. (A Claude/Gemini *competitor* run inside a container is the case that would need a
+  long-lived token, e.g. `CLAUDE_CODE_OAUTH_TOKEN` — see §11; deferred until needed.)
 - Exact agent CLI names + auth env vars for MiMo / DeepSeek / Kimi are likely newer than the
   assistant's training data — **verify at wiring time (P7)**, do not guess. Registry treats
   them as data so adding a competitor is config, not code.
@@ -140,8 +148,30 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
   `preflight()` ping; DB `mark_job_auth_failed` / `mark_job_infra_error` (terminal,
   excluded from `coverage_for_scans` so they can never become a miss); scanner routing
   of the three failure kinds; `tests/` (36 tests, pytest added to dev deps).
-- **P1 — Corpus foundation**: importer + OSV/GHSA/NVD enrichment + pre-patch derivation +
-  Opus pre-vet → vetted manifest. *Gate: hand-check ~5 derived cases vs their advisories.*
+- **P1 — Corpus foundation** ✅ *(branch `bench-p1-corpus`)*. Source-pluggable importer +
+  OSV/NVD enrichment + pre-patch derivation + Opus pre-vet → vetted manifest.
+  *Gate met: 5 cases derived live from the 2026 CVD seed and hand-checked (below).*
+  Delivered: schema migration path + `cases` table (`db.py`); `Case` model, `CVDSeedSource`,
+  and `cases/*.yaml` manifest I/O (`corpus.py`); OSV/NVD enrichment behind an injectable
+  HTTP client — GIT-range fix SHA, `/commit/` reference fallback, CVE↔GHSA aliases, CWE
+  (`enrich.py`); pre-patch derivation — `vuln_commit = fix^1`, `gt_files`/`gt_hunks` from the
+  OLD side of each hunk, behind an injectable `GitRunner` doing depth=2 SHA fetches
+  (`derive.py`); `ClaudeCLIJudge` pre-vet with the integrity rule that a judge *failure* never
+  retires a case (`prevet.py`); `CorpusPipeline` (idempotent, resumable, per-stage optional)
+  + `nelson corpus import/build/list/show/export` CLI. Tested offline against captured
+  OSV/NVD/CVD fixtures + a real local git repo.
+  - **Real-world findings.** The 2026 CVD payload lists 26 published advisories (14 CVE +
+    12 GHSA). A live build enriched 17 and derived 5 — so OSV/NVD already cover a chunk of
+    the fresh set, but ~⅓ aren't resolvable to a fix commit yet (no GIT range / no `/commit/`
+    reference, e.g. Maven-style ecosystem advisories like log4shell). Enrichment is therefore
+    idempotent and re-runnable as sources catch up; un-resolvable seeds stay `candidate`.
+  - **Gate hand-check (all 5: `vuln_commit` verified == `fix^1`).** ImageMagick GHSA-x9h5
+    (CWE-122 → `MagickCore/draw.c`), junrar GHSA-j273 (CWE-22 path traversal), Ghost
+    GHSA-w52v (CWE-89 SQLi), CraftCMS GHSA-cc7p (CWE-863) all derived coherent source-file
+    ground truth. MapServer CVE-2026-33721 mis-derived to a *release* commit ("update for
+    8.6.1 release"; files `CITATION.cff/CMakeLists.txt/HISTORY.md`) — OSV pointed at the
+    release, not the patch. This is precisely the noise the Opus pre-vet step is designed to
+    retire, and validates keeping a human-vettable `vetted/retired` manifest.
 - **P2 — One competitor end-to-end**: podman runner + one runtime on a few cases.
   *Gate: a real 0-day found and transcript captured inside a container.*
 - **P3 — Scoring**: localization gate + truth judge → detection reporting.
@@ -187,7 +217,13 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
   `bug_class`, `severity`, `title`}. **Lacks** repo URL / fix commit / version ranges / CWE —
   resolve those via OSV.dev / GitHub Advisory DB / NVD. ~88 published advisories; 1,596
   findings across 281 projects.
-- Claude Code headless auth: `ANTHROPIC_API_KEY` (per-token); `claude setup-token` →
-  `CLAUDE_CODE_OAUTH_TOKEN` (1-yr, subscription, works in `-p`, NOT in `--bare`); creds at
-  `~/.claude/.credentials.json` (0600) or under `CLAUDE_CONFIG_DIR`. Prefer long-lived tokens
-  over shared credential files for parallel runs (refresh/locking undocumented).
+- Claude Code auth (this project): **subscription via `claude -p`, no API key.** The host CLI
+  is signed in and per-token usage draws against the plan's included monthly budget (e.g.
+  $100/mo); `claude -p --output-format json` reports a per-call cost we capture for separate
+  accounting. The judge runs on the host (no container) so it just inherits this session.
+  *Only* a containerized Claude competitor would need credential injection — options are
+  `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` (1-yr, subscription, works in `-p`, NOT in
+  `--bare`) or mounting `~/.claude/.credentials.json` (0600, or under `CLAUDE_CONFIG_DIR`);
+  prefer the long-lived token for parallel runs (file refresh/locking undocumented). The
+  `ANTHROPIC_API_KEY` path exists but is **not** what we use.
+- Gemini likewise uses the `gemini` CLI's subscription sign-in (no key).

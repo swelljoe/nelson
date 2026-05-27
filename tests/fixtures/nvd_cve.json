@@ -1,0 +1,39 @@
+{
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2021-44228",
+        "weaknesses": [
+          {
+            "source": "security@apache.org",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-20"
+              },
+              {
+                "lang": "en",
+                "value": "CWE-400"
+              },
+              {
+                "lang": "en",
+                "value": "CWE-502"
+              }
+            ]
+          },
+          {
+            "source": "nvd@nist.gov",
+            "type": "Secondary",
+            "description": [
+              {
+                "lang": "en",
+                "value": "CWE-917"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

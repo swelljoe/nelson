@@ -933,3 +933,136 @@ def haha(
         f" or 'nelson report {open_id} --verdict confirmed'"
         " for details."
     )
+
+
+# -- Benchmark corpus --------------------------------------------------------
+
+CVD_PAYLOAD_URL = "https://red.anthropic.com/2026/cvd/data/payload.json"
+
+
+@main.group()
+def corpus():
+    """Build and inspect the benchmark vulnerability corpus."""
+
+
+@corpus.command(name="import")
+@click.option(
+    "--url", default=CVD_PAYLOAD_URL, help="CVD payload.json URL to seed from."
+)
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+def corpus_import(url: str, db_path: str):
+    """Seed candidate cases from an Anthropic CVD payload."""
+    from .corpus import CVDSeedSource, import_seeds
+    from .enrich import HttpxClient, fetch_cvd_payload
+
+    db = Database(db_path)
+    try:
+        payload = fetch_cvd_payload(url, HttpxClient())
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    n = import_seeds(CVDSeedSource(payload), db)
+    click.echo(f"Seeded {n} cases from {url}")
+    _echo_status_counts(db)
+
+
+@corpus.command()
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+@click.option("--cache-dir", default="corpus-cache", help="Where repos are fetched.")
+@click.option("--judge-model", default="opus", help="Model for the pre-vet judge.")
+@click.option("--vet-threshold", default=0.5, type=float, help="Min confidence to vet.")
+@click.option("--limit", default=0, type=int, help="Max candidates per pass (0=all).")
+@click.option("--no-enrich", is_flag=True, help="Skip OSV/NVD enrichment.")
+@click.option("--no-derive", is_flag=True, help="Skip git pre-patch derivation.")
+@click.option("--no-vet", is_flag=True, help="Skip the Opus pre-vet judge.")
+def build(
+    db_path: str,
+    cache_dir: str,
+    judge_model: str,
+    vet_threshold: float,
+    limit: int,
+    no_enrich: bool,
+    no_derive: bool,
+    no_vet: bool,
+):
+    """Advance candidate cases: enrich -> derive -> pre-vet (all idempotent)."""
+    from .corpus import CorpusPipeline
+    from .derive import SubprocessGitRunner
+    from .enrich import HttpxClient, NVDEnricher, OSVEnricher
+    from .prevet import ClaudeCLIJudge
+
+    http = HttpxClient()
+    enrichers = [] if no_enrich else [OSVEnricher(http), NVDEnricher(http)]
+    git = None if no_derive else SubprocessGitRunner()
+    judge = None if no_vet else ClaudeCLIJudge(model=judge_model)
+
+    pipe = CorpusPipeline(
+        Database(db_path),
+        enrichers=enrichers,
+        git=git,
+        judge=judge,
+        cache_dir=cache_dir,
+        vet_threshold=vet_threshold,
+    )
+    summary = pipe.build(limit=limit or None)
+    click.echo("Build pass complete:")
+    for k, v in summary.as_dict().items():
+        click.echo(f"  {k}: {v}")
+
+
+@corpus.command(name="list")
+@click.option("--status", default=None, help="Filter by status.")
+@click.option("--source", default=None, help="Filter by source (cvd/osv/manual).")
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+def corpus_list(status: str | None, source: str | None, db_path: str):
+    """List corpus cases."""
+    db = Database(db_path)
+    rows = db.list_cases(status=status, source=source)
+    if not rows:
+        click.echo("No cases.")
+        return
+    click.echo(f"{'EXT_ID':<22} {'STATUS':<10} {'PROJECT':<16} {'CWE':<10} FIX")
+    for r in rows:
+        fix = (r["fix_commit"] or "")[:12]
+        click.echo(
+            f"{r['ext_id']:<22} {r['status']:<10} "
+            f"{(r['project'] or '-'):<16} {(r['cwe'] or '-'):<10} {fix or '-'}"
+        )
+    _echo_status_counts(db)
+
+
+@corpus.command()
+@click.argument("ext_id")
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+def show(ext_id: str, db_path: str):
+    """Show a single case in full, including derived ground truth."""
+    db = Database(db_path)
+    row = db.get_case(ext_id)
+    if row is None:
+        click.echo(f"Case {ext_id} not found.", err=True)
+        sys.exit(1)
+    for key in row.keys():  # noqa: SIM118 — sqlite3.Row needs .keys() for columns
+        value = row[key]
+        if key in ("gt_files", "gt_hunks") and value:
+            value = json.loads(value)
+        click.echo(f"{key:>16}: {value}")
+
+
+@corpus.command()
+@click.option("--cases-dir", default="cases", help="Directory to write manifests into.")
+@click.option("--status", default="vetted", help="Which cases to export.")
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+def export(cases_dir: str, status: str, db_path: str):
+    """Pin cases to cases/<ext_id>.yaml (default: the vetted set)."""
+    from .corpus import CorpusPipeline
+
+    pipe = CorpusPipeline(Database(db_path))
+    n = pipe.export_manifest(cases_dir, status=status)
+    click.echo(f"Exported {n} {status} case(s) to {cases_dir}/")
+
+
+def _echo_status_counts(db: Database):
+    counts = db.count_cases_by_status()
+    if counts:
+        summary = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+        click.echo(f"Corpus: {summary}")
