@@ -1,6 +1,6 @@
 # Nelson Benchmark Harness — Implementation Plan
 
-> Status: P2 landed (2026-05-27); P3 next. Written 2026-05-26.
+> Status: P3 landed (2026-05-27); P4 next. Written 2026-05-26.
 > This document is the durable source of truth for the benchmark effort. Update it as phases land.
 
 ## 1. Goal
@@ -211,7 +211,41 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     676 s wall, ~825k input tokens (cache-dominated), $1.33, full 149-event agentic
     transcript (Read/Bash/Grep + a sub-agent) captured. This is exactly the
     localization-gate + semantic-match signal P3 will score automatically.
-- **P3 — Scoring**: localization gate + truth judge → detection reporting.
+- **P3 — Scoring** ✅ *(branch `bench-p3-scoring`)*. Localization gate + Opus truth judge
+  over `run_findings` → per-run hit/miss + detection reporting.
+  *Gate met: the junrar fixture run scored a HIT, and the judge discriminated — it confirmed
+  the real bug and rejected a same-file/same-CWE finding as a different bug (below).*
+  Delivered: schema migration v4 + `judgments` ledger (one row per judge call: verdict +
+  token cost, so judge spend is tracked separately from competitor cost) and accessors
+  `record_finding_score` / `add_judgment` / `judgments` / `get_case_by_id` /
+  `get_competitor_by_id` (`db.py`); `nelson/score.py` — a deterministic `localize` gate
+  (path-suffix match + line tolerance over `gt_hunks`), `ClaudeTruthJudge` (mirrors the
+  pre-vet judge: host `claude -p`, sees the advisory, a failure is surfaced not guessed),
+  the `Scorer` (`score_run` localizes → judges only localized findings → persists; outcome
+  ∈ hit/miss/judge_error/excluded), `load_run_score` (rebuilds from the DB with no judge
+  spend), `needs_scoring`, and `detection_report`; `nelson bench score [RUN_ID]` CLI
+  (per-run verbose, or a per-competitor detection table). 132 tests total.
+  - **Scoring is two gates, both required for a hit.** (1) Localization is cheap and
+    deterministic: the competitor reads the pre-patch tree, so `gt_hunks` line numbers *are*
+    its line numbers — the gate is near-exact and the tolerance (default ±10) only forgives
+    reporting drift. Only localized findings reach the judge (the rest are FP candidates for
+    P4). (2) The Opus truth judge rules same-bug vs different-bug on the *advisory vs the
+    model's own explanation* — no code re-checkout needed.
+  - **Integrity carried through scoring.** Only `complete` runs are scored; `auth_failed` /
+    `infra_error` runs are `excluded` (never a miss). A judge *failure* (timeout / auth /
+    unparseable) makes a localized finding **undetermined**, not "different bug": if no other
+    finding is a confirmed hit, the run's outcome is `judge_error` — excluded from the
+    detection-rate denominator, never silently demoted to a miss. (Mirrors the pre-vet rule.)
+  - **Judge-cost bug fixed (also fixes P1 pre-vet).** `_unwrap_claude_json` read `cost_usd`,
+    but the CLI emits `total_cost_usd`, so every pre-vet/judge cost was being recorded as
+    `None`; it also under-counted input tokens (final-turn only). Now reads `total_cost_usd`
+    (legacy `cost_usd` fallback) and sums `input_tokens + cache_creation + cache_read`.
+  - **Gate run (junrar GHSA-j273).** With default tolerance, 2 of Sonnet's 3 findings
+    localized (lines 61 ∈ 55–61, 76 ∈ 73–79; line 35 correctly off-target). The truth judge
+    confirmed line 76 as the exact backslash Zip-Slip the advisory describes (`same_bug`) and
+    rejected line 61 as a *different* root-cause flaw (a `startsWith` prefix check, same file
+    and same CWE-22) — proving the hybrid gate isn't rubber-stamping localization. Outcome:
+    **HIT**, detection 100% over 1 eligible case, $0.096 judge spend logged to `judgments`.
 - **P4 — Precision**: FP judge over non-ground-truth findings → precision metrics.
 - **P5 — Leaderboard + Pareto** reporting.
 - **P6 — Automation loop**: scheduling + corpus/competitor lifecycle.

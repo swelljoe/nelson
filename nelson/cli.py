@@ -1219,3 +1219,94 @@ def bench_show_run(run_id: int, db_path: str):
         click.echo(f"  [{f['confidence'] or '?'}] {loc} {f['cwe'] or ''}")
         if f["description"]:
             click.echo(f"      {f['description']}")
+
+
+def _emit_run_score(rs) -> None:
+    """Verbose per-run scoring output (one run)."""
+    click.echo(
+        f"Run {rs.run_id}: {rs.case_ext_id} | {rs.competitor_name} | "
+        f"{rs.status} -> {rs.outcome.upper()}"
+    )
+    for f in rs.findings:
+        loc = f"{f.file}:{f.line}" if f.file else "(no file)"
+        tag = "localized" if f.localized else "off-target"
+        click.echo(f"  [{tag}] {loc}")
+        if f.truth is not None:
+            click.echo(f"      judge: {f.truth.label} — {f.truth.reasoning}")
+    if rs.judge_cost:
+        click.echo(f"  judge cost: ${rs.judge_cost:.4f}")
+
+
+def _emit_detection_report(reports) -> None:
+    """Per-competitor detection table."""
+    click.echo(
+        f"\n{'COMPETITOR':<26} {'DET':>5} {'HIT':>4} {'MISS':>4} "
+        f"{'JERR':>4} {'EXCL':>4} {'JUDGE$':>8}"
+    )
+    for d in reports:
+        rate = f"{d.detection_rate:.0%}" if d.eligible else "-"
+        click.echo(
+            f"{d.competitor_name:<26} {rate:>5} {d.hits:>4} {d.misses:>4} "
+            f"{d.judge_error:>4} {d.excluded:>4} ${d.judge_cost:>7.3f}"
+        )
+    click.echo(
+        "\nDET = hits / eligible (hits + genuine misses). "
+        "JERR (undetermined) and EXCL (auth/infra) are never counted as misses."
+    )
+
+
+@bench.command(name="score")
+@click.argument("run_id", required=False, type=int)
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+@click.option("--judge-model", default="opus", help="Truth judge model (claude -p).")
+@click.option(
+    "--tolerance",
+    default=10,
+    type=int,
+    help="Lines a finding may drift from a patched hunk and still localize.",
+)
+@click.option(
+    "--rescore",
+    is_flag=True,
+    help="Re-judge complete runs already scored (re-spends judge budget).",
+)
+def bench_score(
+    run_id: int | None,
+    db_path: str,
+    judge_model: str,
+    tolerance: int,
+    rescore: bool,
+):
+    """Score benchmark runs: localization gate + Opus truth judge -> hit / miss.
+
+    With RUN_ID, score that one run verbosely. Without, score every run and print
+    the per-competitor detection report; complete runs already scored are read
+    back from the DB (no judge spend) unless --rescore. Runs that never reached
+    `complete` (auth_failed / infra_error) are excluded, never counted as misses.
+    """
+    from .score import ClaudeTruthJudge, Scorer, detection_report
+
+    db = Database(db_path)
+    scorer = Scorer(db, ClaudeTruthJudge(model=judge_model), tolerance=tolerance)
+
+    if run_id is not None:
+        _emit_run_score(scorer.score_run(run_id))
+        return
+
+    rows = db.list_runs()
+    if not rows:
+        click.echo("No runs to score.")
+        return
+    run_scores = []
+    for r in rows:
+        rid = r["id"]
+        if r["status"] == "complete" and (rescore or scorer.needs_scoring(rid)):
+            rs = scorer.score_run(rid)
+        else:
+            rs = scorer.load_run_score(rid)
+        run_scores.append(rs)
+        click.echo(
+            f"  run {rs.run_id:>3} {rs.case_ext_id:<22} "
+            f"{rs.competitor_name:<22} -> {rs.outcome}"
+        )
+    _emit_detection_report(detection_report(run_scores))
