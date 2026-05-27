@@ -679,20 +679,66 @@ class Database:
         )
         self.conn.commit()
 
-    def mark_run_auth_failed(self, run_id: int, error_msg: str) -> None:
+    def mark_run_auth_failed(
+        self,
+        run_id: int,
+        error_msg: str,
+        *,
+        transcript_path: str | None = None,
+        raw_output: str | None = None,
+        wall_clock_s: float | None = None,
+    ) -> None:
         """Terminal: the competitor could not authenticate. Integrity rule: this
         is NOT a miss and must be excluded from any scoring denominator."""
-        self._mark_run_failed(run_id, "auth_failed", error_msg)
+        self._mark_run_failed(
+            run_id,
+            "auth_failed",
+            error_msg,
+            transcript_path=transcript_path,
+            raw_output=raw_output,
+            wall_clock_s=wall_clock_s,
+        )
 
-    def mark_run_infra_error(self, run_id: int, error_msg: str) -> None:
+    def mark_run_infra_error(
+        self,
+        run_id: int,
+        error_msg: str,
+        *,
+        transcript_path: str | None = None,
+        raw_output: str | None = None,
+        wall_clock_s: float | None = None,
+    ) -> None:
         """Terminal: infra/transport failure (container, timeout, unexplained
         non-zero exit). Like auth_failed, never counted as a miss."""
-        self._mark_run_failed(run_id, "infra_error", error_msg)
+        self._mark_run_failed(
+            run_id,
+            "infra_error",
+            error_msg,
+            transcript_path=transcript_path,
+            raw_output=raw_output,
+            wall_clock_s=wall_clock_s,
+        )
 
-    def _mark_run_failed(self, run_id: int, status: str, error_msg: str) -> None:
+    def _mark_run_failed(
+        self,
+        run_id: int,
+        status: str,
+        error_msg: str,
+        *,
+        transcript_path: str | None = None,
+        raw_output: str | None = None,
+        wall_clock_s: float | None = None,
+    ) -> None:
         self.conn.execute(
-            "UPDATE runs SET status = ?, completed_at = ?, error_msg = ? WHERE id = ?",
-            (status, _now(), error_msg, run_id),
+            """UPDATE runs
+               SET status = ?,
+                   completed_at = ?,
+                   error_msg = ?,
+                   wall_clock_s = COALESCE(?, wall_clock_s),
+                   transcript_path = COALESCE(?, transcript_path),
+                   raw_output = COALESCE(?, raw_output)
+               WHERE id = ?""",
+            (status, _now(), error_msg, wall_clock_s, transcript_path, raw_output, run_id),
         )
         self.conn.commit()
 
