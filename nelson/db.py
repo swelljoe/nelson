@@ -847,12 +847,14 @@ class Database:
         self.conn.execute(
             """UPDATE run_findings
                SET matches_ground_truth = ?,
-                   judge_truth_verdict = COALESCE(?, judge_truth_verdict),
-                   judge_reasoning = COALESCE(?, judge_reasoning)
+                   judge_truth_verdict = CASE WHEN ? THEN ? ELSE NULL END,
+                   judge_reasoning = CASE WHEN ? THEN ? ELSE NULL END
                WHERE id = ?""",
             (
                 1 if matches_ground_truth else 0,
+                matches_ground_truth,
                 judge_truth_verdict,
+                matches_ground_truth,
                 judge_reasoning,
                 finding_id,
             ),
