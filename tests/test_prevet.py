@@ -63,6 +63,17 @@ def test_parse_verdict_recovers_from_invalid_escapes():
     assert "interpolates into raw SQL" in reasoning  # reasoning preserved
 
 
+def test_parse_verdict_recovers_from_invalid_unicode_escape():
+    text = (
+        r'{"confidence": 0.81, "reasoning": "template includes literal '
+        r'\u{1F600} marker in source"}'
+    )
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(text)
+    expected = "template includes literal \\u{1F600} marker in source"
+    assert parse_verdict(text) == (0.81, expected)
+
+
 def test_parse_verdict_salvages_confidence_when_object_truncated():
     # Object never closes (truncated reply), so the {...} match fails, but the
     # gating field is independently readable. Salvage it; reasoning is lost.

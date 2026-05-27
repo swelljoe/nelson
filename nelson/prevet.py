@@ -108,6 +108,7 @@ def build_prevet_prompt(case: Case, diff: str) -> str:
 # emits others, which makes json.loads reject the *whole* verdict. We repair such
 # replies rather than discard a real assessment over a stray backslash.
 _VALID_JSON_ESCAPES = '"\\/bfnrtu'
+_HEX_CHARS = set("0123456789abcdefABCDEF")
 # Last-resort salvage: the confidence is the field that gates vetting, and it is
 # readable on its own even when the surrounding object won't parse.
 _CONFIDENCE_RE = re.compile(r'"confidence"\s*:\s*(-?\d+(?:\.\d+)?)')
@@ -123,8 +124,14 @@ def _sanitize_escapes(s: str) -> str:
     i = 0
     while i < len(s):
         if s[i] == "\\" and i + 1 < len(s) and s[i + 1] in _VALID_JSON_ESCAPES:
-            out.append(s[i : i + 2])  # valid escape: keep the pair verbatim
-            i += 2
+            if s[i + 1] == "u" and (
+                i + 6 > len(s) or any(ch not in _HEX_CHARS for ch in s[i + 2 : i + 6])
+            ):
+                out.append("\\\\")  # invalid \uXXXX: escape the backslash
+                i += 1
+            else:
+                out.append(s[i : i + 2])  # valid escape: keep the pair verbatim
+                i += 2
         elif s[i] == "\\":
             out.append("\\\\")  # lone/invalid backslash: escape it
             i += 1
