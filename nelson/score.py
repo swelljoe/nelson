@@ -559,7 +559,7 @@ class CaseScore:
         return self.outcome == "hit"
 
 
-# Worst-to-best precedence for rolling file-run outcomes into a case outcome:
+# Best-to-worst precedence for rolling file-run outcomes into a case outcome:
 # any hit wins; failing that, an undetermined file (judge_error) keeps the case
 # out of the denominator rather than calling it a clean miss; a genuine miss
 # beats excluded. (Integrity: never count a case as missed when a file that
