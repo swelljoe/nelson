@@ -4,8 +4,12 @@ import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-SCHEMA_VERSION = 1
+# Bumped to 2 for the benchmark corpus (`cases` table). New tables/columns go in
+# MIGRATIONS keyed by their target version; _apply_migrations walks a stored DB
+# up to SCHEMA_VERSION, so old scan databases upgrade in place.
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -61,9 +65,92 @@ CREATE TABLE IF NOT EXISTS findings (
 );
 """
 
+# Schema migrations, keyed by the version they bring the DB *to*. Each is run
+# once, in order, on a database whose stored version is lower. Statements must be
+# safe to re-run (IF NOT EXISTS) so a half-applied migration recovers cleanly.
+MIGRATIONS: dict[int, str] = {
+    2: """
+    -- Benchmark corpus + ground truth. One row per upstream advisory
+    -- (ext_id = the seed identifier, CVE-… or GHSA-…). A case moves
+    -- candidate -> vetted (Opus pre-vet) -> retired (derivation unusable).
+    CREATE TABLE IF NOT EXISTS cases (
+        id INTEGER PRIMARY KEY,
+        source TEXT NOT NULL,                 -- cvd / osv / manual
+        ext_id TEXT NOT NULL UNIQUE,          -- seed identifier (CVE-… / GHSA-…)
+        cve_id TEXT,
+        ghsa_id TEXT,
+        ant_id TEXT,                          -- Anthropic finding id(s)
+        project TEXT,
+        repo_url TEXT,
+        vuln_commit TEXT,                     -- pre-patch SHA (= fix_commit parent)
+        fix_commit TEXT,
+        bug_class TEXT,
+        cwe TEXT,
+        disclosure_date TEXT,
+        severity TEXT,
+        description TEXT,
+        gt_files TEXT,                        -- JSON: list[str]
+        gt_hunks TEXT,                        -- JSON: list[{file,start,end}]
+        build_recipe TEXT,
+        status TEXT NOT NULL DEFAULT 'candidate',  -- candidate / vetted / retired
+        vet_confidence REAL,
+        vet_notes TEXT,
+        added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        updated_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
+    CREATE INDEX IF NOT EXISTS idx_cases_source ON cases(source);
+    """,
+}
+
+# Columns a caller may set on a case. Used to validate dict keys before they reach
+# SQL (column names can't be parameterized, so we never interpolate arbitrary ones).
+CASE_COLUMNS: tuple[str, ...] = (
+    "source",
+    "ext_id",
+    "cve_id",
+    "ghsa_id",
+    "ant_id",
+    "project",
+    "repo_url",
+    "vuln_commit",
+    "fix_commit",
+    "bug_class",
+    "cwe",
+    "disclosure_date",
+    "severity",
+    "description",
+    "gt_files",
+    "gt_hunks",
+    "build_recipe",
+    "status",
+    "vet_confidence",
+    "vet_notes",
+)
+# These hold structured data; lists/dicts are JSON-encoded on the way in.
+_CASE_JSON_COLUMNS = frozenset({"gt_files", "gt_hunks"})
+
 
 def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _encode_case_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Validate column names and JSON-encode the structured columns.
+
+    Raises ValueError on an unknown column so a typo fails loudly here rather
+    than silently dropping ground-truth data.
+    """
+    unknown = set(fields) - set(CASE_COLUMNS)
+    if unknown:
+        raise ValueError(f"unknown case column(s): {', '.join(sorted(unknown))}")
+    out: dict[str, Any] = {}
+    for k, v in fields.items():
+        if k in _CASE_JSON_COLUMNS and not isinstance(v, str | None):
+            out[k] = json.dumps(v)
+        else:
+            out[k] = v
+    return out
 
 
 class Database:
@@ -72,12 +159,29 @@ class Database:
         self.conn = sqlite3.connect(str(self.path))
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
-        # Set schema version if not present
+        self._apply_migrations()
+        self.conn.commit()
+
+    def _apply_migrations(self) -> None:
+        """Walk the DB from its stored schema version up to SCHEMA_VERSION.
+
+        A database with no recorded version is treated as the base schema
+        (version 1), so a pre-corpus scan DB picks up the `cases` table the
+        first time it is opened by this code.
+        """
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()
+        current = int(row["value"]) if row else 1
+        for version in range(current + 1, SCHEMA_VERSION + 1):
+            script = MIGRATIONS.get(version)
+            if script:
+                self.conn.executescript(script)
         self.conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
+            "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (str(SCHEMA_VERSION),),
         )
-        self.conn.commit()
 
     def close(self):
         self.conn.close()
@@ -336,3 +440,80 @@ class Database:
             (scan_id,),
         ).fetchall()
         return {r["verified_status"] or "unreviewed": r["cnt"] for r in rows}
+
+    # -- Cases (benchmark corpus) --
+
+    def upsert_case(self, fields: dict[str, Any]) -> int:
+        """Insert a case, or update the existing row with the same ext_id.
+
+        Requires at least ``source`` and ``ext_id`` (the natural key). Used by
+        the seed importer, which always has both. On conflict, every *provided*
+        column is overwritten — so re-importing a seed refreshes it without
+        clobbering columns the import doesn't carry (enrichment, ground truth).
+        """
+        if "source" not in fields or "ext_id" not in fields:
+            raise ValueError("upsert_case requires 'source' and 'ext_id'")
+        data = _encode_case_fields(fields)
+        cols = list(data)
+        placeholders = ", ".join("?" for _ in cols)
+        # On conflict, refresh the non-key columns the caller supplied.
+        updatable = [c for c in cols if c != "ext_id"]
+        set_clause = ", ".join(f"{c} = excluded.{c}" for c in updatable)
+        set_clause = f"{set_clause}, updated_at = excluded.updated_at"
+        sql = (
+            f"INSERT INTO cases ({', '.join(cols)}, updated_at) "  # noqa: S608
+            f"VALUES ({placeholders}, ?) "
+            f"ON CONFLICT(ext_id) DO UPDATE SET {set_clause}"
+        )
+        self.conn.execute(sql, (*[data[c] for c in cols], _now()))
+        self.conn.commit()
+        # lastrowid is only the new id on insert; resolve via ext_id to be safe.
+        row = self.conn.execute(
+            "SELECT id FROM cases WHERE ext_id = ?", (fields["ext_id"],)
+        ).fetchone()
+        return row["id"]
+
+    def update_case_fields(self, ext_id: str, fields: dict[str, Any]) -> None:
+        """Partial update of an existing case (enrichment / derivation / vet).
+
+        Unlike :meth:`upsert_case` this never inserts: a missing case is a no-op,
+        and only the named columns change. ``ext_id`` itself cannot be updated.
+        """
+        data = _encode_case_fields(fields)
+        data.pop("ext_id", None)
+        if not data:
+            return
+        cols = list(data)
+        set_clause = ", ".join(f"{c} = ?" for c in cols)
+        self.conn.execute(
+            f"UPDATE cases SET {set_clause}, updated_at = ? WHERE ext_id = ?",  # noqa: S608
+            (*[data[c] for c in cols], _now(), ext_id),
+        )
+        self.conn.commit()
+
+    def get_case(self, ext_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM cases WHERE ext_id = ?", (ext_id,)
+        ).fetchone()
+
+    def list_cases(
+        self, status: str | None = None, source: str | None = None
+    ) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM cases"
+        clauses, params = [], []
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if source is not None:
+            clauses.append("source = ?")
+            params.append(source)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY ext_id"
+        return self.conn.execute(sql, params).fetchall()
+
+    def count_cases_by_status(self) -> dict[str, int]:
+        rows = self.conn.execute(
+            "SELECT status, COUNT(*) AS cnt FROM cases GROUP BY status"
+        ).fetchall()
+        return {r["status"]: r["cnt"] for r in rows}
