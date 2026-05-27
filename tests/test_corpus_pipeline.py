@@ -85,7 +85,7 @@ def test_full_pipeline_vets_a_derivable_case(tmp_path):
     )
     summary = pipe.build()
 
-    assert (summary.derived, summary.vetted) == (1, 0) or summary.vetted == 1
+    assert summary.derived == 1 and summary.vetted == 1
     case = _get(db, "GHSA-x")
     assert case["status"] == "vetted"
     assert case["vuln_commit"] == "p" * 40
