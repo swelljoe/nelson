@@ -405,7 +405,8 @@ def build_competitor_prompt(case: Case, target_file: str) -> str:
 
     Takes ``case`` for parity with other builders, but deliberately reveals
     nothing about the planted vulnerability — only which file to review."""
-    return f"{_AUDIT_INTRO.format(target=target_file)}\n\n{_OUTPUT_SPEC}"
+    safe_target = target_file.replace("{", "{{").replace("}", "}}")
+    return f"{_AUDIT_INTRO.format(target=safe_target)}\n\n{_OUTPUT_SPEC}"
 
 
 def claude_code_spec(
