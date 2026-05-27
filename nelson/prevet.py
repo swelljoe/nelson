@@ -12,6 +12,11 @@ A judge *failure* (timeout, auth, unparseable reply) is reported via
 a case a candidate to retry, exactly as auth/infra failures are never scored as a
 miss elsewhere. Judge token cost is captured so it can be tracked separately from
 competitor cost.
+
+The judge runs ``claude -p`` directly on the host, where the CLI is already
+signed in to the subscription. Token usage draws against the plan's included
+budget — there is no API key and (unlike a competitor) no container, so the
+judge needs no credential injection.
 """
 
 from __future__ import annotations
@@ -25,7 +30,6 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from .agents import _run_cli, classify_failure
 
 if TYPE_CHECKING:
-    from .auth import AuthProfile
     from .corpus import Case
 
 # Bound the evidence we send: enough of the fix to judge coherence, not a whole
@@ -123,26 +127,18 @@ def parse_verdict(text: str) -> tuple[float, str] | None:
 
 
 class ClaudeCLIJudge:
-    """Pre-vet judge backed by ``claude -p`` (Opus by default), billed at API rates."""
+    """Pre-vet judge backed by ``claude -p`` (Opus by default).
+
+    Uses the host's already-authenticated claude CLI (subscription budget), so
+    there is no API key or auth profile: the subprocess inherits this process's
+    environment unchanged.
+    """
 
     name = "claude-cli"
 
-    def __init__(
-        self,
-        model: str = "opus",
-        timeout: int = 180,
-        auth_profile: AuthProfile | None = None,
-    ):
+    def __init__(self, model: str = "opus", timeout: int = 180):
         self.model = model
         self.timeout = timeout
-        self.auth_profile = auth_profile
-
-    def _env(self) -> dict[str, str] | None:
-        if self.auth_profile is None:
-            return None
-        import os
-
-        return {**os.environ, **self.auth_profile.resolve_env()}
 
     def vet(self, case: Case, diff: str) -> VetVerdict:
         prompt = build_prevet_prompt(case, diff)
@@ -156,7 +152,8 @@ class ClaudeCLIJudge:
             "--no-session-persistence",
         ]
         try:
-            result = _run_cli(cmd, self.timeout, input_text=prompt, env=self._env())
+            # env=None: inherit the host's authenticated claude CLI session.
+            result = _run_cli(cmd, self.timeout, input_text=prompt)
         except subprocess.TimeoutExpired:
             return VetVerdict(0.0, error="timeout")
 

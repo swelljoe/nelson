@@ -49,13 +49,21 @@ via hosted API):
 | MiMo v2.5 | agent-agnostic | raw-API loop or `pi`-based custom agent | API key (env var) |
 | DeepSeek | yes | its native agent CLI | API key (env var) |
 | Kimi k2.6 | yes | its native agent CLI | API key (env var) |
-| Claude (Opus 4.7) | yes (Claude Code) | **judge**, used sparingly as competitor | `ANTHROPIC_API_KEY`, API-billed |
+| Gemini | yes (gemini CLI) | `gemini` CLI | subscription (CLI sign-in, **no key**) |
+| Claude (Opus 4.7) | yes (Claude Code) | **judge**, used sparingly as competitor | subscription via `claude -p` (CLI sign-in, **no key**) |
 
-- All three seed competitors are **API-key auth** → no OAuth dance for the initial set, so
-  the OAuth-bootstrap machinery is *designed for* but *deferred*.
-- **Claude is primarily the judge** (`claude -p`, billed at API rates — rolling subscription
-  limits no longer apply to `-p`). Judge token cost is tracked **separately** from competitor
-  cost so it never distorts the Pareto picture.
+- The MiMo / DeepSeek / Kimi seed competitors are **API-key auth** (env var) → no OAuth dance
+  for that set, so the OAuth-bootstrap machinery is *designed for* but *deferred*.
+- **Claude and Gemini use CLI subscription auth, not an API key.** `claude -p` (and the
+  `gemini` CLI) run against the already-signed-in subscription on the host; for Claude the
+  per-token usage draws against the plan's **included monthly budget** (e.g. $100/mo) — it is
+  *not* billed via `ANTHROPIC_API_KEY`. So a no-profile competitor/runtime simply inherits the
+  host's authenticated CLI session (the P0 default).
+- **Claude is primarily the judge** (`claude -p`). The judge runs on the **host, not in a
+  container**, so it needs no credential injection — the CLI is already authenticated. Judge
+  token cost is tracked **separately** from competitor cost so it never distorts the Pareto
+  picture. (A Claude/Gemini *competitor* run inside a container is the case that would need a
+  long-lived token, e.g. `CLAUDE_CODE_OAUTH_TOKEN` — see §11; deferred until needed.)
 - Exact agent CLI names + auth env vars for MiMo / DeepSeek / Kimi are likely newer than the
   assistant's training data — **verify at wiring time (P7)**, do not guess. Registry treats
   them as data so adding a competitor is config, not code.
@@ -209,7 +217,13 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
   `bug_class`, `severity`, `title`}. **Lacks** repo URL / fix commit / version ranges / CWE —
   resolve those via OSV.dev / GitHub Advisory DB / NVD. ~88 published advisories; 1,596
   findings across 281 projects.
-- Claude Code headless auth: `ANTHROPIC_API_KEY` (per-token); `claude setup-token` →
-  `CLAUDE_CODE_OAUTH_TOKEN` (1-yr, subscription, works in `-p`, NOT in `--bare`); creds at
-  `~/.claude/.credentials.json` (0600) or under `CLAUDE_CONFIG_DIR`. Prefer long-lived tokens
-  over shared credential files for parallel runs (refresh/locking undocumented).
+- Claude Code auth (this project): **subscription via `claude -p`, no API key.** The host CLI
+  is signed in and per-token usage draws against the plan's included monthly budget (e.g.
+  $100/mo); `claude -p --output-format json` reports a per-call cost we capture for separate
+  accounting. The judge runs on the host (no container) so it just inherits this session.
+  *Only* a containerized Claude competitor would need credential injection — options are
+  `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` (1-yr, subscription, works in `-p`, NOT in
+  `--bare`) or mounting `~/.claude/.credentials.json` (0600, or under `CLAUDE_CONFIG_DIR`);
+  prefer the long-lived token for parallel runs (file refresh/locking undocumented). The
+  `ANTHROPIC_API_KEY` path exists but is **not** what we use.
+- Gemini likewise uses the `gemini` CLI's subscription sign-in (no key).
