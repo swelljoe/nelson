@@ -6,10 +6,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-# Bumped to 2 for the benchmark corpus (`cases` table). New tables/columns go in
-# MIGRATIONS keyed by their target version; _apply_migrations walks a stored DB
-# up to SCHEMA_VERSION, so old scan databases upgrade in place.
-SCHEMA_VERSION = 2
+# Bumped to 3: v2 added the benchmark corpus (`cases`); v3 adds the run layer
+# (`competitors`, `runs`, `run_findings`) that the container runner populates.
+# New tables/columns go in MIGRATIONS keyed by their target version;
+# _apply_migrations walks a stored DB up to SCHEMA_VERSION, so old databases
+# upgrade in place.
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -101,7 +103,78 @@ MIGRATIONS: dict[int, str] = {
     CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
     CREATE INDEX IF NOT EXISTS idx_cases_source ON cases(source);
     """,
+    3: """
+    -- The run layer. A competitor (model x runtime x tool-profile) runs a case
+    -- inside a throwaway container; the run row captures the outcome + cost, and
+    -- run_findings holds what the model reported. Scoring (P3/P4) later fills the
+    -- judge_* / matches_ground_truth columns.
+    CREATE TABLE IF NOT EXISTS competitors (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,         -- stable identifier, e.g. claude-code/sonnet
+        model TEXT,                        -- bare model id
+        runtime TEXT,                      -- invocation method, e.g. claude-code
+        tool_profile TEXT,                 -- what the model may do, e.g. read-grep
+        auth_profile TEXT,                 -- named profile (secret names, not values)
+        cost_model TEXT,                   -- JSON: per-token or 'subscription'
+        size_class TEXT,
+        knowledge_cutoff TEXT,
+        status TEXT NOT NULL DEFAULT 'active',   -- active / retired
+        added_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS runs (
+        id INTEGER PRIMARY KEY,
+        case_id INTEGER NOT NULL REFERENCES cases(id),
+        competitor_id INTEGER NOT NULL REFERENCES competitors(id),
+        container_id TEXT,
+        -- pending / running / complete, plus the integrity statuses
+        -- auth_failed / infra_error (a run that never got a fair look at the
+        -- code; scoring must never count these as a "miss").
+        status TEXT NOT NULL DEFAULT 'pending',
+        started_at TEXT,
+        completed_at TEXT,
+        tokens_in INTEGER,
+        tokens_out INTEGER,
+        cost_usd REAL,
+        wall_clock_s REAL,
+        transcript_path TEXT,
+        raw_output TEXT,
+        error_msg TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_runs_case ON runs(case_id, competitor_id, status);
+
+    CREATE TABLE IF NOT EXISTS run_findings (
+        id INTEGER PRIMARY KEY,
+        run_id INTEGER NOT NULL REFERENCES runs(id),
+        file TEXT,
+        line_start INTEGER,
+        line_end INTEGER,
+        description TEXT,
+        confidence TEXT,
+        cwe TEXT,
+        -- Filled by scoring (P3/P4); NULL until then.
+        matches_ground_truth INTEGER,     -- 0/1 localization-gate result
+        judge_truth_verdict TEXT,
+        judge_fp_verdict TEXT,
+        judge_reasoning TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_run_findings_run ON run_findings(run_id);
+    """,
 }
+
+# Columns a caller may set on a competitor (natural key = name). Mirrors the
+# benchmark data model; validated before reaching SQL like CASE_COLUMNS.
+COMPETITOR_COLUMNS: tuple[str, ...] = (
+    "name",
+    "model",
+    "runtime",
+    "tool_profile",
+    "auth_profile",
+    "cost_model",
+    "size_class",
+    "knowledge_cutoff",
+    "status",
+)
 
 # Columns a caller may set on a case. Used to validate dict keys before they reach
 # SQL (column names can't be parameterized, so we never interpolate arbitrary ones).
@@ -517,3 +590,208 @@ class Database:
             "SELECT status, COUNT(*) AS cnt FROM cases GROUP BY status"
         ).fetchall()
         return {r["status"]: r["cnt"] for r in rows}
+
+    # -- Competitors (benchmark run layer) --
+
+    def upsert_competitor(self, fields: dict[str, Any]) -> int:
+        """Insert a competitor, or update the row with the same ``name``.
+
+        ``name`` is the natural key; re-registering a competitor refreshes the
+        columns the caller supplies without disturbing others.
+        """
+        if "name" not in fields:
+            raise ValueError("upsert_competitor requires 'name'")
+        unknown = set(fields) - set(COMPETITOR_COLUMNS)
+        if unknown:
+            raise ValueError(
+                f"unknown competitor column(s): {', '.join(sorted(unknown))}"
+            )
+        cols = list(fields)
+        placeholders = ", ".join("?" for _ in cols)
+        updatable = [c for c in cols if c != "name"]
+        set_clause = ", ".join(f"{c} = excluded.{c}" for c in updatable)
+        sql = f"INSERT INTO competitors ({', '.join(cols)}) VALUES ({placeholders})"  # noqa: S608
+        if set_clause:
+            sql += f" ON CONFLICT(name) DO UPDATE SET {set_clause}"
+        else:
+            sql += " ON CONFLICT(name) DO NOTHING"
+        self.conn.execute(sql, [fields[c] for c in cols])
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT id FROM competitors WHERE name = ?", (fields["name"],)
+        ).fetchone()
+        return row["id"]
+
+    def get_competitor(self, name: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM competitors WHERE name = ?", (name,)
+        ).fetchone()
+
+    def list_competitors(self) -> list[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM competitors ORDER BY name").fetchall()
+
+    # -- Runs --
+
+    def create_run(self, case_id: int, competitor_id: int) -> int:
+        """Open a pending run for (case, competitor); returns its id."""
+        cur = self.conn.execute(
+            "INSERT INTO runs(case_id, competitor_id, status) VALUES(?, ?, 'pending')",
+            (case_id, competitor_id),
+        )
+        self.conn.commit()
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def start_run(self, run_id: int, container_id: str | None = None) -> None:
+        self.conn.execute(
+            "UPDATE runs SET status = 'running', started_at = ?, container_id = ? "
+            "WHERE id = ?",
+            (_now(), container_id, run_id),
+        )
+        self.conn.commit()
+
+    def complete_run(
+        self,
+        run_id: int,
+        *,
+        tokens_in: int | None = None,
+        tokens_out: int | None = None,
+        cost_usd: float | None = None,
+        wall_clock_s: float | None = None,
+        transcript_path: str | None = None,
+        raw_output: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            """UPDATE runs SET status = 'complete', completed_at = ?,
+               tokens_in = ?, tokens_out = ?, cost_usd = ?, wall_clock_s = ?,
+               transcript_path = ?, raw_output = ?
+               WHERE id = ?""",
+            (
+                _now(),
+                tokens_in,
+                tokens_out,
+                cost_usd,
+                wall_clock_s,
+                transcript_path,
+                raw_output,
+                run_id,
+            ),
+        )
+        self.conn.commit()
+
+    def mark_run_auth_failed(
+        self,
+        run_id: int,
+        error_msg: str,
+        *,
+        transcript_path: str | None = None,
+        raw_output: str | None = None,
+        wall_clock_s: float | None = None,
+    ) -> None:
+        """Terminal: the competitor could not authenticate. Integrity rule: this
+        is NOT a miss and must be excluded from any scoring denominator."""
+        self._mark_run_failed(
+            run_id,
+            "auth_failed",
+            error_msg,
+            transcript_path=transcript_path,
+            raw_output=raw_output,
+            wall_clock_s=wall_clock_s,
+        )
+
+    def mark_run_infra_error(
+        self,
+        run_id: int,
+        error_msg: str,
+        *,
+        transcript_path: str | None = None,
+        raw_output: str | None = None,
+        wall_clock_s: float | None = None,
+    ) -> None:
+        """Terminal: infra/transport failure (container, timeout, unexplained
+        non-zero exit). Like auth_failed, never counted as a miss."""
+        self._mark_run_failed(
+            run_id,
+            "infra_error",
+            error_msg,
+            transcript_path=transcript_path,
+            raw_output=raw_output,
+            wall_clock_s=wall_clock_s,
+        )
+
+    def _mark_run_failed(
+        self,
+        run_id: int,
+        status: str,
+        error_msg: str,
+        *,
+        transcript_path: str | None = None,
+        raw_output: str | None = None,
+        wall_clock_s: float | None = None,
+    ) -> None:
+        self.conn.execute(
+            """UPDATE runs
+               SET status = ?,
+                   completed_at = ?,
+                   error_msg = ?,
+                   wall_clock_s = COALESCE(?, wall_clock_s),
+                   transcript_path = COALESCE(?, transcript_path),
+                   raw_output = COALESCE(?, raw_output)
+               WHERE id = ?""",
+            (
+                status,
+                _now(),
+                error_msg,
+                wall_clock_s,
+                transcript_path,
+                raw_output,
+                run_id,
+            ),
+        )
+        self.conn.commit()
+
+    def get_run(self, run_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM runs WHERE id = ?", (run_id,)
+        ).fetchone()
+
+    def list_runs(self, case_id: int | None = None) -> list[sqlite3.Row]:
+        """Runs joined to their case/competitor labels, newest first."""
+        sql = (
+            "SELECT r.*, c.ext_id AS case_ext_id, comp.name AS competitor_name "
+            "FROM runs r JOIN cases c ON r.case_id = c.id "
+            "JOIN competitors comp ON r.competitor_id = comp.id"
+        )
+        params: list[Any] = []
+        if case_id is not None:
+            sql += " WHERE r.case_id = ?"
+            params.append(case_id)
+        sql += " ORDER BY r.id DESC"
+        return self.conn.execute(sql, params).fetchall()
+
+    def add_run_finding(
+        self,
+        run_id: int,
+        *,
+        file: str | None = None,
+        line_start: int | None = None,
+        line_end: int | None = None,
+        description: str | None = None,
+        confidence: str | None = None,
+        cwe: str | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO run_findings(run_id, file, line_start, line_end,
+                                        description, confidence, cwe)
+               VALUES(?, ?, ?, ?, ?, ?, ?)""",
+            (run_id, file, line_start, line_end, description, confidence, cwe),
+        )
+        self.conn.commit()
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def run_findings(self, run_id: int) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM run_findings WHERE run_id = ? ORDER BY file, line_start",
+            (run_id,),
+        ).fetchall()

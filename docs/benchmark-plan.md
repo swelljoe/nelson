@@ -1,6 +1,6 @@
 # Nelson Benchmark Harness — Implementation Plan
 
-> Status: P1 landed (2026-05-26); P2 next. Written 2026-05-26.
+> Status: P2 landed (2026-05-27); P3 next. Written 2026-05-26.
 > This document is the durable source of truth for the benchmark effort. Update it as phases land.
 
 ## 1. Goal
@@ -172,8 +172,45 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     8.6.1 release"; files `CITATION.cff/CMakeLists.txt/HISTORY.md`) — OSV pointed at the
     release, not the patch. This is precisely the noise the Opus pre-vet step is designed to
     retire, and validates keeping a human-vettable `vetted/retired` manifest.
-- **P2 — One competitor end-to-end**: podman runner + one runtime on a few cases.
-  *Gate: a real 0-day found and transcript captured inside a container.*
+- **P2 — One competitor end-to-end** ✅ *(branch `bench-p2-runner`)*. Rootless-podman
+  runner + the `claude-code` runtime, scored DB run layer.
+  *Gate met: Sonnet found a real 0-day-to-it and the transcript was captured in a
+  container (below).*
+  Delivered: schema migration v3 + `competitors` / `runs` / `run_findings` tables and
+  accessors, carrying the `auth_failed`/`infra_error` integrity statuses onto runs
+  (`db.py`); `nelson/runner.py` — a pluggable `ContainerBackend` (`PodmanBackend`) and
+  `ContainerAuth` (`CredentialMountAuth`), `prepare_checkout` (depth-1 fetch of
+  `vuln_commit`), `claude_code_spec`, stream-json output parsing (`extract_result` /
+  `parse_competitor_findings`), and the `BenchRunner` orchestrator; `nelson bench
+  run/runs/show-run` CLI. Tested with an injected fake backend + fake auth (no podman /
+  network / credentials), 107 tests total.
+  - **Container design.** Minimal `fedora-minimal:41` image (git + ripgrep); the host's
+    229 MB `claude` binary is **bind-mounted read-only** rather than baked in, so the
+    image tracks the host CLI version. The case repo is checked out at `vuln_commit` and
+    mounted **read-only** at `/src`; the agent runs as a non-root user (so
+    `--dangerously-skip-permissions` is accepted) with `--cap-drop ALL`,
+    `no-new-privileges`, memory/cpu/pids caps. SELinux is per-container `label=disable`
+    (avoids relabeling shared host files); isolation rests on the rootless userns + caps
+    + ro source. Network is **on** for P2 — the agent needs its model backend; an egress
+    allowlist is a later refinement.
+  - **Auth.** Decision (2026-05-27): the containerized Claude competitor authenticates by
+    **mounting a copy of the host `~/.claude/.credentials.json`** (zero setup, fine for
+    sequential P2). `CredentialMountAuth` copies it into a per-run config dir mounted
+    `rw,U` at `/cfg` (`CLAUDE_CONFIG_DIR`). A long-lived `CLAUDE_CODE_OAUTH_TOKEN` for the
+    parallel matrix (P6) is a drop-in alternative ContainerAuth, no runner change.
+  - **Rootless cleanup gotcha (fixed).** The container writes into the mounted config dir
+    as a userns-mapped subuid, leaving files the host user can't `unlink`; `_safe_rmtree`
+    falls back to `podman unshare rm -rf`.
+  - **Token accounting.** stream-json `usage.input_tokens` is only the final turn's fresh
+    input; `extract_result` sums `input_tokens + cache_creation + cache_read` so tokens_in
+    reflects total input processed. `total_cost_usd` is the authoritative cost.
+  - **Gate run (junrar GHSA-j273, CWE-22).** `claude-code/sonnet`, given only the code (no
+    advisory), produced 3 findings — all in `LocalFolderExtractor.java`, the sole
+    ground-truth file. The high-confidence one (line 76) is the exact backslash Zip-Slip
+    the advisory describes, inside GT hunk 73–79; a second (line 61) is inside hunk 55–61.
+    676 s wall, ~825k input tokens (cache-dominated), $1.33, full 149-event agentic
+    transcript (Read/Bash/Grep + a sub-agent) captured. This is exactly the
+    localization-gate + semantic-match signal P3 will score automatically.
 - **P3 — Scoring**: localization gate + truth judge → detection reporting.
 - **P4 — Precision**: FP judge over non-ground-truth findings → precision metrics.
 - **P5 — Leaderboard + Pareto** reporting.

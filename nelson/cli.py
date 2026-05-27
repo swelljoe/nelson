@@ -1066,3 +1066,156 @@ def _echo_status_counts(db: Database):
     if counts:
         summary = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
         click.echo(f"Corpus: {summary}")
+
+
+# -- Benchmark runs ----------------------------------------------------------
+
+
+def _parse_competitor(spec: str):
+    """Build a Competitor from a ``runtime:model`` (or bare ``model``) spec.
+
+    ``claude-code:sonnet`` -> runtime=claude-code, model=sonnet; a bare
+    ``sonnet`` defaults the runtime to claude-code (the only P2 runtime).
+    """
+    from .runner import Competitor
+
+    spec = spec.strip()
+    if ":" in spec:
+        runtime, model = spec.split(":", 1)
+        runtime, model = runtime.strip(), model.strip()
+        if not runtime:
+            raise click.ClickException(f"competitor spec '{spec}' has no runtime")
+    else:
+        runtime, model = "claude-code", spec
+    if not model:
+        raise click.ClickException(f"competitor spec '{spec}' has no model")
+    return Competitor(name=f"{runtime}/{model}", model=model, runtime=runtime)
+
+
+def _resolve_case(ext_id: str, db: Database, manifest_dir: str | None):
+    """Find a case by ext_id in the DB, or in a manifest dir if given."""
+    from .corpus import Case, load_manifest_dir
+
+    row = db.get_case(ext_id)
+    if row is not None:
+        return Case.from_row(row)
+    if manifest_dir:
+        for case in load_manifest_dir(manifest_dir):
+            if case.ext_id == ext_id:
+                return case
+    raise click.ClickException(
+        f"case {ext_id} not found in {db.path}"
+        + (f" or manifests at {manifest_dir}" if manifest_dir else "")
+    )
+
+
+@main.group()
+def bench():
+    """Run competitors against corpus cases in isolated containers."""
+
+
+@bench.command(name="run")
+@click.argument("ext_id")
+@click.option(
+    "--competitor",
+    "competitor_spec",
+    default="claude-code:sonnet",
+    help="Competitor as runtime:model, e.g. claude-code:sonnet.",
+)
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+@click.option("--cache-dir", default="bench-cache", help="Where source is checked out.")
+@click.option("--runs-dir", default="bench-runs", help="Where transcripts are written.")
+@click.option(
+    "--from-manifest",
+    default=None,
+    help="Also resolve the case from this cases/ manifest dir if not in the DB.",
+)
+@click.option(
+    "--no-network", is_flag=True, help="Run the container with no network (offline)."
+)
+@click.option(
+    "--timeout", default=1800.0, type=float, help="Per-run wall-clock cap (s)."
+)
+def bench_run(
+    ext_id: str,
+    competitor_spec: str,
+    db_path: str,
+    cache_dir: str,
+    runs_dir: str,
+    from_manifest: str | None,
+    no_network: bool,
+    timeout: float,
+):
+    """Run one competitor against case EXT_ID inside a container."""
+    from .runner import BenchRunner
+
+    db = Database(db_path)
+    competitor = _parse_competitor(competitor_spec)
+    case = _resolve_case(ext_id, db, from_manifest)
+
+    runner = BenchRunner(
+        db,
+        cache_dir=cache_dir,
+        runs_dir=runs_dir,
+        network=not no_network,
+        run_timeout=timeout,
+    )
+    click.echo(f"Running {competitor.name} against {case.ext_id} ({case.project})…")
+    result = runner.run_case(case, competitor)
+
+    click.echo(f"Status:    {result.status}")
+    if result.error:
+        click.echo(f"Error:     {result.error}")
+    click.echo(f"Findings:  {len(result.findings)}")
+    if result.wall_clock_s is not None:
+        click.echo(f"Wall:      {result.wall_clock_s:.1f}s")
+    if result.tokens_in is not None:
+        click.echo(f"Tokens:    in={result.tokens_in} out={result.tokens_out}")
+    if result.cost_usd is not None:
+        click.echo(f"Cost:      ${result.cost_usd:.4f}")
+    if result.status != "complete":
+        sys.exit(1)
+
+
+@bench.command(name="runs")
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+def bench_runs(db_path: str):
+    """List benchmark runs (newest first)."""
+    db = Database(db_path)
+    rows = db.list_runs()
+    if not rows:
+        click.echo("No runs.")
+        return
+    click.echo(
+        f"{'ID':>4} {'STATUS':<12} {'CASE':<22} {'COMPETITOR':<22} {'COST':>8} WALL"
+    )
+    for r in rows:
+        cost = f"${r['cost_usd']:.3f}" if r["cost_usd"] is not None else "-"
+        wall = f"{r['wall_clock_s']:.0f}s" if r["wall_clock_s"] is not None else "-"
+        click.echo(
+            f"{r['id']:>4} {r['status']:<12} {r['case_ext_id']:<22} "
+            f"{r['competitor_name']:<22} {cost:>8} {wall}"
+        )
+
+
+@bench.command(name="show-run")
+@click.argument("run_id", type=int)
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+def bench_show_run(run_id: int, db_path: str):
+    """Show one run's metadata and reported findings."""
+    db = Database(db_path)
+    row = db.get_run(run_id)
+    if row is None:
+        click.echo(f"Run {run_id} not found.", err=True)
+        sys.exit(1)
+    for key in row.keys():  # noqa: SIM118 — sqlite3.Row needs .keys() for columns
+        if key == "raw_output":
+            continue
+        click.echo(f"{key:>16}: {row[key]}")
+    findings = db.run_findings(run_id)
+    click.echo(f"\nReported findings ({len(findings)}):")
+    for f in findings:
+        loc = f"{f['file']}:{f['line_start']}" if f["file"] else "(no file)"
+        click.echo(f"  [{f['confidence'] or '?'}] {loc} {f['cwe'] or ''}")
+        if f["description"]:
+            click.echo(f"      {f['description']}")
