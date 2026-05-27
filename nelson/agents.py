@@ -117,7 +117,10 @@ class AgentResult:
         # so existing callers (scanner, review) and new ones agree.
         if self.failure_kind is FailureKind.RATE_LIMIT:
             self.rate_limited = True
-        elif self.failure_kind is None and self.rate_limited:
+        elif self.failure_kind is not None:
+            # Any non-rate-limit failure is not "rate limited".
+            self.rate_limited = False
+        elif self.rate_limited:
             self.failure_kind = FailureKind.RATE_LIMIT
 
 
