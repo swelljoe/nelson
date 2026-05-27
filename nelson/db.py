@@ -276,7 +276,16 @@ class Database:
         for version in range(current + 1, SCHEMA_VERSION + 1):
             script = MIGRATIONS.get(version)
             if script:
-                self.conn.executescript(script)
+                try:
+                    self.conn.executescript(script)
+                except sqlite3.OperationalError as exc:
+                    # Migration 5 may be partially applied if ALTER TABLE succeeds
+                    # but writing schema_version does not; tolerate reruns.
+                    if version == 5 and "duplicate column name: target_file" in str(
+                        exc
+                    ).lower():
+                        continue
+                    raise
         self.conn.execute(
             "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
