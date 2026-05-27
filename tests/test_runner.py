@@ -107,6 +107,33 @@ def test_parse_competitor_findings_no_array():
     assert parse_competitor_findings("I could not find anything.") == []
 
 
+def test_parse_competitor_findings_ignores_prose_arrays_before_the_answer():
+    # Real failure mode (junrar, file-scoped): the model wrote an analysis
+    # summary whose prose contained a *valid* JSON string-array
+    # (["..","evil.txt"]) BEFORE the fenced findings array. The parser must skip
+    # the prose array (no objects) and return the real findings.
+    text = (
+        "Analysis: makeFile splits on '\\\\' to get "
+        '["..","evil.txt"], escaping the destination.\n\n'
+        "```json\n"
+        '[{"file": "Extractor.java", "line": 76, "explanation": "zip slip", '
+        '"confidence": "high", "cwe": "CWE-22"}]\n```'
+    )
+    findings = parse_competitor_findings(text)
+    assert len(findings) == 1
+    assert findings[0]["line"] == 76
+    assert findings[0]["cwe"] == "CWE-22"
+
+
+def test_parse_competitor_findings_repairs_invalid_escapes():
+    # Model quotes code with a lone backslash (invalid JSON escape); the verdict
+    # must still be recovered rather than dropped.
+    text = r'[{"file": "a.c", "line": 3, "code": "x = \q;", "confidence": "low"}]'
+    findings = parse_competitor_findings(text)
+    assert len(findings) == 1
+    assert findings[0]["file"] == "a.c"
+
+
 # -- Spec assembly -----------------------------------------------------------
 
 
@@ -128,6 +155,76 @@ def test_claude_code_spec_mounts_source_readonly_and_injects_auth(tmp_path):
     assert modes["/cfg"] == "rw,U"
     assert spec.env["CLAUDE_CONFIG_DIR"] == "/cfg"
     assert spec.stdin == "audit it"
+
+
+def test_claude_code_spec_passes_budget_cap_when_set(tmp_path):
+    comp = Competitor(name="claude-code/sonnet", model="sonnet")
+    auth = AuthMaterial(env={}, mounts=[])
+    spec = claude_code_spec(
+        comp,
+        "audit it",
+        tmp_path / "src",
+        Path("/usr/bin/claude"),
+        auth,
+        name="r1",
+        max_budget_usd=0.5,
+    )
+    assert "--max-budget-usd" in spec.argv
+    assert spec.argv[spec.argv.index("--max-budget-usd") + 1] == "0.5"
+    # Omitted when None.
+    spec2 = claude_code_spec(
+        comp, "x", tmp_path / "src", Path("/usr/bin/claude"), auth, name="r2"
+    )
+    assert "--max-budget-usd" not in spec2.argv
+
+
+# -- File scoping ------------------------------------------------------------
+
+
+def test_vulnerable_files_drops_tests_and_dedupes():
+    from nelson.runner import vulnerable_files
+
+    case = Case(
+        source="cvd",
+        ext_id="GHSA-y",
+        gt_hunks=[
+            {"file": "src/main/java/Foo.java", "start": 10, "end": 12},
+            {"file": "src/main/java/Foo.java", "start": 40, "end": 42},  # dup file
+            {"file": "src/test/java/FooTest.java", "start": 1, "end": 5},
+            {"file": "lib/util.py", "start": 3, "end": 3},
+        ],
+    )
+    assert vulnerable_files(case) == ["src/main/java/Foo.java", "lib/util.py"]
+
+
+def test_vulnerable_files_falls_back_when_only_tests():
+    from nelson.runner import vulnerable_files
+
+    # If every hunk is in a test file, audit them rather than have nothing to run.
+    case = Case(
+        source="cvd",
+        ext_id="GHSA-z",
+        gt_hunks=[{"file": "tests/test_x.py", "start": 1, "end": 2}],
+    )
+    assert vulnerable_files(case) == ["tests/test_x.py"]
+
+
+def test_build_competitor_prompt_names_file_and_hides_advisory():
+    from nelson.runner import build_competitor_prompt
+
+    case = Case(
+        source="cvd",
+        ext_id="GHSA-q",
+        cwe="CWE-22",
+        bug_class="path-traversal",
+        description="backslash zip slip",
+    )
+    prompt = build_competitor_prompt(case, "src/Extractor.java")
+    assert "src/Extractor.java" in prompt
+    assert "review" in prompt.lower()
+    # No advisory leak: nothing about the planted bug reaches the competitor.
+    for leak in ("CWE-22", "path-traversal", "backslash", "zip slip", "GHSA-q"):
+        assert leak not in prompt
 
 
 # -- Orchestrated run (fake backend + fake auth) -----------------------------
@@ -200,7 +297,9 @@ def test_run_case_complete_persists_findings_and_usage(tmp_path, monkeypatch):
     runner = _runner(db, backend, monkeypatch, tmp_path)
 
     result = runner.run_case(
-        _vetted_case(), Competitor(name="claude-code/sonnet", model="sonnet")
+        _vetted_case(),
+        Competitor(name="claude-code/sonnet", model="sonnet"),
+        "app/db.js",
     )
 
     assert result.status == "complete"
@@ -211,6 +310,10 @@ def test_run_case_complete_persists_findings_and_usage(tmp_path, monkeypatch):
     runs = db.list_runs()
     assert len(runs) == 1
     assert runs[0]["status"] == "complete"
+    # The run records which file it was scoped to, and the prompt named it.
+    assert runs[0]["target_file"] == "app/db.js"
+    assert backend.spec is not None and backend.spec.stdin is not None
+    assert "app/db.js" in backend.spec.stdin
     findings = db.run_findings(runs[0]["id"])
     assert findings[0]["file"] == "app/db.js"
     assert findings[0]["line_start"] == 14
@@ -230,7 +333,9 @@ def test_run_case_auth_failure_is_not_a_miss(tmp_path, monkeypatch):
     runner = _runner(db, backend, monkeypatch, tmp_path)
 
     result = runner.run_case(
-        _vetted_case(), Competitor(name="claude-code/sonnet", model="sonnet")
+        _vetted_case(),
+        Competitor(name="claude-code/sonnet", model="sonnet"),
+        "app/db.js",
     )
 
     assert result.status == "auth_failed"
@@ -245,7 +350,9 @@ def test_run_case_nonzero_exit_without_marker_is_infra_error(tmp_path, monkeypat
     runner = _runner(db, backend, monkeypatch, tmp_path)
 
     result = runner.run_case(
-        _vetted_case(), Competitor(name="claude-code/sonnet", model="sonnet")
+        _vetted_case(),
+        Competitor(name="claude-code/sonnet", model="sonnet"),
+        "app/db.js",
     )
 
     assert result.status == "infra_error"
@@ -260,7 +367,9 @@ def test_run_case_timeout_is_infra_error(tmp_path, monkeypatch):
     runner = _runner(db, backend, monkeypatch, tmp_path)
 
     result = runner.run_case(
-        _vetted_case(), Competitor(name="claude-code/sonnet", model="sonnet")
+        _vetted_case(),
+        Competitor(name="claude-code/sonnet", model="sonnet"),
+        "app/db.js",
     )
 
     assert result.status == "infra_error"
@@ -276,7 +385,9 @@ def test_run_case_requires_derived_case(tmp_path, monkeypatch):
     undrived = Case(source="cvd", ext_id="GHSA-x")  # no repo_url / vuln_commit
 
     with pytest.raises(RunnerError):
-        runner.run_case(undrived, Competitor(name="claude-code/sonnet", model="sonnet"))
+        runner.run_case(
+            undrived, Competitor(name="claude-code/sonnet", model="sonnet"), "x.js"
+        )
 
 
 # -- DB run layer ------------------------------------------------------------

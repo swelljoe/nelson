@@ -52,6 +52,26 @@ def test_v1_database_upgrades_in_place(tmp_path):
     db.close()
 
 
+def test_v5_migration_is_idempotent_after_partial_apply(tmp_path):
+    path = tmp_path / "partial-v5.db"
+    db = Database(path)
+    db.close()
+
+    raw = sqlite3.connect(str(path))
+    raw.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+    raw.commit()
+    raw.close()
+
+    reopened = Database(path)
+    cols = {row["name"] for row in reopened.conn.execute("PRAGMA table_info(runs)")}
+    assert "target_file" in cols
+    ver = reopened.conn.execute(
+        "SELECT value FROM meta WHERE key='schema_version'"
+    ).fetchone()["value"]
+    assert int(ver) == SCHEMA_VERSION
+    reopened.close()
+
+
 def _seed(ext_id="CVE-2026-27654"):
     return {
         "source": "cvd",

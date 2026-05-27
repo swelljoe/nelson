@@ -6,13 +6,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-# Bumped to 4: v2 added the benchmark corpus (`cases`); v3 added the run layer
-# (`competitors`, `runs`, `run_findings`); v4 adds `judgments`, the P3/P4 scoring
-# ledger that records each judge call's verdict + token cost separately from
-# competitor cost. New tables/columns go in MIGRATIONS keyed by their target
-# version; _apply_migrations walks a stored DB up to SCHEMA_VERSION, so old
-# databases upgrade in place.
-SCHEMA_VERSION = 4
+# Bumped to 5: v2 added the benchmark corpus (`cases`); v3 added the run layer
+# (`competitors`, `runs`, `run_findings`); v4 added `judgments`, the P3/P4 scoring
+# ledger; v5 adds `runs.target_file` — a run now audits one file of a case (the
+# file-scoped harness), so the unit is (competitor, case, file). New tables/columns
+# go in MIGRATIONS keyed by their target version; _apply_migrations walks a stored
+# DB up to SCHEMA_VERSION, so old databases upgrade in place.
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -182,6 +182,11 @@ MIGRATIONS: dict[int, str] = {
     CREATE INDEX IF NOT EXISTS idx_judgments_target
         ON judgments(target_kind, target_id);
     """,
+    5: """
+    -- File-scoped harness: a run now audits one named file of a case (the model
+    -- is pointed at the file, not the whole repo). NULL = a legacy whole-repo run.
+    ALTER TABLE runs ADD COLUMN target_file TEXT;
+    """,
 }
 
 # Columns a caller may set on a competitor (natural key = name). Mirrors the
@@ -271,7 +276,17 @@ class Database:
         for version in range(current + 1, SCHEMA_VERSION + 1):
             script = MIGRATIONS.get(version)
             if script:
-                self.conn.executescript(script)
+                try:
+                    self.conn.executescript(script)
+                except sqlite3.OperationalError as exc:
+                    # Migration 5 may be partially applied if ALTER TABLE succeeds
+                    # but writing schema_version does not; tolerate reruns.
+                    if (
+                        version == 5
+                        and "duplicate column name: target_file" in str(exc).lower()
+                    ):
+                        continue
+                    raise
         self.conn.execute(
             "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -664,11 +679,17 @@ class Database:
 
     # -- Runs --
 
-    def create_run(self, case_id: int, competitor_id: int) -> int:
-        """Open a pending run for (case, competitor); returns its id."""
+    def create_run(
+        self, case_id: int, competitor_id: int, target_file: str | None = None
+    ) -> int:
+        """Open a pending run for (case, competitor, file); returns its id.
+
+        ``target_file`` is the one file the competitor is pointed at (None for a
+        legacy whole-repo run)."""
         cur = self.conn.execute(
-            "INSERT INTO runs(case_id, competitor_id, status) VALUES(?, ?, 'pending')",
-            (case_id, competitor_id),
+            "INSERT INTO runs(case_id, competitor_id, target_file, status) "
+            "VALUES(?, ?, ?, 'pending')",
+            (case_id, competitor_id, target_file),
         )
         self.conn.commit()
         assert cur.lastrowid is not None

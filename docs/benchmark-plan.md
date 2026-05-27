@@ -23,7 +23,9 @@ corpus of vulnerabilities, runnable **unattended**.
    **competitor = (model × runtime × tool-profile)**. e.g. "Sonnet in Claude Code" and
    "Sonnet via raw API + minimal loop" are distinct competitors and the delta is a result.
    Models with no native agent fall back to a built-in ReAct loop or a `pi`-style custom agent.
-   The only invariant across competitors is "same code, same known vuln."
+   The only invariant across competitors is "same code, same known vuln." Each run is **scoped
+   to one known-vulnerable file** (a realistic file-by-file audit; the model is told the file,
+   never the bug) — this isolates detection from un-scorable repo triage and bounds cost; see §7.
 2. **Scoring = localization gate + Opus 4.7 semantic judge** (hybrid). A **hit** =
    a reported finding lands within N lines of a patched hunk in a ground-truth file
    **AND** the judge rules it semantically the same bug as the CVE.
@@ -120,11 +122,27 @@ Introduces a real schema-migration path (today: `SCHEMA_VERSION = 1`, no migrati
 
 ## 7. Scoring methodology (precise)
 
-Per `(competitor, case)` where the run reached `complete`:
-- **hit** iff ∃ finding F: F is in a ground-truth file AND `line(F)` within N lines of a
+**File-scoped runs (decision 2026-05-27).** A run audits **one file** of a case: the
+competitor is pointed at a known-vulnerable file (`runs.target_file`) and asked to review
+it for vulnerabilities, told *nothing* about the planted bug. This mirrors a real
+file-by-file audit, isolates the detection question (can the model recognize the bug *in
+the code*) from the un-scorable repo-triage question (which of N files to look at — we have
+ground truth only for the vulnerable ones), and cuts cost/latency ~4–5× while shrinking the
+false-positive surface to "other findings in this one file." The whole source tree is still
+mounted read-only so the model can follow a definition/caller for context. The unit is thus
+`(competitor, case, file)`; one case has one run per vulnerable (non-test) file.
+
+Per `(competitor, case, file)` run that reached `complete`:
+- **run hit** iff ∃ finding F: F is in a ground-truth file AND `line(F)` within N lines of a
   patched hunk (localization gate) AND truth-judge(F, CVE description) == same-bug.
-- **miss** iff `complete` and no such F. (`infra_error`/`auth_failed` runs are excluded from
-  the denominator — never counted as misses.)
+- **run miss** iff `complete` and no such F (and no localized-but-undetermined finding).
+- A localized finding the judge could not decide (timeout/auth/unparseable) → **judge_error**
+  (undetermined), never a miss. (`infra_error`/`auth_failed` runs → **excluded**.)
+
+Rolled up to the **case** (the detection unit): a case is detected (**hit**) iff *any* of its
+file-runs hit; precedence for the rest is `judge_error` > `miss` > `excluded` (an undetermined
+file keeps the case out of the denominator rather than scoring it a clean miss). `judge_error`
+and `excluded` cases are excluded from the detection-rate denominator — never counted as misses.
 - **false positives**: every *other* reported finding (not matching ground truth) → FP-judge
   → real-bug vs false-positive. **The FP-judge must NOT see the CVE description** (avoid
   over-trust / circularity); the truth-judge *does* (that's the ground truth).
@@ -246,6 +264,25 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     rejected line 61 as a *different* root-cause flaw (a `startsWith` prefix check, same file
     and same CWE-22) — proving the hybrid gate isn't rubber-stamping localization. Outcome:
     **HIT**, detection 100% over 1 eligible case, $0.096 judge spend logged to `judgments`.
+  - **File-scoped harness (decision 2026-05-27; folded into this branch).** The competitor is
+    now pointed at one vulnerable file at a time (neutral prompt, no advisory leak) instead of
+    auditing the whole repo — see §7. Delivered alongside scoring: schema v5 `runs.target_file`;
+    `vulnerable_files(case)` (distinct non-test files carrying a hunk) and a neutral file-scoped
+    prompt in `runner.py`; `run_case(case, competitor, target_file)` + a `--max-budget-usd`
+    backstop; `bench run` enumerates a case's files into one run each (`--file` to scope);
+    case-level rollup (`CaseScore`/`case_scores`) so detection counts cases, not file-runs.
+    - **Live comparison (junrar, same case/model).** whole-repo: HIT, **$1.33 / 677 s**, ~825k
+      tokens, 20 turns; file-scoped: HIT (judge again confirms line 76, rejects line 61),
+      **$0.31 / 223 s**, ~225k tokens — same detection, ~4× cheaper, ~3× faster, FP surface
+      down to 3 findings in the one file. This validates the user's thesis: pointed at a file
+      with no hint about the bug, the model still finds it.
+    - **Finding-parser bug fixed (`parse_competitor_findings`).** The file-scoped prompt elicits
+      a reasoning summary whose prose contained a *valid* JSON string-array
+      (`["..","evil.txt"]`) **before** the real ```json findings block. The old parser grabbed
+      the first balanced `[...]`, found no objects, and returned `[]` — turning a real HIT into
+      a phantom miss. Now: try the whole text, then fenced ```json blocks, then every balanced
+      array, accepting only one that carries finding *objects* and preferring the last; invalid
+      backslash escapes are repaired (shared with pre-vet). 141 tests.
 - **P4 — Precision**: FP judge over non-ground-truth findings → precision metrics.
 - **P5 — Leaderboard + Pareto** reporting.
 - **P6 — Automation loop**: scheduling + corpus/competitor lifecycle.
