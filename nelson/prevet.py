@@ -244,6 +244,22 @@ class ClaudeCLIJudge:
         )
 
 
+def _sum_input_tokens(usage: dict) -> int | None:
+    """Total input = fresh + cache-creation + cache-read, or None if absent.
+
+    The CLI's ``usage.input_tokens`` is only the final turn's *fresh* input; a
+    judge call's real input also includes the cached system prompt. (Matches the
+    runner's accounting.)
+    """
+    keys = (
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    )
+    present = [usage.get(k) for k in keys if isinstance(usage.get(k), int)]
+    return sum(present) if present else None
+
+
 def _unwrap_claude_json(
     raw: str,
 ) -> tuple[str, int | None, int | None, float | None]:
@@ -254,10 +270,14 @@ def _unwrap_claude_json(
         return raw, None, None, None
     if isinstance(envelope, dict) and "result" in envelope:
         usage = envelope.get("usage", {})
+        # The CLI reports total_cost_usd; tolerate the older cost_usd key too.
+        cost = envelope.get("total_cost_usd")
+        if cost is None:
+            cost = envelope.get("cost_usd")
         return (
             str(envelope["result"]),
-            usage.get("input_tokens"),
+            _sum_input_tokens(usage),
             usage.get("output_tokens"),
-            envelope.get("cost_usd"),
+            cost,
         )
     return raw, None, None, None

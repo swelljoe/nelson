@@ -6,12 +6,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-# Bumped to 3: v2 added the benchmark corpus (`cases`); v3 adds the run layer
-# (`competitors`, `runs`, `run_findings`) that the container runner populates.
-# New tables/columns go in MIGRATIONS keyed by their target version;
-# _apply_migrations walks a stored DB up to SCHEMA_VERSION, so old databases
-# upgrade in place.
-SCHEMA_VERSION = 3
+# Bumped to 4: v2 added the benchmark corpus (`cases`); v3 added the run layer
+# (`competitors`, `runs`, `run_findings`); v4 adds `judgments`, the P3/P4 scoring
+# ledger that records each judge call's verdict + token cost separately from
+# competitor cost. New tables/columns go in MIGRATIONS keyed by their target
+# version; _apply_migrations walks a stored DB up to SCHEMA_VERSION, so old
+# databases upgrade in place.
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -159,6 +160,27 @@ MIGRATIONS: dict[int, str] = {
         judge_reasoning TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_run_findings_run ON run_findings(run_id);
+    """,
+    4: """
+    -- Scoring ledger: one row per judge call (truth judge in P3, FP judge in
+    -- P4, and pre-vet could log here too). Keeps an auditable record of every
+    -- verdict AND its token cost, tracked separately from competitor cost so a
+    -- judge's spend never distorts the Pareto picture. target_id points at a
+    -- run_finding (truth/fp) or a case (prevet); target_kind disambiguates.
+    CREATE TABLE IF NOT EXISTS judgments (
+        id INTEGER PRIMARY KEY,
+        target_kind TEXT NOT NULL,        -- truth / fp / prevet
+        target_id INTEGER,
+        judge_model TEXT,
+        verdict TEXT,                     -- e.g. same_bug / different_bug / error: …
+        reasoning TEXT,
+        tokens_in INTEGER,
+        tokens_out INTEGER,
+        cost_usd REAL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_judgments_target
+        ON judgments(target_kind, target_id);
     """,
 }
 
@@ -569,6 +591,11 @@ class Database:
             "SELECT * FROM cases WHERE ext_id = ?", (ext_id,)
         ).fetchone()
 
+    def get_case_by_id(self, case_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM cases WHERE id = ?", (case_id,)
+        ).fetchone()
+
     def list_cases(
         self, status: str | None = None, source: str | None = None
     ) -> list[sqlite3.Row]:
@@ -625,6 +652,11 @@ class Database:
     def get_competitor(self, name: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT * FROM competitors WHERE name = ?", (name,)
+        ).fetchone()
+
+    def get_competitor_by_id(self, competitor_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM competitors WHERE id = ?", (competitor_id,)
         ).fetchone()
 
     def list_competitors(self) -> list[sqlite3.Row]:
@@ -795,3 +827,84 @@ class Database:
             "SELECT * FROM run_findings WHERE run_id = ? ORDER BY file, line_start",
             (run_id,),
         ).fetchall()
+
+    # -- Scoring (P3/P4) --
+
+    def record_finding_score(
+        self,
+        finding_id: int,
+        *,
+        matches_ground_truth: bool,
+        judge_truth_verdict: str | None = None,
+        judge_reasoning: str | None = None,
+    ) -> None:
+        """Persist the localization-gate result and (optional) truth verdict.
+
+        ``matches_ground_truth`` is the deterministic localization gate; the
+        judge_* fields are set only for findings that cleared the gate and were
+        sent to the truth judge (NULL otherwise).
+        """
+        self.conn.execute(
+            """UPDATE run_findings
+               SET matches_ground_truth = ?,
+                   judge_truth_verdict = CASE WHEN ? THEN ? ELSE NULL END,
+                   judge_reasoning = CASE WHEN ? THEN ? ELSE NULL END
+               WHERE id = ?""",
+            (
+                1 if matches_ground_truth else 0,
+                matches_ground_truth,
+                judge_truth_verdict,
+                matches_ground_truth,
+                judge_reasoning,
+                finding_id,
+            ),
+        )
+        self.conn.commit()
+
+    def add_judgment(
+        self,
+        *,
+        target_kind: str,
+        target_id: int | None,
+        judge_model: str | None,
+        verdict: str | None,
+        reasoning: str | None = None,
+        tokens_in: int | None = None,
+        tokens_out: int | None = None,
+        cost_usd: float | None = None,
+    ) -> int:
+        """Append a judge call to the audit ledger; returns its id."""
+        cur = self.conn.execute(
+            """INSERT INTO judgments(target_kind, target_id, judge_model, verdict,
+                                     reasoning, tokens_in, tokens_out, cost_usd)
+               VALUES(?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                target_kind,
+                target_id,
+                judge_model,
+                verdict,
+                reasoning,
+                tokens_in,
+                tokens_out,
+                cost_usd,
+            ),
+        )
+        self.conn.commit()
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def judgments(
+        self, target_kind: str | None = None, target_id: int | None = None
+    ) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM judgments"
+        clauses, params = [], []
+        if target_kind is not None:
+            clauses.append("target_kind = ?")
+            params.append(target_kind)
+        if target_id is not None:
+            clauses.append("target_id = ?")
+            params.append(target_id)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id"
+        return self.conn.execute(sql, params).fetchall()

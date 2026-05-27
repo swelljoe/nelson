@@ -109,7 +109,7 @@ def _envelope(result_text, tin=10, tout=5, cost=0.01):
             "type": "result",
             "result": result_text,
             "usage": {"input_tokens": tin, "output_tokens": tout},
-            "cost_usd": cost,
+            "total_cost_usd": cost,  # the key the real CLI emits
         }
     )
 
@@ -122,6 +122,36 @@ def test_claude_judge_parses_verdict_and_usage(monkeypatch):
     assert v.confidence == 0.9
     assert v.notes == "sound"
     assert (v.tokens_in, v.tokens_out, v.cost_usd) == (10, 5, 0.01)
+
+
+def test_unwrap_claude_json_sums_cache_and_reads_total_cost():
+    from nelson.prevet import _unwrap_claude_json
+
+    raw = json.dumps(
+        {
+            "type": "result",
+            "result": "ok",
+            "usage": {
+                "input_tokens": 12,
+                "cache_creation_input_tokens": 100,
+                "cache_read_input_tokens": 500,
+                "output_tokens": 7,
+            },
+            "total_cost_usd": 0.42,
+        }
+    )
+    text, tin, tout, cost = _unwrap_claude_json(raw)
+    assert text == "ok"
+    assert tin == 12 + 100 + 500
+    assert (tout, cost) == (7, 0.42)
+
+
+def test_unwrap_claude_json_falls_back_to_legacy_cost_key():
+    from nelson.prevet import _unwrap_claude_json
+
+    raw = json.dumps({"type": "result", "result": "ok", "usage": {}, "cost_usd": 0.05})
+    _, _, _, cost = _unwrap_claude_json(raw)
+    assert cost == 0.05
 
 
 def test_claude_judge_reports_nonzero_exit_as_error(monkeypatch):
