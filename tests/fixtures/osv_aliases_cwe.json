@@ -1,0 +1,42 @@
+{
+  "id": "GHSA-jfh8-c2jp-5v3q",
+  "aliases": [
+    "CVE-2021-44228"
+  ],
+  "affected": [
+    {
+      "package": {
+        "name": "org.apache.logging.log4j:log4j-core",
+        "ecosystem": "Maven",
+        "purl": "pkg:maven/org.apache.logging.log4j/log4j-core"
+      },
+      "ranges": [
+        {
+          "type": "ECOSYSTEM",
+          "events": [
+            {
+              "introduced": "2.13.0"
+            },
+            {
+              "fixed": "2.15.0"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://github.com/advisories/GHSA-7rjr-3q55-vv33"
+    }
+  ],
+  "database_specific": {
+    "cwe_ids": [
+      "CWE-20",
+      "CWE-400",
+      "CWE-502",
+      "CWE-917"
+    ]
+  }
+}
