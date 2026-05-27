@@ -1079,8 +1079,12 @@ def _parse_competitor(spec: str):
     """
     from .runner import Competitor
 
+    spec = spec.strip()
     if ":" in spec:
         runtime, model = spec.split(":", 1)
+        runtime, model = runtime.strip(), model.strip()
+        if not runtime:
+            raise click.ClickException(f"competitor spec '{spec}' has no runtime")
     else:
         runtime, model = "claude-code", spec
     if not model:
