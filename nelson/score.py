@@ -558,7 +558,7 @@ class CompetitorDetection:
 
 
 def detection_report(run_scores: list[RunScore]) -> list[CompetitorDetection]:
-    """Roll RunScores up per competitor, newest-competitor-name-sorted."""
+    """Roll RunScores up per competitor, sorted alphabetically by competitor name."""
     by_name: dict[str, CompetitorDetection] = {}
     for rs in run_scores:
         d = by_name.setdefault(
