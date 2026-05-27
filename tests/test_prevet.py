@@ -46,6 +46,30 @@ def test_parse_verdict_returns_none_when_unusable(text):
     assert parse_verdict(text) is None
 
 
+def test_parse_verdict_recovers_from_invalid_escapes():
+    # Real failure mode: the judge quoted a JS template literal, emitting `\` `
+    # (a backslash before a backtick) — an invalid JSON escape that makes
+    # json.loads reject the whole object. The verdict must still be recovered.
+    text = (
+        r'{"confidence": 0.92, "reasoning": "removed line `order += '
+        r'\`WHEN \\\`${t}\\\` = ${i}\`` interpolates into raw SQL"}'
+    )
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(text)  # confirms the raw reply is genuinely invalid JSON
+    result = parse_verdict(text)
+    assert result is not None
+    confidence, reasoning = result
+    assert confidence == 0.92
+    assert "interpolates into raw SQL" in reasoning  # reasoning preserved
+
+
+def test_parse_verdict_salvages_confidence_when_object_truncated():
+    # Object never closes (truncated reply), so the {...} match fails, but the
+    # gating field is independently readable. Salvage it; reasoning is lost.
+    text = '{"confidence": 0.7, "reasoning": "unterminated and cut off'
+    assert parse_verdict(text) == (0.7, "")
+
+
 def test_prompt_includes_advisory_and_diff_and_omits_empty_fields():
     case = Case(
         source="cvd",
