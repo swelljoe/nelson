@@ -345,13 +345,22 @@ class CorpusPipeline:
         )
         return verdict
 
-    def build(self, source: SeedSource | None = None) -> BuildSummary:
-        """Run every wired stage over candidate cases; return what changed."""
+    def build(
+        self, source: SeedSource | None = None, *, limit: int | None = None
+    ) -> BuildSummary:
+        """Run every wired stage over candidate cases; return what changed.
+
+        ``limit`` caps how many candidate rows are processed this pass (useful
+        for incremental runs that bound API/network cost); None processes all.
+        """
         summary = BuildSummary()
         if source is not None:
             summary.seeded = self.import_seeds(source)
 
-        for row in self.db.list_cases(status="candidate"):
+        candidates = self.db.list_cases(status="candidate")
+        if limit is not None:
+            candidates = candidates[:limit]
+        for row in candidates:
             case = Case.from_row(row)
 
             # 1. Enrich until we have a repo + fix commit to work from.
