@@ -533,11 +533,15 @@ class BenchRunner:
 
         try:
             safe_ext = "".join(
-                ch if (ch.isalnum() or ch in ("-", "_", ".")) else "_" for ch in case.ext_id
+                ch if (ch.isalnum() or ch in ("-", "_", ".")) else "_"
+                for ch in case.ext_id
             )
             checkout_root = self.cache_dir.resolve()
             checkout_dir = (checkout_root / safe_ext).resolve()
-            if checkout_root != checkout_dir and checkout_root not in checkout_dir.parents:
+            if (
+                checkout_root != checkout_dir
+                and checkout_root not in checkout_dir.parents
+            ):
                 raise RunnerError(f"unsafe case ext_id for cache dir: {case.ext_id!r}")
             checkout = prepare_checkout(
                 case.repo_url,

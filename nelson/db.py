@@ -738,7 +738,15 @@ class Database:
                    transcript_path = COALESCE(?, transcript_path),
                    raw_output = COALESCE(?, raw_output)
                WHERE id = ?""",
-            (status, _now(), error_msg, wall_clock_s, transcript_path, raw_output, run_id),
+            (
+                status,
+                _now(),
+                error_msg,
+                wall_clock_s,
+                transcript_path,
+                raw_output,
+                run_id,
+            ),
         )
         self.conn.commit()
 
