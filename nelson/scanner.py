@@ -6,7 +6,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-from .agents import AgentAdapter, create_adapter
+from .agents import AgentAdapter, FailureKind, create_adapter
 from .cwe import CWE_OPEN, CWE_TOP_25, applicable_cwes, build_open_prompt, build_prompt
 from .db import Database
 from .inventory import LANGUAGE_MAP, SourceFile, discover_files
@@ -154,8 +154,18 @@ def _process_one_job(
 
     result = adapter.run(prompt, cancel_event=cancel_event)
 
-    if result.rate_limited:
+    # Rate limiting is recoverable: the caller releases the job and backs off.
+    if result.failure_kind is FailureKind.RATE_LIMIT:
         return True, False
+
+    # Integrity statuses are terminal but must never be scored as a miss; they
+    # get their own status so they're distinguishable from a genuine task error.
+    if result.failure_kind is FailureKind.AUTH:
+        db.mark_job_auth_failed(job["id"], result.error or "auth failed")
+        return False, False
+    if result.failure_kind is FailureKind.INFRA:
+        db.mark_job_infra_error(job["id"], result.error or "infra error")
+        return False, False
 
     if result.error:
         db.fail_job(job["id"], result.error)

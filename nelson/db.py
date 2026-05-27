@@ -31,7 +31,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     file_path TEXT NOT NULL,
     cwe_id TEXT NOT NULL,
     model_id TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending',  -- pending, running, complete, error, skipped
+    -- pending, running, complete, skipped, error (genuine task error, e.g.
+    -- unreadable file), and the integrity statuses auth_failed / infra_error.
+    -- The integrity statuses mean the model never got a fair look at the code,
+    -- so scoring must never count them as a "miss".
+    status TEXT NOT NULL DEFAULT 'pending',
     started_at TEXT,
     completed_at TEXT,
     tokens_in INTEGER,
@@ -167,6 +171,25 @@ class Database:
     def fail_job(self, job_id: int, error_msg: str):
         self.conn.execute(
             "UPDATE jobs SET status = 'error', completed_at = ?, error_msg = ? WHERE id = ?",
+            (_now(), error_msg, job_id),
+        )
+        self.conn.commit()
+
+    def mark_job_auth_failed(self, job_id: int, error_msg: str):
+        """Terminal: the model could not authenticate / was not reachable due to
+        credentials. Integrity rule: this is NOT a miss — it is excluded from the
+        scoring denominator (coverage_for_scans only counts 'complete')."""
+        self.conn.execute(
+            "UPDATE jobs SET status = 'auth_failed', completed_at = ?, error_msg = ? WHERE id = ?",
+            (_now(), error_msg, job_id),
+        )
+        self.conn.commit()
+
+    def mark_job_infra_error(self, job_id: int, error_msg: str):
+        """Terminal: infrastructure/transport failure (timeout, connection,
+        unexplained non-zero exit). Like auth_failed, never counted as a miss."""
+        self.conn.execute(
+            "UPDATE jobs SET status = 'infra_error', completed_at = ?, error_msg = ? WHERE id = ?",
             (_now(), error_msg, job_id),
         )
         self.conn.commit()

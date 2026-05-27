@@ -12,6 +12,7 @@ dependencies = [
 dev = [
     "ruff>=0.11",
     "ty>=0.0.1a7",
+    "pytest>=8.0",
 ]
 
 [project.scripts]
@@ -36,3 +37,7 @@ ignore = [
 "nelson/db.py" = ["E501", "S101"]  # SQL strings, asserts for type narrowing
 "nelson/review.py" = ["E501"] # Long prompt strings
 "nelson/html_report.py" = ["E501"] # Inline CSS and HTML strings
+"tests/*" = ["S101", "S105", "S106"]  # asserts + fake env-var-name fixtures
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

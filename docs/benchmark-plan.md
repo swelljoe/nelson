@@ -1,6 +1,6 @@
 # Nelson Benchmark Harness — Implementation Plan
 
-> Status: planning complete, P0 in progress. Written 2026-05-26.
+> Status: P0 landed (2026-05-26); P1 next. Written 2026-05-26.
 > This document is the durable source of truth for the benchmark effort. Update it as phases land.
 
 ## 1. Goal
@@ -127,10 +127,19 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
 
 ## 8. Phased roadmap (dependency-ordered; one branch per phase)
 
-- **P0 — Refactor & integrity** *(current branch: `bench-p0-runtime-auth`)*. Split
+- **P0 — Refactor & integrity** ✅ *(branch `bench-p0-runtime-auth`)*. Split
   model/runtime in `agents.py`; add `auth_profile` abstraction + env-var credential
   injection; add `infra_error`/`auth_failed` statuses + a preflight auth ping.
-  *Gate: a missing/invalid key marks `auth_failed`, not a miss.*
+  *Gate met: a missing/invalid key marks `auth_failed`, not a miss (tested).*
+  Delivered: `nelson/auth.py` (AuthProfile referencing secret *names*, `EnvSecretStore`,
+  `MissingSecretError`, OAuth bootstrap **stub**); `FailureKind` + `classify_failure`
+  (rate > auth > infra precedence) and `AgentResult.failure_kind` in `agents.py`;
+  runtime dimensions (`runtime`/`model_id`/`tool_profile`) surfaced on every adapter
+  with `name` unchanged so existing scans/DB are unaffected; env injection via
+  `_run_cli(env=…)` (defaults to inheriting the parent env — no regression); a base
+  `preflight()` ping; DB `mark_job_auth_failed` / `mark_job_infra_error` (terminal,
+  excluded from `coverage_for_scans` so they can never become a miss); scanner routing
+  of the three failure kinds; `tests/` (36 tests, pytest added to dev deps).
 - **P1 — Corpus foundation**: importer + OSV/GHSA/NVD enrichment + pre-patch derivation +
   Opus pre-vet → vetted manifest. *Gate: hand-check ~5 derived cases vs their advisories.*
 - **P2 — One competitor end-to-end**: podman runner + one runtime on a few cases.
