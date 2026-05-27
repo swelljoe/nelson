@@ -461,6 +461,12 @@ class GeminiCLIAdapter(AgentAdapter):
 
         if result.returncode != 0:
             kind = classify_failure(raw + stderr, failed=True)
+            combined_output = (raw + stderr)[:500]
+            error = (
+                f"exit code {result.returncode}: {combined_output}"
+                if combined_output
+                else f"exit code {result.returncode}"
+            )
             return AgentResult(
                 findings=[],
                 raw_output=raw,
