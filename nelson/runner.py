@@ -584,29 +584,49 @@ class BenchRunner:
     ) -> RunResult:
         combined = exec_result.stdout + exec_result.stderr
         if exec_result.timed_out:
-            self.db.mark_run_infra_error(run_id, "run timed out")
+            transcript_path = self._write_transcript(run_id, combined)
+            self.db.mark_run_infra_error(
+                run_id,
+                "run timed out",
+                wall_clock_s=wall,
+                transcript_path=str(transcript_path),
+                raw_output=combined[-10000:],
+            )
             return RunResult(
                 status="infra_error",
                 error="timeout",
                 wall_clock_s=wall,
                 container_id=exec_result.container_id,
-                transcript=exec_result.stdout,
+                transcript=combined,
             )
         if exec_result.returncode != 0:
+            transcript_path = self._write_transcript(run_id, combined)
             kind = classify_failure(combined, failed=True)
             err = f"exit {exec_result.returncode}: {combined[-500:]}"
             if kind is FailureKind.AUTH:
-                self.db.mark_run_auth_failed(run_id, err)
+                self.db.mark_run_auth_failed(
+                    run_id,
+                    err,
+                    wall_clock_s=wall,
+                    transcript_path=str(transcript_path),
+                    raw_output=combined[-10000:],
+                )
                 status = "auth_failed"
             else:
-                self.db.mark_run_infra_error(run_id, err)
+                self.db.mark_run_infra_error(
+                    run_id,
+                    err,
+                    wall_clock_s=wall,
+                    transcript_path=str(transcript_path),
+                    raw_output=combined[-10000:],
+                )
                 status = "infra_error"
             return RunResult(
                 status=status,
                 error=err,
                 wall_clock_s=wall,
                 container_id=exec_result.container_id,
-                transcript=exec_result.stdout,
+                transcript=combined,
             )
 
         text, tin, tout, cost = extract_result(exec_result.stdout)
