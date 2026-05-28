@@ -1405,3 +1405,82 @@ def bench_score(
     _emit_detection_report(detection_report(run_scores))
     if precision:
         _emit_precision_report(precision_report(run_scores))
+
+
+def _emit_leaderboard(entries) -> None:
+    """Per-competitor leaderboard table (detection + precision + economics)."""
+    click.echo(
+        f"\n{'#':>2} {'COMPETITOR':<26} {'SIZE':<8} {'DET':>5} {'PREC':>5} "
+        f"{'FP/C':>5} {'COST/C':>8} {'LAT':>6} {'CASES':>5}"
+    )
+    for i, e in enumerate(entries, 1):
+        det = f"{e.detection_rate:.0%}" if e.eligible else "-"
+        prec = f"{e.precision:.0%}" if e.precision is not None else "-"
+        fpc = f"{e.fp_per_case:.2f}" if e.fp_per_case is not None else "-"
+        cpc = f"${e.cost_per_case:.3f}" if e.cost_per_case is not None else "-"
+        lat = f"{e.latency_per_case:.0f}s" if e.latency_per_case is not None else "-"
+        click.echo(
+            f"{i:>2} {e.competitor_name:<26} {(e.size_class or '-'):<8} "
+            f"{det:>5} {prec:>5} {fpc:>5} {cpc:>8} {lat:>6} {e.cases:>5}"
+        )
+    click.echo(
+        "\nRanked by detection, then precision, then cost/case. COST/C and LAT are "
+        "the competitor's own spend per audited case (judge spend excluded)."
+    )
+
+
+@bench.command(name="leaderboard")
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+@click.option(
+    "--html",
+    "html_path",
+    default=None,
+    help="Also write the leaderboard + Pareto report to this HTML file.",
+)
+@click.option(
+    "--tolerance",
+    default=10,
+    type=int,
+    help="Localization tolerance used when reading back persisted scores.",
+)
+def bench_leaderboard(db_path: str, html_path: str | None, tolerance: int):
+    """Rank scored competitors: detection, precision, cost/case, latency, size.
+
+    Read-only — it reloads already-scored runs from the DB (no judge spend; run
+    `bench score` first to score new runs). Prints the leaderboard table, and with
+    --html writes a report with Pareto scatter plots and a per-case drilldown.
+    """
+    from .score import ClaudeTruthJudge, Scorer, case_scores, leaderboard
+
+    db = Database(db_path)
+    rows = db.list_runs()
+    if not rows:
+        click.echo("No runs. Run `nelson bench run` then `nelson bench score`.")
+        return
+
+    # A Scorer is needed only for load_run_score / needs_scoring; its judge is
+    # never invoked here (leaderboard reflects already-persisted scores).
+    scorer = Scorer(db, ClaudeTruthJudge(), tolerance=tolerance)
+    run_scores = [scorer.load_run_score(r["id"]) for r in rows]
+    unscored = sum(
+        1
+        for r in rows
+        if r["status"] == "complete"
+        and scorer.needs_scoring(r["id"], include_precision=True)
+    )
+    if unscored:
+        click.echo(
+            f"warning: {unscored} complete run(s) not yet scored — run "
+            "`nelson bench score` for full results.",
+            err=True,
+        )
+
+    entries = leaderboard(run_scores)
+    _emit_leaderboard(entries)
+
+    if html_path:
+        from .html_report import generate_leaderboard_report
+
+        html = generate_leaderboard_report(entries, case_scores(run_scores))
+        Path(html_path).write_text(html)
+        click.echo(f"\nWrote leaderboard report to {html_path}")
