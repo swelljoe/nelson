@@ -17,9 +17,11 @@ Runtimes registered here:
   / Kimi become provider configs in the competitor's ``cost_model`` + auth
   profile).
 - ``gemini-cli`` — the host ``gemini`` binary bind-mounted in (native agent).
-- ``deepseek-cli`` / ``kimi-cli`` / ``pi-custom`` — generic native-CLI runtimes,
-  wired and unit-tested but stubbed: an absent host binary resolves to
-  ``infra_error`` until the CLI is installed and its argv/output verified.
+- ``kimi-cli`` / ``pi-custom`` — generic native-CLI runtimes for vendors that ship
+  an *official* agent, wired and unit-tested but stubbed: an absent host binary
+  resolves to ``infra_error`` until the CLI is installed and its argv/output
+  verified. (No ``deepseek-cli`` — DeepSeek has no trusted first-party agent CLI,
+  so it runs through ``claude-code`` (Anthropic-compat) and ``raw-api-loop``.)
 
 Integrity rule (non-negotiable): a missing binary, missing API key, or unknown
 runtime is a *setup* failure (``infra_error`` / ``auth_failed``) — never a model
@@ -331,7 +333,7 @@ class RawApiLoopRuntime:
             "HOME": "/home/agent",
             "NELSON_BASE_URL": base_url,
             "NELSON_MODEL": ctx.competitor.model,
-            "NELSON_MAX_STEPS": str(cfg.get("max_steps", 12)),
+            "NELSON_MAX_STEPS": str(cfg.get("max_steps", 20)),
             "NELSON_TOKEN_BUDGET": str(cfg.get("token_budget", 200000)),
             **ctx.auth.env,
         }

@@ -15,7 +15,7 @@ and ``EnvKeyAuth``):
 - ``NELSON_BASE_URL``     OpenAI-compatible base, e.g. ``https://api.deepseek.com``
 - ``NELSON_MODEL``        model id passed to the endpoint
 - ``NELSON_API_KEY``      bearer token (injected from a secret name)
-- ``NELSON_MAX_STEPS``    tool-use turn cap (default 12)
+- ``NELSON_MAX_STEPS``    tool-use turn cap (default 20)
 - ``NELSON_TOKEN_BUDGET`` cumulative token cap (default 200000)
 - ``NELSON_INPUT_USD_PER_MTOK`` / ``NELSON_OUTPUT_USD_PER_MTOK`` optional pricing
 
@@ -245,7 +245,7 @@ def run_loop(
     base_url: str,
     model: str,
     api_key: str,
-    max_steps: int = 12,
+    max_steps: int = 20,
     token_budget: int = 200_000,
     post: Callable[[str, dict[str, Any], str], dict[str, Any]] = _post_chat,
     src_root: str | None = None,
@@ -270,6 +270,21 @@ def run_loop(
 
     for step in range(max_steps):
         force_final = step == max_steps - 1 or (total_in + total_out) >= token_budget
+        if force_final:
+            # Withholding tools alone isn't enough — some models (e.g. DeepSeek)
+            # will still emit a native-format tool call as plain text. Spell out
+            # that the budget is spent and only the JSON array is wanted now.
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "You have reached your tool-use budget. Do not call any "
+                        "tools. Based only on what you have already read, output "
+                        "NOW your final answer as the JSON array specified earlier "
+                        "(output [] if you found no exploitable vulnerability)."
+                    ),
+                }
+            )
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -359,7 +374,7 @@ def main() -> None:
             base_url=base_url,
             model=model,
             api_key=api_key,
-            max_steps=_int_env("NELSON_MAX_STEPS", 12),
+            max_steps=_int_env("NELSON_MAX_STEPS", 20),
             token_budget=_int_env("NELSON_TOKEN_BUDGET", 200_000),
         )
     except urllib.error.HTTPError as e:
