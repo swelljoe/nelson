@@ -175,11 +175,7 @@ def prepare_checkout(
     tree = dest / "src"
     sentinel = dest / ".commit"
     gitdir = dest / ".gitcache"
-    if (
-        sentinel.is_file()
-        and sentinel.read_text().strip() == commit
-        and tree.is_dir()
-    ):
+    if sentinel.is_file() and sentinel.read_text().strip() == commit and tree.is_dir():
         return tree
     if dest.exists():
         shutil.rmtree(dest)
