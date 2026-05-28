@@ -178,6 +178,129 @@ def test_claude_code_spec_passes_budget_cap_when_set(tmp_path):
     assert "--max-budget-usd" not in spec2.argv
 
 
+# -- Source checkout ---------------------------------------------------------
+
+
+def _make_upstream(tmp_path: Path, files: dict[str, str]) -> Path:
+    """Create a local git repo with ``files`` committed; returns the repo path."""
+    import subprocess as _sp
+
+    repo = tmp_path / "upstream"
+    repo.mkdir()
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "PATH": "/usr/bin:/bin",
+    }
+    _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, env=env, check=True)
+    for rel, content in files.items():
+        p = repo / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+    _sp.run(["git", "add", "-A"], cwd=repo, env=env, check=True)
+    _sp.run(["git", "commit", "-q", "-m", "seed"], cwd=repo, env=env, check=True)
+    return repo
+
+
+def _head(repo: Path) -> str:
+    import subprocess as _sp
+
+    return _sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def test_prepare_checkout_materializes_tree_with_content(tmp_path):
+    from nelson.runner import prepare_checkout
+
+    upstream = _make_upstream(tmp_path, {"a.txt": "hello\n", "sub/b.py": "x = 1\n"})
+    sha = _head(upstream)
+
+    tree = prepare_checkout(str(upstream), sha, tmp_path / "co")
+
+    assert tree == tmp_path / "co" / "src"
+    assert (tree / "a.txt").read_text() == "hello\n"
+    assert (tree / "sub" / "b.py").read_text() == "x = 1\n"
+
+
+def test_prepare_checkout_strips_git_from_the_mount(tmp_path):
+    """The whole point: ``.git`` must never appear in the mount path.
+
+    ``.git/config`` would name the upstream repo (identity leak) and, with
+    network on, ``git fetch origin <fix>`` would put the upstream fix one
+    command away. The scratch git stays a *sibling* of the tree, not under it.
+    """
+    from nelson.runner import prepare_checkout
+
+    upstream = _make_upstream(tmp_path, {"a.txt": "x"})
+    sha = _head(upstream)
+
+    tree = prepare_checkout(str(upstream), sha, tmp_path / "co")
+
+    # Nothing named .git anywhere under the mount.
+    assert not (tree / ".git").exists()
+    assert list(tree.rglob(".git")) == []
+    # And no entry within the mount mentions the upstream URL.
+    for p in tree.rglob("*"):
+        if p.is_file():
+            assert str(upstream) not in p.read_text(errors="replace")
+    # Scratch git is OUTSIDE the mount, so it's never bind-mounted in.
+    assert (tmp_path / "co" / ".gitcache").is_dir()
+    assert tmp_path / "co" / ".gitcache" not in tree.parents
+
+
+def test_prepare_checkout_is_idempotent_for_same_commit(tmp_path):
+    """A second call with the same commit reuses the tree (no re-fetch)."""
+    from nelson.runner import prepare_checkout
+
+    upstream = _make_upstream(tmp_path, {"a.txt": "x"})
+    sha = _head(upstream)
+    co = tmp_path / "co"
+
+    tree1 = prepare_checkout(str(upstream), sha, co)
+    # FETCH_HEAD records the fetch — its mtime gates whether we re-ran fetch.
+    fetch_head = co / ".gitcache" / "FETCH_HEAD"
+    mtime_before = fetch_head.stat().st_mtime
+
+    tree2 = prepare_checkout(str(upstream), sha, co)
+
+    assert tree1 == tree2 == co / "src"
+    assert fetch_head.stat().st_mtime == mtime_before  # no second fetch
+
+
+def test_prepare_checkout_rebuilds_when_commit_changes(tmp_path):
+    """A different commit (different sentinel) wipes and rebuilds."""
+    import subprocess as _sp
+
+    from nelson.runner import prepare_checkout
+
+    upstream = _make_upstream(tmp_path, {"a.txt": "v1"})
+    sha1 = _head(upstream)
+    # Land a second commit so the upstream has a different SHA available.
+    (upstream / "a.txt").write_text("v2")
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+        "PATH": "/usr/bin:/bin",
+    }
+    _sp.run(["git", "commit", "-q", "-am", "v2"], cwd=upstream, env=env, check=True)
+    sha2 = _head(upstream)
+
+    co = tmp_path / "co"
+    prepare_checkout(str(upstream), sha1, co)
+    assert (co / "src" / "a.txt").read_text() == "v1"
+    prepare_checkout(str(upstream), sha2, co)
+    assert (co / "src" / "a.txt").read_text() == "v2"
+
+
 # -- File scoping ------------------------------------------------------------
 
 
@@ -265,10 +388,15 @@ def _vetted_case() -> Case:
 
 
 def _runner(db, backend, monkeypatch, tmp_path) -> BenchRunner:
-    # Don't touch the network/git: pretend the checkout already exists.
-    monkeypatch.setattr(
-        "nelson.runner.prepare_checkout", lambda url, commit, dest, **k: Path(dest)
-    )
+    # Don't touch the network/git: pretend the checkout already exists. The
+    # real prepare_checkout returns the pristine `<dest>/src` tree, so the
+    # stub does the same (and creates it so callers can stat it).
+    def _stub(url, commit, dest, **k):
+        tree = Path(dest) / "src"
+        tree.mkdir(parents=True, exist_ok=True)
+        return tree
+
+    monkeypatch.setattr("nelson.runner.prepare_checkout", _stub)
     return BenchRunner(
         db,
         backend=backend,
