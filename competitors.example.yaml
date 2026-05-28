@@ -106,8 +106,17 @@
 # (apples-to-apples with the other raw-api competitors). The `agy` CLI above refuses
 # the audit (its wrapper trips a safety filter) and scores as `refused`; the direct
 # API engages the identical prompt at default safety. Needs a Google AI Studio key
-# ($GEMINI_API_KEY on the host). Models: gemini-2.5-pro (stable) or a 3.x preview
-# (gemini-3.1-pro-preview / gemini-3.5-flash) — pick per what you want to measure.
+# ($GEMINI_API_KEY on the host). All three below share one auth profile + endpoint;
+# they differ only by `model`.
+#
+# CAVEAT: recency does NOT guarantee engagement — gate each model's *engagement*
+# before trusting its score. Live-checked 2026-05-28 on junrar GHSA-j273 (CWE-22):
+#   gemini-2.5-pro          -> HIT (baseline)
+#   gemini-3.1-pro-preview  -> HIT (judged same_bug)
+#   gemini-3.5-flash        -> engaged, real CWE-22 findings; MISS on this one case
+#                              (adjacency noise — n=1, averages out over the matrix)
+#   gemini-3-flash-preview  -> REFUSES at default safety (would only score `refused`;
+#                              NOT added below for that reason)
 - name: raw-api-loop/gemini
   model: gemini-2.5-pro
   runtime: raw-api-loop
@@ -115,6 +124,28 @@
   auth_profile: gemini-openai     # value from $GEMINI_API_KEY on the host
   cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai"}'
   knowledge_cutoff: 2025-01
+
+# Newer Gemini, same endpoint/auth. 3.1-pro-preview is the stronger contender (clean
+# judged HIT); 3.5-flash is the low-cost near-frontier entry — likely not a top
+# contender, but cheap to include and useful to compare against the other low-cost
+# near-frontier models. NOTE: knowledge_cutoff below is a placeholder inherited from
+# the 2.5 family — VERIFY-AT-WIRING (it feeds the cutoff-vs-disclosure integrity
+# check, so a wrong date can mis-include/exclude a case).
+- name: raw-api-loop/gemini-3.1-pro-preview
+  model: gemini-3.1-pro-preview
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: gemini-openai
+  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai"}'
+  knowledge_cutoff: 2025-01       # VERIFY-AT-WIRING
+
+- name: raw-api-loop/gemini-3.5-flash
+  model: gemini-3.5-flash
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: gemini-openai
+  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai"}'
+  knowledge_cutoff: 2025-01       # VERIFY-AT-WIRING
 
 # Wired but stubbed (no key/CLI yet): present so they enter the matrix the moment
 # creds/binaries arrive; until then each cleanly resolves to auth_failed/infra_error.

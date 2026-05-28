@@ -448,22 +448,69 @@ def _is_test_path(path: str) -> bool:
     return bool(_TEST_NAME_RE.search(name))
 
 
+# Files a fix commit routinely touches that cannot themselves carry a code-level
+# vulnerability: dependency lockfiles, package manifests, and doc/license/changelog
+# text. A real CVE fix bumps a version, regenerates a lockfile, and adds a changelog
+# entry in the same commit, so these land in the ground-truth hunk list — but
+# auditing them is a guaranteed-empty run (and pollutes the false-positive
+# denominator), so they are not audit targets. Matched by exact filename or suffix;
+# the never-empty fallback in ``vulnerable_files`` still protects any odd case.
+_NONSOURCE_NAMES = frozenset(
+    {
+        "yarn.lock",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "pnpm-lock.yaml",
+        "composer.lock",
+        "gemfile.lock",
+        "cargo.lock",
+        "poetry.lock",
+        "pipfile.lock",
+        "go.sum",
+        "flake.lock",
+        "package.json",
+        "composer.json",
+    }
+)
+_NONSOURCE_SUFFIXES = (".lock", ".md", ".markdown", ".rst")
+_NONSOURCE_NAME_RE = re.compile(
+    r"^(changelog|changes|history|news|license|licence|notice|authors|"
+    r"contributors|copying|readme)([._-].*)?$",
+    re.IGNORECASE,
+)
+
+
+def _is_nonsource_path(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    lower = name.lower()
+    return (
+        lower in _NONSOURCE_NAMES
+        or lower.endswith(_NONSOURCE_SUFFIXES)
+        or bool(_NONSOURCE_NAME_RE.match(name))
+    )
+
+
 def vulnerable_files(case: Case) -> list[str]:
-    """The product files to point a competitor at: distinct, non-test files that
+    """The product files to point a competitor at: distinct source files that
     carry a real pre-patch hunk.
 
     Derived ground truth lists every file the fix touched, including the added
-    regression test; we audit the files that actually *contained* the bug. Falls
-    back to all hunk files (then ``gt_files``) if filtering would leave nothing,
-    so a case is never silently un-runnable.
+    regression test and the release noise a fix commit drags along (version bumps,
+    lockfiles, changelog entries); we audit the source files that actually
+    *contained* the bug. Falls back to all hunk files (then ``gt_files``) if
+    filtering would leave nothing, so a case is never silently un-runnable.
     """
+
+    def _audit_target(f: str) -> bool:
+        return not _is_test_path(f) and not _is_nonsource_path(f)
+
     hunk_files = list(dict.fromkeys(h["file"] for h in case.gt_hunks if h.get("file")))
-    product = [f for f in hunk_files if not _is_test_path(f)]
+    product = [f for f in hunk_files if _audit_target(f)]
     if product:
         return product
     if hunk_files:
-        return hunk_files  # all hunks were in test files; audit them anyway
-    return [f for f in case.gt_files if not _is_test_path(f)] or list(case.gt_files)
+        return hunk_files  # only tests/non-source hunks; audit them rather than none
+    return [f for f in case.gt_files if _audit_target(f)] or list(case.gt_files)
 
 
 def build_competitor_prompt(case: Case, target_file: str) -> str:

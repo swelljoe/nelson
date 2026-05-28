@@ -332,6 +332,45 @@ def test_vulnerable_files_falls_back_when_only_tests():
     assert vulnerable_files(case) == ["tests/test_x.py"]
 
 
+def test_vulnerable_files_drops_release_noise():
+    from nelson.runner import vulnerable_files
+
+    # A real fix commit drags along version bumps, lockfiles, and a changelog
+    # entry; none can hold the bug, so none should become an audit target.
+    case = Case(
+        source="cvd",
+        ext_id="GHSA-noise",
+        gt_hunks=[
+            {
+                "file": "ghost/core/server/models/base/plugins/crud.js",
+                "start": 5,
+                "end": 9,
+            },
+            {"file": "CHANGELOG.md", "start": 1, "end": 3},
+            {"file": "ghost/core/package.json", "start": 2, "end": 2},
+            {"file": "yarn.lock", "start": 100, "end": 140},
+            {"file": "LICENSE", "start": 1, "end": 1},
+            {"file": "docs/history.rst", "start": 1, "end": 1},
+        ],
+    )
+    assert vulnerable_files(case) == ["ghost/core/server/models/base/plugins/crud.js"]
+
+
+def test_vulnerable_files_falls_back_when_only_nonsource():
+    from nelson.runner import vulnerable_files
+
+    # If a case somehow has only non-source hunks, audit them rather than nothing.
+    case = Case(
+        source="cvd",
+        ext_id="GHSA-only-noise",
+        gt_hunks=[
+            {"file": "CHANGELOG.md", "start": 1, "end": 3},
+            {"file": "package.json", "start": 2, "end": 2},
+        ],
+    )
+    assert vulnerable_files(case) == ["CHANGELOG.md", "package.json"]
+
+
 def test_build_competitor_prompt_names_file_and_hides_advisory():
     from nelson.runner import build_competitor_prompt
 
