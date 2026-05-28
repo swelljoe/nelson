@@ -882,6 +882,20 @@ class Database:
         )
         self.conn.commit()
 
+    def record_fp_verdict(self, finding_id: int, *, verdict: str | None) -> None:
+        """Persist the FP-judge verdict (P4) on a non-target finding.
+
+        Independent of the localization gate / truth verdict: this column holds
+        ``real_bug`` / ``false_positive`` / ``needs_review`` / ``error: …`` for a
+        finding that was not the confirmed target bug. The full reasoning + token
+        cost of the call lives in the ``judgments`` ledger (target_kind='fp').
+        """
+        self.conn.execute(
+            "UPDATE run_findings SET judge_fp_verdict = ? WHERE id = ?",
+            (verdict, finding_id),
+        )
+        self.conn.commit()
+
     def add_judgment(
         self,
         *,

@@ -1264,9 +1264,13 @@ def _emit_run_score(rs) -> None:
         tag = "localized" if f.localized else "off-target"
         click.echo(f"  [{tag}] {loc}")
         if f.truth is not None:
-            click.echo(f"      judge: {f.truth.label} — {f.truth.reasoning}")
+            click.echo(f"      truth: {f.truth.label} — {f.truth.reasoning}")
+        if f.fp is not None:
+            click.echo(f"      fp: {f.fp.label} — {f.fp.reasoning}")
     if rs.judge_cost:
-        click.echo(f"  judge cost: ${rs.judge_cost:.4f}")
+        click.echo(f"  truth-judge cost: ${rs.judge_cost:.4f}")
+    if rs.fp_cost:
+        click.echo(f"  fp-judge cost: ${rs.fp_cost:.4f}")
 
 
 def _emit_detection_report(reports) -> None:
@@ -1287,6 +1291,27 @@ def _emit_detection_report(reports) -> None:
     )
 
 
+def _emit_precision_report(reports) -> None:
+    """Per-competitor precision table (FP judge over non-target findings)."""
+    click.echo(
+        f"\n{'COMPETITOR':<26} {'PREC':>5} {'FP/CASE':>7} {'TGT':>4} {'OTH':>4} "
+        f"{'FP':>4} {'UND':>4} {'FP$':>8}"
+    )
+    for p in reports:
+        prec = f"{p.precision:.0%}" if p.precision is not None else "-"
+        fpc = f"{p.fp_per_case:.2f}" if p.fp_per_case is not None else "-"
+        click.echo(
+            f"{p.competitor_name:<26} {prec:>5} {fpc:>7} {p.target_hits:>4} "
+            f"{p.real_others:>4} {p.false_positives:>4} {p.undetermined:>4} "
+            f"${p.fp_cost:>7.3f}"
+        )
+    click.echo(
+        "\nPREC = true findings / (true + false positives). TGT target-bug hits, "
+        "OTH other real bugs, FP false positives, UND undetermined "
+        "(needs_review / judge error — never counted against precision)."
+    )
+
+
 @bench.command(name="score")
 @click.argument("run_id", required=False, type=int)
 @click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
@@ -1302,24 +1327,60 @@ def _emit_detection_report(reports) -> None:
     is_flag=True,
     help="Re-judge complete runs already scored (re-spends judge budget).",
 )
+@click.option(
+    "--precision/--no-precision",
+    default=True,
+    help="Also FP-judge non-target findings for precision (P4). On by default.",
+)
+@click.option(
+    "--fp-judge-model",
+    default="opus",
+    help="FP judge model (claude -p, code-grounded).",
+)
+@click.option(
+    "--cache-dir",
+    default=None,
+    help="Where the FP judge checks out source (default .nelson_cache/fpjudge).",
+)
 def bench_score(
     run_id: int | None,
     db_path: str,
     judge_model: str,
     tolerance: int,
     rescore: bool,
+    precision: bool,
+    fp_judge_model: str,
+    cache_dir: str | None,
 ):
-    """Score benchmark runs: localization gate + Opus truth judge -> hit / miss.
+    """Score benchmark runs: localization + truth judge (detection) and, by
+    default, a code-grounded FP judge over non-target findings (precision).
 
     With RUN_ID, score that one run verbosely. Without, score every run and print
-    the per-competitor detection report; complete runs already scored are read
-    back from the DB (no judge spend) unless --rescore. Runs that never reached
-    `complete` (auth_failed / infra_error) are excluded, never counted as misses.
+    the per-competitor detection report (and, with precision on, a precision
+    report); complete runs already scored are read back from the DB (no judge
+    spend) unless --rescore. Runs that never reached `complete` (auth_failed /
+    infra_error) are excluded, never counted as misses. The FP judge never sees
+    the advisory (precision must not be circular).
     """
-    from .score import ClaudeTruthJudge, Scorer, detection_report
+    from .score import (
+        ClaudeFPJudge,
+        ClaudeTruthJudge,
+        GitCodeProvider,
+        Scorer,
+        detection_report,
+        precision_report,
+    )
 
     db = Database(db_path)
-    scorer = Scorer(db, ClaudeTruthJudge(model=judge_model), tolerance=tolerance)
+    fp_judge = ClaudeFPJudge(model=fp_judge_model) if precision else None
+    code = GitCodeProvider(root=cache_dir) if precision else None
+    scorer = Scorer(
+        db,
+        ClaudeTruthJudge(model=judge_model),
+        tolerance=tolerance,
+        fp_judge=fp_judge,
+        code=code,
+    )
 
     if run_id is not None:
         _emit_run_score(scorer.score_run(run_id))
@@ -1342,3 +1403,5 @@ def bench_score(
             f"{rs.competitor_name:<22} -> {rs.outcome}"
         )
     _emit_detection_report(detection_report(run_scores))
+    if precision:
+        _emit_precision_report(precision_report(run_scores))
