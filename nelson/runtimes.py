@@ -16,7 +16,8 @@ Runtimes registered here:
   endpoint. This is the shared, apples-to-apples *model* harness (DeepSeek / MiMo
   / Kimi become provider configs in the competitor's ``cost_model`` + auth
   profile).
-- ``gemini-cli`` — the host ``gemini`` binary bind-mounted in (native agent).
+- ``agy`` — the host ``agy`` (Antigravity / Gemini) agent CLI bind-mounted in; a
+  Claude-Code-like interface (it replaced the old ``gemini`` CLI), plain-text out.
 - ``kimi-cli`` / ``pi-custom`` — generic native-CLI runtimes for vendors that ship
   an *official* agent, wired and unit-tested but stubbed: an absent host binary
   resolves to ``infra_error`` until the CLI is installed and its argv/output
@@ -41,7 +42,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from .agents import parse_gemini_envelope
 from .auth import (
     DEFAULT_SECRET_STORE,
     STANDARD_AUTH_PROFILES,
@@ -160,37 +160,31 @@ class EnvKeyAuth:
         return AuthMaterial(env=env, mounts=[])
 
 
-class GeminiCredentialMountAuth:
-    """Mount the host gemini sign-in into the container, like CredentialMountAuth.
+class AgyCredentialMountAuth:
+    """Mount the host ``agy`` (Antigravity / Gemini CLI) sign-in into the container.
 
-    Copies the host's gemini credential file(s) into a per-run staging dir mounted
-    ``rw,U`` so the container can refresh tokens without touching the host
-    originals. Missing creds -> :class:`RunnerError` -> ``auth_failed``.
-
-    VERIFY-AT-WIRING: the host creds location (``~/.gemini/oauth_creds.json``), the
-    in-container destination, and whether gemini reads an env var instead of/in
-    addition to the dir are unconfirmed — checked when gemini is first run live.
+    Copies the host's ``~/.gemini`` tree (the ``antigravity-cli`` OAuth token +
+    settings, and ``config``) into a per-run staging dir mounted ``rw,U`` at
+    ``/home/agent/.gemini`` so the container inherits the signed-in session without
+    touching the host originals (the agent may refresh the token). Missing creds ->
+    :class:`RunnerError` -> ``auth_failed``. Verified live (2026-05-28): the token
+    lives at ``~/.gemini/antigravity-cli/antigravity-oauth-token``; the dir is
+    small, so the whole tree is copied.
     """
 
-    # Files we attempt to stage (kept narrow so we never copy unrelated, possibly
-    # large, sibling dirs under ~/.gemini).
-    _CRED_FILES = ("oauth_creds.json", "settings.json")
+    _TOKEN_REL = Path("antigravity-cli") / "antigravity-oauth-token"
 
     def __init__(self, creds_dir: Path | None = None):
         self.creds_dir = Path(creds_dir) if creds_dir else (Path.home() / ".gemini")
 
     def prepare(self, staging: Path) -> AuthMaterial:
-        present = [f for f in self._CRED_FILES if (self.creds_dir / f).is_file()]
-        if not present:
+        if not (self.creds_dir / self._TOKEN_REL).is_file():
             raise RunnerError(
-                f"no gemini credentials under {self.creds_dir}; "
-                "sign in with `gemini` on the host first"
+                f"no agy credentials under {self.creds_dir} "
+                f"(missing {self._TOKEN_REL}); sign in with `agy` on the host first"
             )
         dest = staging / "gemini"
-        dest.mkdir(parents=True, exist_ok=True)
-        for f in present:
-            shutil.copyfile(self.creds_dir / f, dest / f)
-            (dest / f).chmod(0o600)
+        shutil.copytree(self.creds_dir, dest)
         return AuthMaterial(
             env={},
             mounts=[(str(dest), "/home/agent/.gemini", "rw,U")],
@@ -363,29 +357,40 @@ class RawApiLoopRuntime:
         return _claude_shaped_output(exec_result, competitor)
 
 
-class GeminiCliRuntime:
-    """The host ``gemini`` binary bind-mounted in (native agent, subscription auth)."""
+class AgyRuntime:
+    """The host ``agy`` (Antigravity / Gemini) agent CLI bind-mounted into the run.
 
-    name = "gemini-cli"
+    ``agy`` replaced the old ``gemini`` CLI and has a Claude-Code-like interface
+    (verified live 2026-05-28, v1.0.3): ``-p`` runs one prompt non-interactively,
+    ``--dangerously-skip-permissions`` auto-approves tool use, ``--add-dir`` grants
+    workspace access, and it prints the final response as plain text (no JSON
+    envelope, no ``-m`` flag — the model is the signed-in account's default). Auth
+    is the mounted ``~/.gemini`` sign-in. The bind-mounted dynamically-linked binary
+    runs against fedora-minimal's loader (confirmed).
+    """
+
+    name = "agy"
 
     def default_auth(self) -> ContainerAuth:
-        return GeminiCredentialMountAuth()
+        return AgyCredentialMountAuth()
 
     def build_spec(self, ctx: RuntimeContext) -> ContainerSpec:
-        gemini_bin = shutil.which("gemini")
-        if not gemini_bin:
+        agy_bin = shutil.which("agy")
+        if not agy_bin:
             raise RunnerError(
-                "gemini CLI not found on PATH; install it and sign in to run "
-                "gemini-cli competitors"
+                "agy CLI not found on PATH; install it and sign in to run agy "
+                "competitors"
             )
-        # VERIFY-AT-WIRING: the non-interactive auto-approve flag for tool use
-        # (e.g. --yolo / --approval-mode=yolo) and whether it alters the JSON
-        # shape; and how gemini is pointed at /src (workdir vs an include flag).
-        argv = ["gemini", "-p", ctx.prompt, "--output-format", "json"]
-        if ctx.competitor.model and ctx.competitor.model != "default":
-            argv += ["-m", ctx.competitor.model]
+        argv = [
+            "agy",
+            "-p",
+            ctx.prompt,
+            "--dangerously-skip-permissions",
+            "--add-dir",
+            "/src",
+        ]
         mounts = [
-            (str(Path(gemini_bin).resolve()), "/usr/local/bin/gemini", "ro"),
+            (str(Path(agy_bin).resolve()), "/usr/local/bin/agy", "ro"),
             (str(ctx.src_dir), "/src", "ro"),
             *ctx.auth.mounts,
         ]
@@ -396,14 +401,16 @@ class GeminiCliRuntime:
             mounts=mounts,
             name=ctx.name,
             network=ctx.network,
-            stdin=None,  # gemini takes the prompt as the -p argument
+            stdin=None,  # agy takes the prompt as the -p argument
         )
 
     def parse_output(
         self, exec_result: ContainerExecResult, competitor: Competitor
     ) -> ParsedOutput:
-        text, tin, tout = parse_gemini_envelope(exec_result.stdout)
-        return ParsedOutput(text, tin, tout, None, parse_competitor_findings(text))
+        # agy prints the final response as plain text; the findings JSON array is
+        # extracted from it (no token/cost usage is reported by `agy -p`).
+        text = exec_result.stdout
+        return ParsedOutput(text, None, None, None, parse_competitor_findings(text))
 
 
 class BindMountedCliRuntime:
@@ -483,7 +490,7 @@ def get_runtime(name: str) -> ContainerRuntime:
 def _register_defaults() -> None:
     register_runtime(ClaudeCodeRuntime())
     register_runtime(RawApiLoopRuntime())
-    register_runtime(GeminiCliRuntime())
+    register_runtime(AgyRuntime())
     # No `deepseek-cli`: DeepSeek ships no first-party agent CLI (the ones that
     # exist are untrusted third parties), so DeepSeek runs through the two trusted
     # shared harnesses instead — claude-code over its Anthropic-compatible endpoint

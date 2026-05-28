@@ -23,11 +23,11 @@ from nelson.runner import (
     RunnerError,
 )
 from nelson.runtimes import (
+    AgyCredentialMountAuth,
+    AgyRuntime,
     BindMountedCliRuntime,
     ClaudeCodeRuntime,
     EnvKeyAuth,
-    GeminiCliRuntime,
-    GeminiCredentialMountAuth,
     ParsedOutput,
     RawApiLoopRuntime,
     RuntimeContext,
@@ -117,7 +117,7 @@ def test_get_runtime_unknown_raises():
 
 
 def test_all_planned_runtimes_registered():
-    for name in ("claude-code", "raw-api-loop", "gemini-cli", "kimi-cli", "pi-custom"):
+    for name in ("claude-code", "raw-api-loop", "agy", "kimi-cli", "pi-custom"):
         assert get_runtime(name).name == name
 
 
@@ -180,19 +180,19 @@ def test_auth_for_competitor_without_profile_uses_runtime_default():
     assert not isinstance(auth, EnvKeyAuth)
 
 
-def test_gemini_credential_mount_auth_stages_present_files(tmp_path):
+def test_agy_credential_mount_auth_stages_signin_tree(tmp_path):
     creds = tmp_path / "gem"
-    creds.mkdir()
-    (creds / "oauth_creds.json").write_text("{}")
-    material = GeminiCredentialMountAuth(creds_dir=creds).prepare(tmp_path / "stg")
+    (creds / "antigravity-cli").mkdir(parents=True)
+    (creds / "antigravity-cli" / "antigravity-oauth-token").write_text("tok")
+    material = AgyCredentialMountAuth(creds_dir=creds).prepare(tmp_path / "stg")
     assert material.mounts and material.mounts[0][1] == "/home/agent/.gemini"
 
 
-def test_gemini_credential_mount_auth_missing_is_runner_error(tmp_path):
+def test_agy_credential_mount_auth_missing_is_runner_error(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     with pytest.raises(RunnerError):
-        GeminiCredentialMountAuth(creds_dir=empty).prepare(tmp_path / "stg")
+        AgyCredentialMountAuth(creds_dir=empty).prepare(tmp_path / "stg")
 
 
 # -- cost_model parsing ------------------------------------------------------
@@ -300,34 +300,54 @@ def test_raw_api_loop_parse_output_ingests_result_object():
     assert parsed.findings[0]["file"] == "a.c"
 
 
-# -- gemini-cli + native CLIs ------------------------------------------------
+# -- agy + native CLIs -------------------------------------------------------
 
 
-def test_gemini_build_spec_infra_when_binary_absent(monkeypatch, tmp_path):
+def test_agy_build_spec_claude_like_argv(monkeypatch, tmp_path):
+    monkeypatch.setattr("nelson.runtimes.shutil.which", lambda _b: "/usr/bin/agy")
+    ctx = RuntimeContext(
+        competitor=Competitor(name="agy/x", model="antigravity", runtime="agy"),
+        prompt="audit a.c",
+        src_dir=tmp_path / "src",
+        auth=AuthMaterial(env={}, mounts=[("/h/gem", "/home/agent/.gemini", "rw,U")]),
+        name="r1",
+    )
+    spec = AgyRuntime().build_spec(ctx)
+    assert spec.argv[:2] == ["agy", "-p"]
+    assert "--dangerously-skip-permissions" in spec.argv
+    assert spec.argv[-2:] == ["--add-dir", "/src"]
+    assert spec.stdin is None  # prompt is an arg
+    modes = {dst: opts for _, dst, opts in spec.mounts}
+    assert modes["/src"] == "ro"
+    assert modes["/usr/local/bin/agy"] == "ro"
+    assert modes["/home/agent/.gemini"] == "rw,U"
+
+
+def test_agy_build_spec_infra_when_binary_absent(monkeypatch, tmp_path):
     monkeypatch.setattr("nelson.runtimes.shutil.which", lambda _b: None)
     ctx = RuntimeContext(
-        competitor=Competitor(name="g", model="gemini-2.5-pro", runtime="gemini-cli"),
+        competitor=Competitor(name="agy/x", model="antigravity", runtime="agy"),
         prompt="audit",
         src_dir=tmp_path / "src",
         auth=AuthMaterial(env={}, mounts=[]),
         name="r1",
     )
     with pytest.raises(RunnerError):
-        GeminiCliRuntime().build_spec(ctx)
+        AgyRuntime().build_spec(ctx)
 
 
-def test_gemini_parse_output_sums_model_tokens():
-    envelope = json.dumps(
-        {
-            "response": '[{"file": "x.c", "line": 1, "confidence": "high"}]',
-            "stats": {"models": {"g": {"tokens": {"input": 100, "candidates": 20}}}},
-        }
+def test_agy_parse_output_extracts_findings_from_plain_text():
+    # agy prints the final response as plain text; the JSON array is extracted.
+    stdout = (
+        "I reviewed the file. Here is what I found:\n```json\n"
+        '[{"file": "x.c", "line": 1, "confidence": "high", "cwe": "CWE-22"}]\n```'
     )
-    parsed = GeminiCliRuntime().parse_output(
-        ContainerExecResult(0, envelope, ""), Competitor(name="g", model="g")
+    parsed = AgyRuntime().parse_output(
+        ContainerExecResult(0, stdout, ""), Competitor(name="agy/x", model="a")
     )
-    assert (parsed.tokens_in, parsed.tokens_out, parsed.cost) == (100, 20, None)
+    assert (parsed.tokens_in, parsed.tokens_out, parsed.cost) == (None, None, None)
     assert len(parsed.findings) == 1
+    assert parsed.findings[0]["cwe"] == "CWE-22"
 
 
 @pytest.mark.parametrize("runtime", ["kimi-cli", "pi-custom"])

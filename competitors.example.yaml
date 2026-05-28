@@ -80,10 +80,12 @@
   cost_model: '{"base_url": "https://api.example-mimo.invalid/v1"}'
   knowledge_cutoff: 2025-06
 
-# Native vendor CLI, bind-mounted (subscription sign-in on the host, no key).
-- name: gemini-cli/gemini
-  model: gemini-2.5-pro           # VERIFY-AT-WIRING: real model id + flags
-  runtime: gemini-cli
+# Native agent CLI, bind-mounted (subscription sign-in on the host, no key). `agy`
+# is the Antigravity / Gemini CLI (it replaced `gemini`); Claude-Code-like, plain
+# text out, no -m (the model is the signed-in account's default).
+- name: agy/antigravity
+  model: antigravity              # informational: agy has no model flag
+  runtime: agy
   tool_profile: read-grep
   knowledge_cutoff: 2025-06
 
