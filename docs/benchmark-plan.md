@@ -388,8 +388,8 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
   `select_aged_out`; `sync_competitors` / `load_competitors` for config-driven
   roster) and the `run_once` driver that wires the **injected** P1-P5 engines
   (`CorpusPipeline`, `BenchRunner`, `Scorer`) so the whole pass runs under test with
-  fakes — it owns **no scoring/detection logic**; `Competitor.from_row`; a read-only
-  `nelson bench loop` CLI (cron-friendly; `--interval` for a built-in repeat). 210
+  fakes — it owns **no scoring/detection logic**; `Competitor.from_row`; a
+  cron-friendly `nelson bench loop` CLI (`--interval` for a built-in repeat). 210
   tests total.
   - **Unattended-safety rails.** A pass is bounded by `--max-runs` and
     `--max-spend-usd` (competitor spend only); an **auth circuit breaker** aborts the
