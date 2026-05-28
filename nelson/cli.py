@@ -1484,3 +1484,246 @@ def bench_leaderboard(db_path: str, html_path: str | None, tolerance: int):
         html = generate_leaderboard_report(entries, case_scores(run_scores))
         Path(html_path).write_text(html)
         click.echo(f"\nWrote leaderboard report to {html_path}")
+
+
+# -- Automation loop ---------------------------------------------------------
+
+
+def _emit_loop_report(report) -> None:
+    """Print one pass's LoopReport as a compact, cron-log-friendly summary."""
+    if report.corpus:
+        corpus = ", ".join(f"{k}={v}" for k, v in report.corpus.items() if v)
+        click.echo(f"  corpus:   {corpus or 'no change'}")
+    if report.competitors_synced or report.competitors_retired:
+        line = f"  roster:   {report.competitors_synced} synced"
+        if report.competitors_retired:
+            line += f", retired {', '.join(report.competitors_retired)}"
+        click.echo(line)
+    if report.aged_out:
+        click.echo(f"  aged out: {', '.join(report.aged_out)}")
+    click.echo(
+        f"  matrix:   {report.planned} planned, {report.ran} ran "
+        f"({report.completed} complete, {report.auth_failed} auth_failed, "
+        f"{report.infra_error} infra_error), {report.skipped_caps} capped"
+    )
+    if report.spend_usd:
+        click.echo(f"  spend:    ${report.spend_usd:.4f} (competitor)")
+    if report.scored:
+        click.echo(f"  scored:   {report.scored} ({report.judge_errors} judge_error)")
+    if report.report_path:
+        click.echo(f"  report:   {report.report_path}")
+    if report.circuit_broken:
+        click.echo(
+            click.style(
+                "  ALERT:    auth circuit breaker tripped — check the host "
+                "`claude` login (runs aborted).",
+                fg="red",
+                bold=True,
+            )
+        )
+    elif report.auth_failed:
+        click.echo(
+            click.style(
+                f"  ALERT:    {report.auth_failed} auth failure(s) — credentials "
+                "may be expired.",
+                fg="yellow",
+            )
+        )
+
+
+@bench.command(name="loop")
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+@click.option(
+    "--competitors",
+    "competitors_path",
+    default=None,
+    help="YAML competitor roster to sync (adds/retires are config). Optional.",
+)
+@click.option(
+    "--cases-dir",
+    default=None,
+    help="Import cases/*.yaml manifests into the DB before running. Optional.",
+)
+@click.option(
+    "--refresh-corpus",
+    is_flag=True,
+    help="Also refresh the corpus first (network + Opus pre-vet spend). Default off.",
+)
+@click.option("--corpus-limit", default=0, type=int, help="Max candidates per refresh.")
+@click.option(
+    "--age-out/--no-age-out",
+    default=True,
+    help="Retire vetted cases no active competitor would find 0-day. On by default.",
+)
+@click.option(
+    "--recency/--no-recency",
+    "recency_filter",
+    default=True,
+    help="Skip a cell when the case predates that competitor's cutoff. On by default.",
+)
+@click.option(
+    "--retry-failed",
+    is_flag=True,
+    help="Re-run cells whose only runs were auth_failed / infra_error.",
+)
+@click.option("--max-runs", default=0, type=int, help="Cap runs launched per pass.")
+@click.option(
+    "--max-spend-usd",
+    default=0.0,
+    type=float,
+    help="Stop launching runs once competitor spend reaches this (0 = no cap).",
+)
+@click.option(
+    "--auth-fail-abort",
+    default=3,
+    type=int,
+    help="Consecutive auth failures that trip the circuit breaker. Default: 3.",
+)
+@click.option(
+    "--score/--no-score",
+    "do_score",
+    default=True,
+    help="Score new completions (truth + FP judge). On by default.",
+)
+@click.option("--tolerance", default=10, type=int, help="Localization tolerance.")
+@click.option("--judge-model", default="opus", help="Truth judge model.")
+@click.option("--fp-judge-model", default="opus", help="FP judge model.")
+@click.option("--cache-dir", default="bench-cache", help="Where source is checked out.")
+@click.option("--runs-dir", default="bench-runs", help="Where transcripts are written.")
+@click.option(
+    "--fp-cache-dir", default=None, help="Where the FP judge checks out source."
+)
+@click.option("--no-network", is_flag=True, help="Run containers with no network.")
+@click.option("--timeout", default=1800.0, type=float, help="Per-run wall-clock cap.")
+@click.option(
+    "--max-budget-usd", default=0.50, type=float, help="Per-run cost backstop."
+)
+@click.option(
+    "--html", "html_path", default=None, help="Leaderboard report output path."
+)
+@click.option(
+    "--interval",
+    default=0.0,
+    type=float,
+    help="Repeat every N seconds (0 = run one pass and exit; use cron instead).",
+)
+def bench_loop(
+    db_path: str,
+    competitors_path: str | None,
+    cases_dir: str | None,
+    refresh_corpus: bool,
+    corpus_limit: int,
+    age_out: bool,
+    recency_filter: bool,
+    retry_failed: bool,
+    max_runs: int,
+    max_spend_usd: float,
+    auth_fail_abort: int,
+    do_score: bool,
+    tolerance: int,
+    judge_model: str,
+    fp_judge_model: str,
+    cache_dir: str,
+    runs_dir: str,
+    fp_cache_dir: str | None,
+    no_network: bool,
+    timeout: float,
+    max_budget_usd: float,
+    html_path: str | None,
+    interval: float,
+):
+    """Run one unattended benchmark pass: refresh -> age out -> run -> score -> rank.
+
+    Idempotent and resumable — it only fills the missing matrix cells and scores
+    new completions, so a cron entry (or --interval) can fire it repeatedly. Bound
+    an unattended pass with --max-runs / --max-spend-usd; an auth circuit breaker
+    aborts the run stage on repeated auth failures (likely an expired host login).
+    Exits non-zero when a pass needs attention (auth failure / breaker tripped).
+    """
+    import time
+
+    from .automate import load_competitors, run_once
+    from .corpus import CorpusPipeline, CVDSeedSource, load_manifest_dir
+    from .runner import BenchRunner
+    from .score import ClaudeFPJudge, ClaudeTruthJudge, GitCodeProvider, Scorer
+
+    db = Database(db_path)
+
+    declared = load_competitors(competitors_path) if competitors_path else None
+
+    if cases_dir:
+        for case in load_manifest_dir(cases_dir):
+            db.upsert_case(case.to_db_fields())
+
+    runner = BenchRunner(
+        db,
+        cache_dir=cache_dir,
+        runs_dir=runs_dir,
+        network=not no_network,
+        run_timeout=timeout,
+        max_budget_usd=max_budget_usd or None,
+    )
+
+    scorer = None
+    if do_score:
+        scorer = Scorer(
+            db,
+            ClaudeTruthJudge(model=judge_model),
+            tolerance=tolerance,
+            fp_judge=ClaudeFPJudge(model=fp_judge_model),
+            code=GitCodeProvider(root=fp_cache_dir),
+        )
+
+    pipeline = None
+    seed_source = None
+    if refresh_corpus:
+        from .derive import SubprocessGitRunner
+        from .enrich import HttpxClient, NVDEnricher, OSVEnricher, fetch_cvd_payload
+        from .prevet import ClaudeCLIJudge
+
+        http = HttpxClient()
+        pipeline = CorpusPipeline(
+            db,
+            enrichers=[OSVEnricher(http), NVDEnricher(http)],
+            git=SubprocessGitRunner(),
+            judge=ClaudeCLIJudge(model=judge_model),
+            cache_dir="corpus-cache",
+        )
+        try:
+            payload = fetch_cvd_payload(CVD_PAYLOAD_URL, http)
+            seed_source = CVDSeedSource(payload)
+        except RuntimeError as e:
+            click.echo(f"warning: corpus seed fetch failed: {e}", err=True)
+
+    def once() -> bool:
+        report = run_once(
+            db,
+            runner=runner,
+            scorer=scorer,
+            pipeline=pipeline,
+            seed_source=seed_source,
+            corpus_limit=corpus_limit or None,
+            declared_competitors=declared,
+            age_out=age_out,
+            recency_filter=recency_filter,
+            retry_failed=retry_failed,
+            max_runs=max_runs or None,
+            max_spend_usd=max_spend_usd or None,
+            auth_fail_abort=auth_fail_abort,
+            report_html_path=html_path,
+            on_event=lambda m: click.echo(f"  · {m}", err=True),
+        )
+        click.echo(f"Pass complete ({db_path}):")
+        _emit_loop_report(report)
+        return report.needs_attention
+
+    if interval <= 0:
+        sys.exit(1 if once() else 0)
+
+    click.echo(f"Looping every {interval:.0f}s (Ctrl-C to stop)…")
+    try:
+        while True:
+            once()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        click.echo("\nStopped.")
