@@ -507,7 +507,7 @@ def test_run_case_timeout_is_infra_error(tmp_path, monkeypatch):
 def test_run_case_dispatches_on_runtime(tmp_path, monkeypatch):
     """run_case routes to the competitor's runtime, not a hardcoded claude path."""
     from nelson import runtimes
-    from nelson.runtimes import ParsedOutput, register_runtime
+    from nelson.runtimes import ParsedOutput
 
     used: dict[str, bool] = {}
 
@@ -525,7 +525,6 @@ def test_run_case_dispatches_on_runtime(tmp_path, monkeypatch):
             used["parse_output"] = True
             return ParsedOutput("[]", 1, 2, 0.0, [])
 
-    register_runtime(_FakeRuntime())
     monkeypatch.setitem(runtimes._RUNTIMES, "fake-rt", _FakeRuntime())
 
     db = Database(tmp_path / "t.db")
