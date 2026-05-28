@@ -300,6 +300,30 @@ def test_raw_api_loop_parse_output_ingests_result_object():
     assert parsed.findings[0]["file"] == "a.c"
 
 
+def test_declared_pricing_overrides_reported_cost():
+    # A third-party model via claude-code reports an Anthropic-priced cost
+    # (0.001 here); declared per-MTok pricing must override it from the tokens.
+    comp = Competitor(
+        name="claude-code/deepseek",
+        model="deepseek-v4-pro",
+        runtime="claude-code",
+        cost_model='{"input_usd_per_mtok": 2.0, "output_usd_per_mtok": 10.0}',
+    )
+    parsed = ClaudeCodeRuntime().parse_output(ContainerExecResult(0, _RESULT, ""), comp)
+    # 50/1e6*2 + 10/1e6*10 = 0.0001 + 0.0001 = 0.0002
+    assert parsed.cost == 0.0002
+    assert (parsed.tokens_in, parsed.tokens_out) == (50, 10)
+
+
+def test_no_declared_pricing_keeps_reported_cost():
+    # Native claude (no pricing) keeps its real reported cost untouched.
+    comp = Competitor(
+        name="claude-code/sonnet", model="sonnet", cost_model="subscription"
+    )
+    parsed = ClaudeCodeRuntime().parse_output(ContainerExecResult(0, _RESULT, ""), comp)
+    assert parsed.cost == 0.001
+
+
 # -- agy + native CLIs -------------------------------------------------------
 
 

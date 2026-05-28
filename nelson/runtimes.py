@@ -235,6 +235,31 @@ def parse_cost_model(cost_model: str | None) -> dict[str, Any]:
 # -- Runtimes ----------------------------------------------------------------
 
 
+def _effective_cost(
+    competitor: Competitor, tin: int | None, tout: int | None, parsed_cost: float | None
+) -> float | None:
+    """Cost from declared per-MTok pricing when present, else the runtime's own.
+
+    When a competitor's ``cost_model`` carries ``input_usd_per_mtok`` /
+    ``output_usd_per_mtok``, compute cost from the observed token counts. This is
+    the source of truth for non-Anthropic models driven through Claude Code over
+    an Anthropic-compatible endpoint: ``claude``'s reported ``total_cost_usd``
+    applies *Anthropic* pricing to the mapped model name, which is meaningless for
+    e.g. DeepSeek/MiMo. Native claude competitors declare no pricing, so their
+    real reported cost is left untouched. (Input price is applied to all input
+    tokens including cache reads — a slight over-estimate, the best we can do
+    without per-tier cache accounting.)
+    """
+    cfg = parse_cost_model(competitor.cost_model)
+    in_price = cfg.get("input_usd_per_mtok")
+    out_price = cfg.get("output_usd_per_mtok")
+    if in_price is None and out_price is None:
+        return parsed_cost
+    from .raw_api_loop import compute_cost
+
+    return compute_cost(tin or 0, tout or 0, in_price, out_price)
+
+
 def _claude_shaped_output(
     exec_result: ContainerExecResult, competitor: Competitor
 ) -> ParsedOutput:
@@ -244,6 +269,7 @@ def _claude_shaped_output(
     emit the same final result object.
     """
     text, tin, tout, cost = extract_result(exec_result.stdout)
+    cost = _effective_cost(competitor, tin, tout, cost)
     return ParsedOutput(text, tin, tout, cost, parse_competitor_findings(text))
 
 
