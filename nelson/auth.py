@@ -160,6 +160,15 @@ STANDARD_AUTH_PROFILES: dict[str, AuthProfile] = {
         name="deepseek-api-key",
         env={"NELSON_API_KEY": "DEEPSEEK_API_KEY"},
     ),
+    # DeepSeek through the Claude Code harness (its official Anthropic-compatible
+    # endpoint): the same secret, but presented as ANTHROPIC_AUTH_TOKEN (the var
+    # `claude` reads) rather than the raw-api-loop's NELSON_API_KEY. The endpoint
+    # URL + model mappings are non-secret config and live in the competitor's
+    # cost_model JSON, not here.
+    "deepseek-anthropic": AuthProfile(
+        name="deepseek-anthropic",
+        env={"ANTHROPIC_AUTH_TOKEN": "DEEPSEEK_API_KEY"},
+    ),
     "mimo-api-key": AuthProfile(
         name="mimo-api-key",
         env={"NELSON_API_KEY": "MIMO_API_KEY"},

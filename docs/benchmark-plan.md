@@ -417,7 +417,7 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     default to fresh/included. Competitors are **config** (`--competitors roster.yaml`):
     declared ones are upserted, absent active ones flipped to `retired` (history kept).
 - **P7 — More runtimes** ✅ *(branch `bench-p7-runtimes`; gates green: ruff + format + ty +
-  255 pytest; image builds with python3; NOT merged — user merges per-phase)*. Closed the
+  257 pytest; image builds with python3; NOT merged — user merges per-phase)*. Closed the
   one gap blocking every non-Claude model: `BenchRunner.run_case` was hardcoded to claude-code.
   Delivered a **runtime-dispatch layer** (`nelson/runtimes.py`): a `ContainerRuntime` registry
   keyed by `competitors.runtime`, with the claude path refactored into `ClaudeCodeRuntime` at
@@ -428,14 +428,25 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     absolute, and symlink escapes), driving any OpenAI-compatible endpoint and emitting a
     claude-shaped result object so parsing stays uniform. DeepSeek/MiMo/Kimi are pure provider
     config (`base_url` + per-token pricing in `cost_model` JSON; key via auth profile).
+  - **`claude-code` Anthropic-compat passthrough** (the *other* trusted shared harness): a
+    non-Anthropic model with an official Anthropic-compatible endpoint (e.g. DeepSeek via
+    `https://api.deepseek.com/anthropic`) runs through the **real Claude Code harness** —
+    `ClaudeCodeRuntime.build_spec` reads `anthropic_base_url` + a model-mapping `env` block from
+    the competitor's `cost_model` JSON and injects them, with the provider token supplied by the
+    auth profile (`deepseek-anthropic` → `ANTHROPIC_AUTH_TOKEN`). So DeepSeek competes on *two*
+    trusted harnesses (claude-code-compat and raw-api-loop), agent-vs-agent on one model. Native
+    subscription claude is unaffected (no `anthropic_base_url` → unchanged).
   - **`gemini-cli`** (native, bind-mounted host binary; subscription-auth credential mount).
-  - **`deepseek-cli` / `kimi-cli` / `pi-custom`** (native vendor agents): wired + unit-tested
-    but stubbed — an absent host binary resolves to `infra_error`, so they compete the moment
-    the CLI is installed and verified.
+  - **`kimi-cli` / `pi-custom`** (native vendor agents): wired + unit-tested but stubbed — an
+    absent host binary resolves to `infra_error`, so they compete the moment the CLI is
+    installed and verified. **No `deepseek-cli`:** DeepSeek ships no first-party agent CLI (only
+    untrusted third parties), so it runs via the two shared harnesses above instead.
   - **Auth bridge:** `EnvKeyAuth` (resolves an AuthProfile's secret *names* → container `-e`
     vars; a missing key → `auth_failed`, the integrity hinge), `GeminiCredentialMountAuth`,
     and `auth_for_competitor` (profile → env injection; else the runtime's default). New
-    `STANDARD_AUTH_PROFILES`: deepseek/mimo/kimi (secret names only).
+    `STANDARD_AUTH_PROFILES`: `deepseek-api-key` (OpenAI-compat, → `NELSON_API_KEY`),
+    `deepseek-anthropic` (claude-compat, → `ANTHROPIC_AUTH_TOKEN`), `mimo-api-key`,
+    `kimi-api-key` (secret *names* only, never values).
   - **Preflight** (`BenchRunner(preflight=…)`, default-off): a cheap host-side OpenAI-compatible
     probe so a dead key fails before container spend (integrity already guaranteed by EnvKeyAuth).
   - **Image:** CONTAINERFILE adds `python3`; `IMAGE_TAG` bumped to `nelson-bench:fedora-py` so
@@ -444,9 +455,11 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     miss. No DB schema change (`runtime`/`auth_profile`/`cost_model` already existed;
     `SCHEMA_VERSION` stays 5).
   - **VERIFY-AT-WIRING (flagged in code, not guessed):** gemini auto-approve flag + creds path;
-    each provider's real base_url / model id / key env-var name; native CLI argv/output shapes;
-    whether DeepSeek/Kimi expose an Anthropic-compatible endpoint (a second shared harness via
-    the mounted `claude` binary). **Live gate pending creds:** a real DeepSeek/MiMo run.
+    each provider's real base_url / model id / key env-var name; native CLI argv/output shapes.
+    DeepSeek's Anthropic-compat endpoint is **confirmed** (`/anthropic`, `ANTHROPIC_AUTH_TOKEN`,
+    models `deepseek-v4-pro`/`-flash` per api-docs.deepseek.com) and now the preferred DeepSeek
+    harness; the model ids still want a live confirm. **Live gate pending creds + a vetted case:**
+    a real DeepSeek run on both harnesses (the checkout has no corpus DB yet).
 
 ## 9. P0 detailed breakdown (next up)
 

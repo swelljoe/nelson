@@ -17,10 +17,13 @@
 # Runtimes (the invocation method): `claude-code` and `gemini-cli` bind-mount the
 # signed-in host CLI; `raw-api-loop` is the shared agentic harness (a sandboxed
 # read/grep ReAct agent driving any OpenAI-compatible endpoint), so swapping the
-# model is an apples-to-apples comparison; `deepseek-cli` / `kimi-cli` /
-# `pi-custom` are native vendor agents — wired here but stubbed until their CLI is
-# installed and verified (an absent binary cleanly resolves to infra_error, never
-# a miss).
+# model is an apples-to-apples comparison. A non-Anthropic model with an *official*
+# Anthropic-compatible endpoint (e.g. DeepSeek) also runs through the real
+# `claude-code` harness: set runtime `claude-code`, an `anthropic_base_url` (+ model
+# mapping `env`) in `cost_model`, and an auth_profile carrying the provider token —
+# this is preferred over an unofficial third-party CLI. `kimi-cli` / `pi-custom` are
+# native vendor agents — wired here but stubbed until their CLI is installed and
+# verified (an absent binary cleanly resolves to infra_error, never a miss).
 #
 # For `raw-api-loop`, `cost_model` is a QUOTED JSON string carrying the endpoint
 # `base_url` and optional per-million-token pricing (`input_usd_per_mtok` /
@@ -45,9 +48,23 @@
   size_class: small
   knowledge_cutoff: 2025-06
 
-# Shared harness, swap the model (apples-to-apples). cost_model is a JSON string.
+# DeepSeek through the real Claude Code harness (its official Anthropic-compatible
+# endpoint). Same model, trusted agent. cost_model carries the endpoint + the model
+# mapping env claude reads; auth_profile supplies the token as ANTHROPIC_AUTH_TOKEN.
+# VERIFY-AT-WIRING: confirm base_url + model ids against api-docs.deepseek.com.
+- name: claude-code/deepseek
+  model: deepseek-v4-pro          # VERIFY-AT-WIRING: real model id
+  runtime: claude-code
+  tool_profile: read-grep
+  auth_profile: deepseek-anthropic
+  cost_model: '{"anthropic_base_url": "https://api.deepseek.com/anthropic", "env": {"ANTHROPIC_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash"}}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+# The same DeepSeek model through the OpenAI-compatible basic harness, for an
+# agent-vs-agent comparison on the identical model. cost_model is a JSON string.
 - name: raw-api-loop/deepseek
-  model: deepseek-chat            # VERIFY-AT-WIRING: real model id
+  model: deepseek-chat            # VERIFY-AT-WIRING: real OpenAI-compat model id
   runtime: raw-api-loop
   tool_profile: read-grep
   auth_profile: deepseek-api-key  # value from $DEEPSEEK_API_KEY on the host

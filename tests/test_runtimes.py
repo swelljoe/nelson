@@ -117,15 +117,15 @@ def test_get_runtime_unknown_raises():
 
 
 def test_all_planned_runtimes_registered():
-    for name in (
-        "claude-code",
-        "raw-api-loop",
-        "gemini-cli",
-        "deepseek-cli",
-        "kimi-cli",
-        "pi-custom",
-    ):
+    for name in ("claude-code", "raw-api-loop", "gemini-cli", "kimi-cli", "pi-custom"):
         assert get_runtime(name).name == name
+
+
+def test_deepseek_cli_not_registered():
+    # DeepSeek has no trusted first-party agent CLI; it runs through claude-code
+    # (Anthropic-compat) and raw-api-loop (OpenAI-compat) instead.
+    with pytest.raises(RunnerError):
+        get_runtime("deepseek-cli")
 
 
 def test_run_case_unknown_runtime_is_infra_error(tmp_path, monkeypatch):
@@ -250,6 +250,46 @@ def test_raw_api_loop_default_auth_requires_profile(tmp_path):
         RawApiLoopRuntime().default_auth().prepare(tmp_path)
 
 
+# -- claude-code Anthropic-compatible passthrough (e.g. DeepSeek) -------------
+
+
+def test_claude_code_anthropic_compat_injects_base_url_and_model_env(tmp_path):
+    comp = Competitor(
+        name="claude-code/deepseek",
+        model="deepseek-v4-pro",
+        runtime="claude-code",
+        cost_model='{"anthropic_base_url": "https://api.deepseek.com/anthropic", '
+        '"env": {"ANTHROPIC_MODEL": "deepseek-v4-pro"}}',
+    )
+    ctx = RuntimeContext(
+        competitor=comp,
+        prompt="audit a.c",
+        src_dir=tmp_path / "src",
+        auth=AuthMaterial(env={"ANTHROPIC_AUTH_TOKEN": "sk-ds"}, mounts=[]),
+        name="r1",
+        claude_bin=Path("/usr/bin/claude"),
+    )
+    spec = ClaudeCodeRuntime().build_spec(ctx)
+    assert spec.argv[:2] == ["claude", "-p"]  # still the claude-code harness
+    assert spec.env["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert spec.env["ANTHROPIC_MODEL"] == "deepseek-v4-pro"
+    assert spec.env["ANTHROPIC_AUTH_TOKEN"] == "sk-ds"  # token from the auth profile
+
+
+def test_claude_code_native_has_no_anthropic_base_url(tmp_path):
+    comp = Competitor(name="claude-code/sonnet", model="sonnet", runtime="claude-code")
+    ctx = RuntimeContext(
+        competitor=comp,
+        prompt="audit a.c",
+        src_dir=tmp_path / "src",
+        auth=AuthMaterial(env={"CLAUDE_CONFIG_DIR": "/cfg"}, mounts=[]),
+        name="r1",
+        claude_bin=Path("/usr/bin/claude"),
+    )
+    spec = ClaudeCodeRuntime().build_spec(ctx)
+    assert "ANTHROPIC_BASE_URL" not in spec.env  # native subscription, unchanged
+
+
 def test_raw_api_loop_parse_output_ingests_result_object():
     parsed = RawApiLoopRuntime().parse_output(
         ContainerExecResult(0, _RESULT, ""), Competitor(name="x", model="m")
@@ -290,7 +330,7 @@ def test_gemini_parse_output_sums_model_tokens():
     assert len(parsed.findings) == 1
 
 
-@pytest.mark.parametrize("runtime", ["deepseek-cli", "kimi-cli", "pi-custom"])
+@pytest.mark.parametrize("runtime", ["kimi-cli", "pi-custom"])
 def test_native_cli_stub_is_infra_error_when_binary_absent(
     runtime, tmp_path, monkeypatch
 ):
@@ -310,19 +350,19 @@ def test_native_cli_stub_is_infra_error_when_binary_absent(
 
 
 def test_bind_mounted_cli_build_spec_when_present(monkeypatch, tmp_path):
-    monkeypatch.setattr("nelson.runtimes.shutil.which", lambda _b: "/usr/bin/deepseek")
+    monkeypatch.setattr("nelson.runtimes.shutil.which", lambda _b: "/usr/bin/kimi")
     ctx = RuntimeContext(
-        competitor=Competitor(name="d", model="m", runtime="deepseek-cli"),
+        competitor=Competitor(name="k", model="m", runtime="kimi-cli"),
         prompt="audit",
         src_dir=tmp_path / "src",
         auth=AuthMaterial(env={"NELSON_API_KEY": "k"}, mounts=[]),
         name="r1",
     )
-    spec = BindMountedCliRuntime("deepseek-cli", "deepseek").build_spec(ctx)
-    assert spec.argv[0] == "deepseek"
+    spec = BindMountedCliRuntime("kimi-cli", "kimi").build_spec(ctx)
+    assert spec.argv[0] == "kimi"
     modes = {dst: opts for _, dst, opts in spec.mounts}
     assert modes["/src"] == "ro"
-    assert modes["/usr/local/bin/deepseek"] == "ro"
+    assert modes["/usr/local/bin/kimi"] == "ro"
 
 
 # -- Full dispatch through run_case (fake backend) ---------------------------

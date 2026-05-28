@@ -64,7 +64,7 @@ from .runner import (
 
 # Runtimes that talk to an OpenAI-compatible API with an env-var key, eligible for
 # the cheap host-side preflight probe (and never a credential-mount default).
-API_KEY_RUNTIMES = frozenset({"raw-api-loop", "deepseek-cli", "kimi-cli", "pi-custom"})
+API_KEY_RUNTIMES = frozenset({"raw-api-loop", "kimi-cli", "pi-custom"})
 
 # Fallback endpoint for raw-api-loop when the competitor's cost_model carries no
 # base_url. VERIFY-AT-WIRING: real provider base URLs live in the competitor
@@ -252,7 +252,18 @@ def _claude_shaped_output(
 
 
 class ClaudeCodeRuntime:
-    """The host ``claude`` binary bind-mounted into the container (P2 default)."""
+    """The host ``claude`` binary bind-mounted into the container (P2 default).
+
+    Also serves as a shared harness for *non-Anthropic* models via their
+    Anthropic-compatible endpoint: when the competitor's ``cost_model`` JSON
+    carries an ``anthropic_base_url`` (and an ``env`` block of provider model
+    mappings), the same Claude Code harness is pointed at that endpoint with the
+    provider key supplied by the auth profile (``EnvKeyAuth`` ->
+    ``ANTHROPIC_AUTH_TOKEN``). This is the trusted way to run e.g. DeepSeek/Kimi
+    agentically — their official Claude Code integration — rather than an
+    unofficial third-party CLI. Absent that config, the runtime is native
+    subscription claude exactly as before.
+    """
 
     name = "claude-code"
 
@@ -264,7 +275,7 @@ class ClaudeCodeRuntime:
         # construction), so a host without claude can still run other runtimes; a
         # missing claude then becomes infra_error on a claude run.
         claude_bin = ctx.claude_bin or _resolve_claude_bin()
-        return claude_code_spec(
+        spec = claude_code_spec(
             ctx.competitor,
             ctx.prompt,
             ctx.src_dir,
@@ -274,6 +285,21 @@ class ClaudeCodeRuntime:
             network=ctx.network,
             max_budget_usd=ctx.max_budget_usd,
         )
+        # Optional Anthropic-compatible passthrough (e.g. DeepSeek via its official
+        # Claude Code endpoint). base_url + the model-mapping env come from the
+        # competitor's cost_model JSON; the token arrives via the auth profile.
+        # VERIFY-AT-WIRING: provider base_url (e.g. https://api.deepseek.com/anthropic),
+        # the model-mapping env vars, and that --max-budget-usd is harmless against a
+        # third-party endpoint (set max_budget_usd=None for compat runs if not).
+        cfg = parse_cost_model(ctx.competitor.cost_model)
+        base_url = cfg.get("anthropic_base_url")
+        if base_url:
+            spec.env["ANTHROPIC_BASE_URL"] = str(base_url)
+            extra = cfg.get("env")
+            if isinstance(extra, dict):
+                for k, v in extra.items():
+                    spec.env[str(k)] = str(v)
+        return spec
 
     def parse_output(
         self, exec_result: ContainerExecResult, competitor: Competitor
@@ -381,12 +407,12 @@ class GeminiCliRuntime:
 class BindMountedCliRuntime:
     """Generic native-CLI runtime: a host agent binary bind-mounted into the run.
 
-    Registered for vendors whose CLI we cannot verify on this host yet
-    (deepseek-cli / kimi-cli / pi-custom). An absent binary resolves to
-    ``infra_error`` (the wired-but-stubbed state), so these compete cleanly the
-    moment the CLI is installed. argv template, stdin-vs-arg prompt delivery,
-    output JSON shape, and credential needs are VERIFY-AT-WIRING per vendor; the
-    default parser assumes a claude-shaped result object.
+    Registered only for vendors that ship an *official* agent CLI we'd trust but
+    cannot verify on this host yet (kimi-cli / pi-custom). An absent binary
+    resolves to ``infra_error`` (the wired-but-stubbed state), so these compete
+    cleanly the moment the CLI is installed. argv template, stdin-vs-arg prompt
+    delivery, output JSON shape, and credential needs are VERIFY-AT-WIRING per
+    vendor; the default parser assumes a claude-shaped result object.
     """
 
     def __init__(self, name: str, binary: str):
@@ -456,7 +482,11 @@ def _register_defaults() -> None:
     register_runtime(ClaudeCodeRuntime())
     register_runtime(RawApiLoopRuntime())
     register_runtime(GeminiCliRuntime())
-    register_runtime(BindMountedCliRuntime("deepseek-cli", "deepseek"))
+    # No `deepseek-cli`: DeepSeek ships no first-party agent CLI (the ones that
+    # exist are untrusted third parties), so DeepSeek runs through the two trusted
+    # shared harnesses instead — claude-code over its Anthropic-compatible endpoint
+    # and raw-api-loop over its OpenAI-compatible one. The generic native-CLI
+    # runtime remains available for vendors that do ship an official agent.
     register_runtime(BindMountedCliRuntime("kimi-cli", "kimi"))
     register_runtime(BindMountedCliRuntime("pi-custom", "pi"))
 
