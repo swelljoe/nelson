@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -687,6 +688,17 @@ class RunScore:
     findings: list[FindingScore] = field(default_factory=list)
     judge_cost: float = 0.0  # truth-judge spend (detection)
     fp_cost: float = 0.0  # FP-judge spend (precision)
+    # The competitor's *own* run cost/latency, carried for the leaderboard (P5).
+    # Kept strictly separate from judge_cost/fp_cost so the Pareto picture reflects
+    # what the model spent, never what we spent judging it.
+    competitor_cost: float | None = None
+    wall_clock_s: float | None = None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    # Competitor metadata, denormalized (like competitor_name) so reporting is a
+    # pure function of RunScores with no extra DB round-trip.
+    size_class: str | None = None
+    knowledge_cutoff: str | None = None
 
     @property
     def eligible(self) -> bool:
@@ -740,16 +752,36 @@ class Scorer:
     def _scores_precision(self) -> bool:
         return self.fp_judge is not None and self.code is not None
 
-    def _labels(self, run: Any) -> tuple[Case, str]:
-        """Load the run's case (with ground truth) and competitor name."""
+    def _labels(self, run: Any) -> tuple[Case, str, str | None, str | None]:
+        """Load the run's case (with ground truth) + competitor name/size/cutoff."""
         from .corpus import Case
 
         case_row = self.db.get_case_by_id(run["case_id"])
         if case_row is None:
             raise ValueError(f"run {run['id']} references missing case")
         comp_row = self.db.get_competitor_by_id(run["competitor_id"])
-        comp_name = comp_row["name"] if comp_row is not None else "?"
-        return Case.from_row(case_row), comp_name
+        if comp_row is None:
+            return Case.from_row(case_row), "?", None, None
+        return (
+            Case.from_row(case_row),
+            comp_row["name"],
+            comp_row["size_class"],
+            comp_row["knowledge_cutoff"],
+        )
+
+    @staticmethod
+    def _run_meta(
+        run: Any, size_class: str | None, cutoff: str | None
+    ) -> dict[str, Any]:
+        """The competitor cost/latency/size fields carried on every RunScore."""
+        return {
+            "competitor_cost": run["cost_usd"],
+            "wall_clock_s": run["wall_clock_s"],
+            "tokens_in": run["tokens_in"],
+            "tokens_out": run["tokens_out"],
+            "size_class": size_class,
+            "knowledge_cutoff": cutoff,
+        }
 
     def score_run(self, run_id: int) -> RunScore:
         """Score one run: localize, truth-judge the localized findings, and (if a
@@ -761,13 +793,19 @@ class Scorer:
         run = self.db.get_run(run_id)
         if run is None:
             raise ValueError(f"run {run_id} not found")
-        case, comp_name = self._labels(run)
+        case, comp_name, size_class, cutoff = self._labels(run)
+        meta = self._run_meta(run, size_class, cutoff)
 
         if run["status"] != "complete":
             # Integrity rule: a run that never got a fair look is excluded, not a
             # miss. No findings are scored.
             return RunScore(
-                run_id, case.ext_id, comp_name, run["status"], outcome="excluded"
+                run_id,
+                case.ext_id,
+                comp_name,
+                run["status"],
+                outcome="excluded",
+                **meta,
             )
 
         scores: list[FindingScore] = []
@@ -842,6 +880,7 @@ class Scorer:
             findings=scores,
             judge_cost=judge_cost,
             fp_cost=fp_cost,
+            **meta,
         )
 
     def load_run_score(self, run_id: int) -> RunScore:
@@ -849,10 +888,16 @@ class Scorer:
         run = self.db.get_run(run_id)
         if run is None:
             raise ValueError(f"run {run_id} not found")
-        case, comp_name = self._labels(run)
+        case, comp_name, size_class, cutoff = self._labels(run)
+        meta = self._run_meta(run, size_class, cutoff)
         if run["status"] != "complete":
             return RunScore(
-                run_id, case.ext_id, comp_name, run["status"], outcome="excluded"
+                run_id,
+                case.ext_id,
+                comp_name,
+                run["status"],
+                outcome="excluded",
+                **meta,
             )
 
         scores: list[FindingScore] = []
@@ -900,6 +945,7 @@ class Scorer:
             findings=scores,
             judge_cost=judge_cost,
             fp_cost=fp_cost,
+            **meta,
         )
 
     def needs_scoring(self, run_id: int) -> bool:
@@ -1145,3 +1191,193 @@ def precision_report(run_scores: list[RunScore]) -> list[CompetitorPrecision]:
     for name, p in by_name.items():
         p.cases = len(cases_seen.get(name, set()))
     return [by_name[name] for name in sorted(by_name)]
+
+
+# -- Leaderboard + Pareto (P5) -----------------------------------------------
+#
+# The leaderboard fuses the three views a competitor is judged on — detection
+# (does it find the bug?), precision (is what it reports real?), and economics
+# (cost/latency to audit a case) — into one ranked row per competitor. Judge
+# spend is carried but kept distinct from competitor spend: only the latter feeds
+# cost-per-case and the Pareto picture, so the way we *score* a model never
+# distorts how it *ranks*.
+
+
+@dataclass
+class LeaderboardEntry:
+    """One competitor's combined detection / precision / economics row.
+
+    Detection counts are over **cases** (file-runs rolled up); precision counts
+    are over **findings**; cost and latency are summed over the competitor's
+    **complete** runs and normalized by the cases it audited. ``size_class`` and
+    ``knowledge_cutoff`` are denormalized competitor metadata for display.
+    """
+
+    competitor_name: str
+    size_class: str | None = None
+    knowledge_cutoff: str | None = None
+    # Detection (rolled up to cases).
+    hits: int = 0
+    misses: int = 0
+    judge_error: int = 0
+    excluded: int = 0
+    # Precision (over findings).
+    target_hits: int = 0
+    real_others: int = 0
+    false_positives: int = 0
+    undetermined: int = 0
+    # Economics, over complete runs only.
+    cases: int = 0  # distinct cases with a complete run (cost/FP denominator)
+    competitor_cost: float = 0.0  # the model's own spend (NOT judge spend)
+    judge_cost: float = 0.0  # truth-judge spend, tracked but never in cost/case
+    fp_cost: float = 0.0  # FP-judge spend, likewise
+    wall_clock_s: float = 0.0  # total wall over complete runs
+
+    @property
+    def eligible(self) -> int:
+        """Cases that counted toward detection: hits + genuine misses."""
+        return self.hits + self.misses
+
+    @property
+    def detection_rate(self) -> float:
+        return self.hits / self.eligible if self.eligible else 0.0
+
+    @property
+    def true_findings(self) -> int:
+        return self.target_hits + self.real_others
+
+    @property
+    def precision(self) -> float | None:
+        decided = self.true_findings + self.false_positives
+        return self.true_findings / decided if decided else None
+
+    @property
+    def fp_per_case(self) -> float | None:
+        return self.false_positives / self.cases if self.cases else None
+
+    @property
+    def cost_per_case(self) -> float | None:
+        """Mean competitor spend to audit one case; None if no cases audited."""
+        return self.competitor_cost / self.cases if self.cases else None
+
+    @property
+    def latency_per_case(self) -> float | None:
+        """Mean wall-clock to audit one case (its file-runs summed), over cases."""
+        return self.wall_clock_s / self.cases if self.cases else None
+
+    @property
+    def quality(self) -> float:
+        """Composite goodness for the Pareto y-axis: detection_rate x precision.
+
+        Precision None (no decided findings) is treated as 1.0 — a model that
+        reported only the bug, or nothing, is not penalized for noise it never
+        made — but detection_rate then drives the product (a no-detection model
+        scores 0). Since any hit is itself a true finding, detection_rate > 0
+        always implies precision is not None, so this fallback never inflates.
+        """
+        p = self.precision if self.precision is not None else 1.0
+        return self.detection_rate * p
+
+
+def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
+    """Per-competitor leaderboard, ranked best-first.
+
+    Fuses :func:`detection_report` (cases), :func:`precision_report` (findings)
+    and per-competitor competitor-cost / wall-clock totals over complete runs.
+    Ranked by detection rate desc, then precision desc (unknown last), then
+    cost/case asc, then name — so the most capable, then cleanest, then cheapest
+    competitor sorts first.
+    """
+    det = {d.competitor_name: d for d in detection_report(run_scores)}
+    prec = {p.competitor_name: p for p in precision_report(run_scores)}
+
+    cost: dict[str, float] = {}
+    wall: dict[str, float] = {}
+    cases_seen: dict[str, set[str]] = {}
+    size: dict[str, str | None] = {}
+    cutoff: dict[str, str | None] = {}
+    for rs in run_scores:
+        size.setdefault(rs.competitor_name, rs.size_class)
+        cutoff.setdefault(rs.competitor_name, rs.knowledge_cutoff)
+        if rs.status == "complete":
+            cost[rs.competitor_name] = cost.get(rs.competitor_name, 0.0) + (
+                rs.competitor_cost or 0.0
+            )
+            wall[rs.competitor_name] = wall.get(rs.competitor_name, 0.0) + (
+                rs.wall_clock_s or 0.0
+            )
+            cases_seen.setdefault(rs.competitor_name, set()).add(rs.case_ext_id)
+
+    entries: list[LeaderboardEntry] = []
+    for name in set(det) | set(prec):
+        d = det.get(name)
+        p = prec.get(name)
+        entries.append(
+            LeaderboardEntry(
+                competitor_name=name,
+                size_class=size.get(name),
+                knowledge_cutoff=cutoff.get(name),
+                hits=d.hits if d else 0,
+                misses=d.misses if d else 0,
+                judge_error=d.judge_error if d else 0,
+                excluded=d.excluded if d else 0,
+                target_hits=p.target_hits if p else 0,
+                real_others=p.real_others if p else 0,
+                false_positives=p.false_positives if p else 0,
+                undetermined=p.undetermined if p else 0,
+                cases=len(cases_seen.get(name, set())),
+                competitor_cost=cost.get(name, 0.0),
+                judge_cost=d.judge_cost if d else 0.0,
+                fp_cost=p.fp_cost if p else 0.0,
+                wall_clock_s=wall.get(name, 0.0),
+            )
+        )
+
+    def _rank_key(e: LeaderboardEntry) -> tuple[float, float, float, str]:
+        prec_v = e.precision if e.precision is not None else -1.0
+        cpc = e.cost_per_case if e.cost_per_case is not None else float("inf")
+        return (-e.detection_rate, -prec_v, cpc, e.competitor_name)
+
+    entries.sort(key=_rank_key)
+    return entries
+
+
+def pareto_frontier(
+    entries: list[LeaderboardEntry],
+    *,
+    x: Callable[[LeaderboardEntry], float | None],
+    y: Callable[[LeaderboardEntry], float | None],
+    minimize_x: bool = True,
+    maximize_y: bool = True,
+) -> list[LeaderboardEntry]:
+    """The non-dominated subset of ``entries`` for a quality-vs-cost trade-off.
+
+    With the defaults (maximize y = quality, minimize x = cost or latency), an
+    entry is *dominated* when another is at least as good on both axes and
+    strictly better on at least one. Entries missing either coordinate (x or y is
+    None — e.g. a competitor with no audited cases) cannot be placed and are
+    dropped. Tied points are all kept. Returned sorted by x ascending.
+    """
+    pts = [
+        (e, xv, yv)
+        for e in entries
+        for xv in (x(e),)
+        for yv in (y(e),)
+        if xv is not None and yv is not None
+    ]
+
+    def dominates(
+        a: tuple[LeaderboardEntry, float, float],
+        b: tuple[LeaderboardEntry, float, float],
+    ) -> bool:
+        _, ax, ay = a
+        _, bx, by = b
+        x_ok = ax <= bx if minimize_x else ax >= bx
+        y_ok = ay >= by if maximize_y else ay <= by
+        x_strict = ax < bx if minimize_x else ax > bx
+        y_strict = ay > by if maximize_y else ay < by
+        return x_ok and y_ok and (x_strict or y_strict)
+
+    frontier = [p for p in pts if not any(dominates(q, p) for q in pts if q is not p)]
+    frontier.sort(key=lambda p: p[1])
+    return [e for (e, _, _) in frontier]

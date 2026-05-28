@@ -1,6 +1,6 @@
 # Nelson Benchmark Harness — Implementation Plan
 
-> Status: P4 landed (2026-05-27); P5 next. Written 2026-05-26.
+> Status: P5 landed (2026-05-27); P6 next. Written 2026-05-26.
 > This document is the durable source of truth for the benchmark effort. Update it as phases land.
 
 ## 1. Goal
@@ -336,7 +336,43 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     inside try-with-resources so `close()` is guaranteed. ~$0.14 for the two calls. The
     code-grounded judge discriminates real bugs from plausible noise without the advisory —
     exactly the precision signal P4 needed.
-- **P5 — Leaderboard + Pareto** reporting.
+- **P5 — Leaderboard + Pareto** ✅ *(branch `bench-p5-leaderboard`)*. Per-competitor
+  leaderboard fusing detection + precision + economics, a Pareto frontier, and a
+  per-case drilldown — all a **pure function of the P3/P4 RunScores**, so no new live
+  model run was needed.
+  *Gate met: 15 tests + a 4-competitor demo report where the Pareto frontier correctly
+  dropped the one dominated competitor (below).*
+  Delivered: `RunScore` now also carries the competitor's **own** cost / wall-clock /
+  tokens + denormalized `size_class` / `knowledge_cutoff` (plumbed from the run +
+  competitor rows in `score_run` / `load_run_score`); `LeaderboardEntry` +
+  `leaderboard(run_scores)` (combines `detection_report` cases, `precision_report`
+  findings, and per-competitor cost/latency over **complete** runs → detection rate,
+  precision, FP/case, **cost/case**, **latency/case**, size; ranked detection ↓ →
+  precision ↓ → cost/case ↑); `pareto_frontier(entries, x=, y=)` (non-dominated subset,
+  minimise-x / maximise-y, ties kept, missing-coord dropped); `generate_leaderboard_report`
+  in `html_report.py` (ranked table + two inline-**SVG** scatter plots, no JS/assets, with
+  the frontier drawn + a competitor × case outcome matrix); a read-only `nelson bench
+  leaderboard [--html PATH]` CLI (reloads persisted scores, **no judge spend**; warns if
+  runs still need scoring). 185 tests total.
+  - **Judge spend never enters the ranking.** Cost/case and both Pareto axes use only
+    the competitor's own `runs.cost_usd`; truth- + FP-judge spend is summed and shown in a
+    separate column, exactly as the data model intended — so how we *score* a model can
+    never distort how it *ranks*.
+  - **Quality = detection_rate × precision** is the Pareto y-axis (maximise) against
+    cost/case or latency/case (minimise). Precision-None (no scorable findings) is treated
+    as 1.0, but since any hit is itself a true finding, detection > 0 always implies a
+    defined precision, so the fallback only ever zeroes out a no-detection competitor — it
+    can't inflate. Cost/latency denominators are **distinct cases with a complete run**
+    (matching the FP/case denominator), so all per-case rates share one notion of "audited".
+  - **Size is categorical**, so it is shown as a leaderboard column + point annotation
+    rather than forced onto a numeric Pareto axis (the cost/latency frontiers are the
+    numeric trade-offs); revisit if a size ordinal is defined.
+  - **Demo gate (synthetic 4-competitor matrix).** opus (90% det, $1.20/case), sonnet
+    (70%, $0.30), haiku (40%, $0.05), and a noisy mini (50% det but 30% precision, $0.08).
+    The cost-vs-quality frontier resolved to **{haiku, sonnet, opus}** and correctly dropped
+    noisy-mini — haiku is both cheaper *and* higher-quality, so the noisy competitor is
+    dominated. Table ranks by detection, ★-marks frontier members, and the matrix shows
+    hit/miss/jerr/excl per case. This is the leaderboard + Pareto deliverable end-to-end.
 - **P6 — Automation loop**: scheduling + corpus/competitor lifecycle.
 - **P7 — More runtimes**: deepseek, kimi, raw-api loop (MiMo), gemini-cli, pi-custom — each
   a new competitor (verify CLI/auth per vendor).
