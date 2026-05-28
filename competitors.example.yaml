@@ -1,0 +1,29 @@
+# Example competitor roster for `nelson bench loop --competitors <this file>`.
+#
+# A competitor is a (model x runtime x tool-profile). The loop upserts every
+# entry here as `active` and flips any DB competitor *absent* from this list to
+# `retired` (its historical runs are kept and stay scoreable) — so adding or
+# removing a competitor is pure config, not code.
+#
+# `name` (a stable identifier) and `model` are required; everything else is
+# optional. `knowledge_cutoff` powers the recency gate and age-out: a case is
+# only run against a competitor when disclosed after its cutoff, and a case is
+# aged out once it predates every active competitor's cutoff. `auth_profile`
+# names a secret profile (never a secret value); subscription-auth runtimes
+# (claude-code, gemini-cli) inherit the signed-in host CLI and need none.
+
+- name: claude-code/sonnet
+  model: sonnet
+  runtime: claude-code
+  tool_profile: read-grep
+  cost_model: subscription
+  size_class: medium
+  knowledge_cutoff: 2025-06
+
+- name: claude-code/haiku
+  model: haiku
+  runtime: claude-code
+  tool_profile: read-grep
+  cost_model: subscription
+  size_class: small
+  knowledge_cutoff: 2025-06

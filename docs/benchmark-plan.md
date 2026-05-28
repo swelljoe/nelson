@@ -1,6 +1,6 @@
 # Nelson Benchmark Harness — Implementation Plan
 
-> Status: P5 landed (2026-05-27); P6 next. Written 2026-05-26.
+> Status: P6 landed (2026-05-28); P7 next. Written 2026-05-26.
 > This document is the durable source of truth for the benchmark effort. Update it as phases land.
 
 ## 1. Goal
@@ -373,7 +373,49 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     noisy-mini — haiku is both cheaper *and* higher-quality, so the noisy competitor is
     dominated. Table ranks by detection, ★-marks frontier members, and the matrix shows
     hit/miss/jerr/excl per case. This is the leaderboard + Pareto deliverable end-to-end.
-- **P6 — Automation loop**: scheduling + corpus/competitor lifecycle.
+- **P6 — Automation loop** ✅ *(branch `bench-p6-automation`)*. One idempotent,
+  unattended pass that ties P1-P5 together: (opt-in) refresh corpus -> sync the
+  competitor roster -> age out stale cases -> plan + run the missing matrix cells
+  -> score new completions -> regenerate the leaderboard -> surface alerts.
+  *Gate met: a 3-scenario demo (no podman/judge) — a healthy multi-competitor pass
+  aged out a stale case, ran/scored the fresh matrix and wrote the report; a re-run
+  planned nothing (idempotent); an all-auth-failing run tripped the circuit breaker
+  and flagged needs_attention (below).*
+  Delivered: `nelson/automate.py` — a **pure planning core** (`plan_matrix` dedups
+  the (competitor x case x file) matrix against existing runs — a complete/pending/
+  running cell is skipped, an only-ever-failed cell is re-runnable with
+  `--retry-failed`; `case_is_fresh_for` + `parse_date_prefix` recency gate;
+  `select_aged_out`; `sync_competitors` / `load_competitors` for config-driven
+  roster) and the `run_once` driver that wires the **injected** P1-P5 engines
+  (`CorpusPipeline`, `BenchRunner`, `Scorer`) so the whole pass runs under test with
+  fakes — it owns **no scoring/detection logic**; `Competitor.from_row`; a
+  cron-friendly `nelson bench loop` CLI (`--interval` for a built-in repeat). 210
+  tests total.
+  - **Unattended-safety rails.** A pass is bounded by `--max-runs` and
+    `--max-spend-usd` (competitor spend only); an **auth circuit breaker** aborts the
+    run stage after N *consecutive* auth failures (default 3) — the signature of an
+    expired host `claude` session, where continuing would only burn budget failing
+    identically. A non-auth outcome resets the consecutive count, so one mis-authed
+    competitor among healthy ones doesn't trip it. The CLI exits non-zero when a pass
+    `needs_attention` (any auth failure / breaker tripped), so a cron mail fires.
+  - **Idempotent + resumable.** `plan_matrix` only schedules missing cells and
+    scoring only touches complete-but-unscored runs, so a cron entry (or `--interval`)
+    can fire the same command repeatedly and it just fills gaps — no run is repeated.
+  - **Integrity carried through.** `auth_failed` / `infra_error` runs are *counted*,
+    never scored as misses; auth failures surface via `needs_attention`, while infra
+    errors are summarized in the matrix/reporting without triggering the cron alert.
+    Age-out only ever flips a case to `retired` (never deletes ground truth) and only
+    when the data **proves** staleness.
+  - **Decisions.** Corpus refresh is **opt-in** (`--refresh-corpus`) — it needs network
+    and spends Opus pre-vet budget, so the default loop is run + score + report only.
+    Age-out is **on by default** but conservative and *inert until cutoffs exist*: it
+    retires a vetted case only when its disclosure is on/before the **minimum** known
+    cutoff among active competitors (every active competitor likely trained after the
+    bug) AND every active competitor has a parseable cutoff; a case with no disclosure
+    date is never aged out. The recency gate (`--recency`) likewise only excludes a
+    cell when it can prove the case predates that competitor's cutoff — missing dates
+    default to fresh/included. Competitors are **config** (`--competitors roster.yaml`):
+    declared ones are upserted, absent active ones flipped to `retired` (history kept).
 - **P7 — More runtimes**: deepseek, kimi, raw-api loop (MiMo), gemini-cli, pi-custom — each
   a new competitor (verify CLI/auth per vendor).
 

@@ -118,6 +118,21 @@ class Competitor:
             "status": self.status,
         }
 
+    @classmethod
+    def from_row(cls, row: Any) -> Competitor:
+        """Rebuild a Competitor from a ``competitors`` row (drops the DB id)."""
+        return cls(
+            name=row["name"],
+            model=row["model"],
+            runtime=row["runtime"],
+            tool_profile=row["tool_profile"],
+            auth_profile=row["auth_profile"],
+            cost_model=row["cost_model"],
+            size_class=row["size_class"],
+            knowledge_cutoff=row["knowledge_cutoff"],
+            status=row["status"],
+        )
+
 
 @dataclass
 class RunResult:
