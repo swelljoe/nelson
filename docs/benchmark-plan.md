@@ -208,10 +208,11 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
   accessors, carrying the `auth_failed`/`infra_error` integrity statuses onto runs
   (`db.py`); `nelson/runner.py` — a pluggable `ContainerBackend` (`PodmanBackend`) and
   `ContainerAuth` (`CredentialMountAuth`), `prepare_checkout` (depth-1 fetch of
-  `vuln_commit`), `claude_code_spec`, stream-json output parsing (`extract_result` /
+  `vuln_commit`, materialized **without `.git`** — see below), `claude_code_spec`,
+  stream-json output parsing (`extract_result` /
   `parse_competitor_findings`), and the `BenchRunner` orchestrator; `nelson bench
   run/runs/show-run` CLI. Tested with an injected fake backend + fake auth (no podman /
-  network / credentials), 107 tests total.
+  network / credentials), covered by the test suite.
   - **Container design.** Minimal `fedora-minimal:41` image (git + ripgrep); the host's
     229 MB `claude` binary is **bind-mounted read-only** rather than baked in, so the
     image tracks the host CLI version. The case repo is checked out at `vuln_commit` and
@@ -221,6 +222,15 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     (avoids relabeling shared host files); isolation rests on the rootless userns + caps
     + ro source. Network is **on** for P2 — the agent needs its model backend; an egress
     allowlist is a later refinement.
+  - **Pristine source mount — no `.git` (2026-05-27).** The earlier checkout `git
+    init`/`fetch`/`checkout`ed *into* the mount, so `.git` shipped to the competitor:
+    `.git/config` named the upstream repo (identity → recall the advisory), and with
+    network on `git fetch origin <fix-sha>` would pull the future fix one `git diff`
+    away. `prepare_checkout` now fetches into a **scratch bare repo** at
+    `<dest>/.gitcache` (a *sibling*, never mounted) and `git archive | tar -x`es the
+    commit's tree into `<dest>/src` — the only thing mounted. The mount is a clean
+    source tree: no `.git`, no history, no remotes, no commit SHA. (Egress is the
+    separate, harder half of the same threat; still a later refinement.)
   - **Auth.** Decision (2026-05-27): the containerized Claude competitor authenticates by
     **mounting a copy of the host `~/.claude/.credentials.json`** (zero setup, fine for
     sequential P2). `CredentialMountAuth` copies it into a per-run config dir mounted

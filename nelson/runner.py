@@ -156,27 +156,75 @@ def _git(args: list[str], cwd: Path, timeout: float) -> str:
 def prepare_checkout(
     repo_url: str, commit: str, dest: Path, timeout: float = 600.0
 ) -> Path:
-    """Check out a working tree at ``commit`` under ``dest`` (idempotent).
+    """Materialize a pristine working tree at ``<dest>/src`` for ``commit``.
 
-    A depth-1 fetch of the single SHA brings down just that commit's tree, no
-    history. If ``dest`` is already checked out at ``commit`` it is reused, so
-    repeated runs of the same case don't re-fetch.
+    The competitor must not be able to identify the project or look up the fix:
+    ``.git/config`` would name the upstream repo, and with the model's network
+    on, one ``git fetch origin <fix-sha>`` (or a fresh clone into the writable
+    home) would put the upstream fix one ``git diff`` away. So the *mount* —
+    ``<dest>/src``, what bind-mounts at ``/src:ro`` — is a pristine tree with
+    no ``.git`` at all: we fetch into a scratch bare repo under
+    ``<dest>/.gitcache`` (a sibling, **not** under the mount) and
+    ``git archive | tar -x`` the commit's tree into ``<dest>/src``. The
+    ``<dest>/.commit`` sentinel lets repeat runs of the same case skip the
+    fetch.
+
+    Returns ``<dest>/src``, the path to bind-mount as ``/src:ro``.
     """
     dest = Path(dest)
-    if (dest / ".git").is_dir():
-        try:
-            if _git(["rev-parse", "HEAD"], dest, timeout) == commit:
-                return dest
-        except RunnerError:
-            pass  # broken checkout — rebuild it below
+    tree = dest / "src"
+    sentinel = dest / ".commit"
+    gitdir = dest / ".gitcache"
+    if sentinel.is_file() and sentinel.read_text().strip() == commit and tree.is_dir():
+        return tree
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
-    _git(["init", "-q"], dest, timeout)
-    _git(["remote", "add", "origin", repo_url], dest, timeout)
-    _git(["fetch", "--depth=1", "-q", "origin", commit], dest, timeout)
-    _git(["checkout", "-q", commit], dest, timeout)
-    return dest
+    tree.mkdir()
+    gitdir.mkdir()
+    _git(["init", "--bare", "-q"], gitdir, timeout)
+    _git(["remote", "add", "origin", repo_url], gitdir, timeout)
+    _git(["fetch", "--depth=1", "-q", "origin", commit], gitdir, timeout)
+    _archive_tree(gitdir, commit, tree, timeout)
+    sentinel.write_text(commit)
+    return tree
+
+
+def _archive_tree(gitdir: Path, commit: str, tree: Path, timeout: float) -> None:
+    """Extract ``commit``'s tree from the bare ``gitdir`` into ``tree``.
+
+    ``git archive`` writes a tarball of just the tree at ``commit`` — no
+    history, no refs, no ``.git`` metadata — which ``tar -x`` unpacks into the
+    mount. Routed through a tarball file (rather than a pipe) so a failure on
+    either side surfaces with its own returncode and stderr.
+    """
+    tarball = gitdir / "archive.tar"
+    arch = subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(gitdir),
+            "archive",
+            "--format=tar",
+            "-o",
+            str(tarball),
+            commit,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if arch.returncode != 0:
+        raise RunnerError(f"git archive failed: {arch.stderr.strip()}")
+    ext = subprocess.run(
+        ["tar", "-xf", str(tarball), "-C", str(tree)],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    if ext.returncode != 0:
+        raise RunnerError(f"tar extract failed: {ext.stderr.strip()}")
+    tarball.unlink()
 
 
 # -- Auth (pluggable) --------------------------------------------------------
