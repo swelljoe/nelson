@@ -488,7 +488,8 @@ def _clip_source(source: str, line: int | None) -> tuple[str, str]:
         if len(window) > _MAX_CODE_CHARS:
             return (
                 excerpt,
-                f" (lines {lo + 1}-{hi} of {len(lines)}, clipped by char limit; excerpt may end mid-window)",
+                f" (lines {lo + 1}-{hi} of {len(lines)}, clipped by char limit; "
+                "excerpt may end mid-window)",
             )
         return excerpt, f" (lines {lo + 1}-{hi} of {len(lines)}, clipped)"
     return source[:_MAX_CODE_CHARS], " (clipped to first portion)"
