@@ -401,9 +401,11 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
   - **Idempotent + resumable.** `plan_matrix` only schedules missing cells and
     scoring only touches complete-but-unscored runs, so a cron entry (or `--interval`)
     can fire the same command repeatedly and it just fills gaps — no run is repeated.
-  - **Integrity carried through.** `auth_failed` / `infra_error` runs are *counted and
-    alerted*, never scored as misses; age-out only ever flips a case to `retired`
-    (never deletes ground truth) and only when the data **proves** staleness.
+  - **Integrity carried through.** `auth_failed` / `infra_error` runs are *counted*,
+    never scored as misses; auth failures surface via `needs_attention`, while infra
+    errors are summarized in the matrix/reporting without triggering the cron alert.
+    Age-out only ever flips a case to `retired` (never deletes ground truth) and only
+    when the data **proves** staleness.
   - **Decisions.** Corpus refresh is **opt-in** (`--refresh-corpus`) — it needs network
     and spends Opus pre-vet budget, so the default loop is run + score + report only.
     Age-out is **on by default** but conservative and *inert until cutoffs exist*: it
