@@ -117,26 +117,32 @@
 #                              (adjacency noise — n=1, averages out over the matrix)
 #   gemini-3-flash-preview  -> REFUSES at default safety (would only score `refused`;
 #                              NOT added below for that reason)
+#
+# COST: the compat endpoint returns token usage but no dollar cost, so the
+# raw-api-loop harness computes it from the per-MTok prices below (standard tier,
+# <200k-token prompts; verified against ai.google.dev/gemini-api/docs/pricing on
+# 2026-05-28). These are reasoning models — they bill "thinking" tokens at the
+# output rate, which the compat layer reports in total_tokens but not in
+# completion_tokens; the harness derives output as total-prompt so those are
+# counted (see usage_delta in raw_api_loop.py).
 - name: raw-api-loop/gemini
   model: gemini-2.5-pro
   runtime: raw-api-loop
   tool_profile: read-grep
   auth_profile: gemini-openai     # value from $GEMINI_API_KEY on the host
-  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai"}'
+  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "input_usd_per_mtok": 1.25, "output_usd_per_mtok": 10.0}'
   knowledge_cutoff: 2025-01
 
 # Newer Gemini, same endpoint/auth. 3.1-pro-preview is the stronger contender (clean
 # judged HIT); 3.5-flash is the low-cost near-frontier entry — likely not a top
 # contender, but cheap to include and useful to compare against the other low-cost
-# near-frontier models. NOTE: knowledge_cutoff below is a placeholder inherited from
-# the 2.5 family — VERIFY-AT-WIRING (it feeds the cutoff-vs-disclosure integrity
-# check, so a wrong date can mis-include/exclude a case).
+# near-frontier models.
 - name: raw-api-loop/gemini-3.1-pro-preview
   model: gemini-3.1-pro-preview
   runtime: raw-api-loop
   tool_profile: read-grep
   auth_profile: gemini-openai
-  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai"}'
+  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "input_usd_per_mtok": 2.0, "output_usd_per_mtok": 12.0}'
   knowledge_cutoff: 2025-01       # VERIFY-AT-WIRING
 
 - name: raw-api-loop/gemini-3.5-flash
@@ -144,8 +150,8 @@
   runtime: raw-api-loop
   tool_profile: read-grep
   auth_profile: gemini-openai
-  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai"}'
-  knowledge_cutoff: 2025-01       # VERIFY-AT-WIRING
+  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "input_usd_per_mtok": 1.5, "output_usd_per_mtok": 9.0}'
+  knowledge_cutoff: 2026-01
 
 # Wired but stubbed (no key/CLI yet): present so they enter the matrix the moment
 # creds/binaries arrive; until then each cleanly resolves to auth_failed/infra_error.
