@@ -1,6 +1,6 @@
 # Nelson Benchmark Harness — Implementation Plan
 
-> Status: P6 landed (2026-05-28); P7 next. Written 2026-05-26.
+> Status: P7 landed (2026-05-28) — final phase; benchmark feature-complete. Written 2026-05-26.
 > This document is the durable source of truth for the benchmark effort. Update it as phases land.
 
 ## 1. Goal
@@ -416,8 +416,72 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     cell when it can prove the case predates that competitor's cutoff — missing dates
     default to fresh/included. Competitors are **config** (`--competitors roster.yaml`):
     declared ones are upserted, absent active ones flipped to `retired` (history kept).
-- **P7 — More runtimes**: deepseek, kimi, raw-api loop (MiMo), gemini-cli, pi-custom — each
-  a new competitor (verify CLI/auth per vendor).
+- **P7 — More runtimes** ✅ *(branch `bench-p7-runtimes`; gates green: ruff + format + ty +
+  257 pytest; image builds with python3; NOT merged — user merges per-phase)*. Closed the
+  one gap blocking every non-Claude model: `BenchRunner.run_case` was hardcoded to claude-code.
+  Delivered a **runtime-dispatch layer** (`nelson/runtimes.py`): a `ContainerRuntime` registry
+  keyed by `competitors.runtime`, with the claude path refactored into `ClaudeCodeRuntime` at
+  zero behavior change (existing runner tests untouched-green). Runtimes registered:
+  - **`raw-api-loop`** (the shared, apples-to-apples *model* harness — user chose "Both"): a
+    **stdlib-only** in-container ReAct agent (`nelson/raw_api_loop.py`) with sandboxed
+    `read_file`/`grep`/`list_dir` tools confined to `/src` (realpath-guarded against `..`,
+    absolute, and symlink escapes), driving any OpenAI-compatible endpoint and emitting a
+    claude-shaped result object so parsing stays uniform. DeepSeek/MiMo/Kimi are pure provider
+    config (`base_url` + per-token pricing in `cost_model` JSON; key via auth profile).
+  - **`claude-code` Anthropic-compat passthrough** (the *other* trusted shared harness): a
+    non-Anthropic model with an official Anthropic-compatible endpoint (e.g. DeepSeek via
+    `https://api.deepseek.com/anthropic`) runs through the **real Claude Code harness** —
+    `ClaudeCodeRuntime.build_spec` reads `anthropic_base_url` + a model-mapping `env` block from
+    the competitor's `cost_model` JSON and injects them, with the provider token supplied by the
+    auth profile (`deepseek-anthropic` → `ANTHROPIC_AUTH_TOKEN`). So DeepSeek competes on *two*
+    trusted harnesses (claude-code-compat and raw-api-loop), agent-vs-agent on one model. Native
+    subscription claude is unaffected (no `anthropic_base_url` → unchanged).
+  - **`gemini-cli`** (native, bind-mounted host binary; subscription-auth credential mount).
+  - **`kimi-cli` / `pi-custom`** (native vendor agents): wired + unit-tested but stubbed — an
+    absent host binary resolves to `infra_error`, so they compete the moment the CLI is
+    installed and verified. **No `deepseek-cli`:** DeepSeek ships no first-party agent CLI (only
+    untrusted third parties), so it runs via the two shared harnesses above instead.
+  - **Auth bridge:** `EnvKeyAuth` (resolves an AuthProfile's secret *names* → container `-e`
+    vars; a missing key → `auth_failed`, the integrity hinge), `GeminiCredentialMountAuth`,
+    and `auth_for_competitor` (profile → env injection; else the runtime's default). New
+    `STANDARD_AUTH_PROFILES`: `deepseek-api-key` (OpenAI-compat, → `NELSON_API_KEY`),
+    `deepseek-anthropic` (claude-compat, → `ANTHROPIC_AUTH_TOKEN`), `mimo-api-key`,
+    `kimi-api-key` (secret *names* only, never values).
+  - **Preflight** (`BenchRunner(preflight=…)`, default-off): a cheap host-side OpenAI-compatible
+    probe so a dead key fails before container spend (integrity already guaranteed by EnvKeyAuth).
+  - **Image:** CONTAINERFILE adds `python3`; `IMAGE_TAG` bumped to `nelson-bench:fedora-py` so
+    `ensure_image` rebuilds. Verified live: python3 3.13.9 + ripgrep present, script compiles.
+  - **Integrity carried through:** unknown runtime / missing binary / missing key → never a
+    miss. No DB schema change (`runtime`/`auth_profile`/`cost_model` already existed;
+    `SCHEMA_VERSION` stays 5).
+  - **Live gate met (2026-05-28, DeepSeek on the junrar GHSA-j273 CWE-22 case).** Both shared
+    harnesses detected the planted zip-slip end-to-end against the real DeepSeek API:
+    `claude-code/deepseek` (deepseek-v4-pro, `/anthropic` + `ANTHROPIC_AUTH_TOKEN`) → 1 finding,
+    CWE-22 @ L76, 164 s, $0.48; `raw-api-loop/deepseek` (deepseek-chat→v4-flash, OpenAI-compat)
+    → 2 findings, CWE-22 @ L82+L67, 133 s, $0.028. The gate also surfaced a real raw-api-loop
+    bug (the ReAct agent hit its 12-step cap mid-analysis and, on the forced-final turn, emitted
+    a native-format tool call as text → 0 findings); fixed by an explicit forced-final
+    instruction + a larger default step budget (12→20), after which the same model produced a
+    clean JSON hit. Endpoint values confirmed from api-docs.deepseek.com.
+  - **`agy` (Antigravity / Gemini) live-tested (2026-05-28).** The old `gemini` CLI was renamed
+    to `agy`, with a Claude-Code-like interface (`-p`, `--dangerously-skip-permissions`,
+    `--add-dir`, plain-text out, no `-m`/JSON), so `GeminiCliRuntime` → `AgyRuntime` (bind-mount
+    the host `agy`; `AgyCredentialMountAuth` mounts the `~/.gemini` sign-in). On the junrar case
+    the harness ran cleanly end-to-end, but the **Gemini model behind Antigravity refused** the
+    neutral audit prompt ("Sorry, I cannot fulfill your request… see the OWASP Top Ten") — a real
+    model-behavior result, scored as-is (the uniform prompt is *not* tuned per model). A
+    scoring-layer follow-up could distinguish a safety *refusal* from a true miss.
+  - **MiMo (Xiaomi) live gate met (2026-05-28, junrar) — both harnesses HIT.** MiMo also exposes
+    Anthropic-compat (`/anthropic`, `mimo-anthropic` profile) and OpenAI-compat (`/v1`,
+    `mimo-api-key`) endpoints; the host is **region-specific** (the Token-Plan `tp-` key uses
+    `token-plan-sgp.xiaomimimo.com`, not the `-cn` host the docs implied). `claude-code/mimo`
+    (mimo-v2.5-pro) → 2 findings, CWE-22 @ L61+L35, 400 s, $0.84; `raw-api-loop/mimo` → 2 findings,
+    CWE-22 @ L61+L34, 189 s. So across DeepSeek + MiMo, all four API-harness combos ran end-to-end
+    and localized CWE-22 path-traversal findings to the vulnerable file (the P3 judge formally
+    adjudicates hit vs. a related real finding — several pointed at the prefix-match guard rather
+    than the L76 backslash zip-slip).
+  - **Still VERIFY-AT-WIRING (not yet live):** native CLI (`kimi-cli`/`pi-custom`) argv/output +
+    their binaries (no trusted official CLI installed yet).
 
 ## 9. P0 detailed breakdown (next up)
 

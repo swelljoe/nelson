@@ -151,4 +151,38 @@ STANDARD_AUTH_PROFILES: dict[str, AuthProfile] = {
         name="openai-api-key",
         env={"OPENAI_API_KEY": "OPENAI_API_KEY"},
     ),
+    # raw-api-loop reads the key from the single container var NELSON_API_KEY,
+    # regardless of provider; each profile maps that target var to the provider's
+    # own host secret name. The secret *value* is supplied by the benchmark
+    # machine's environment — only the name lives here. (Native key env-var names
+    # for Moonshot/Kimi are VERIFY-AT-WIRING.)
+    "deepseek-api-key": AuthProfile(
+        name="deepseek-api-key",
+        env={"NELSON_API_KEY": "DEEPSEEK_API_KEY"},
+    ),
+    # DeepSeek through the Claude Code harness (its official Anthropic-compatible
+    # endpoint): the same secret, but presented as ANTHROPIC_AUTH_TOKEN (the var
+    # `claude` reads) rather than the raw-api-loop's NELSON_API_KEY. The endpoint
+    # URL + model mappings are non-secret config and live in the competitor's
+    # cost_model JSON, not here.
+    "deepseek-anthropic": AuthProfile(
+        name="deepseek-anthropic",
+        env={"ANTHROPIC_AUTH_TOKEN": "DEEPSEEK_API_KEY"},
+    ),
+    "mimo-api-key": AuthProfile(
+        name="mimo-api-key",
+        env={"NELSON_API_KEY": "MIMO_API_KEY"},
+    ),
+    # MiMo (Xiaomi) through the Claude Code harness (its Anthropic-compatible
+    # endpoint), mirroring deepseek-anthropic. Same secret, presented as the var
+    # `claude` reads. Endpoint URL + model mappings live in the competitor's
+    # cost_model JSON. (Token-Plan keys are `tp-...`, pay-as-you-go `sk-...`.)
+    "mimo-anthropic": AuthProfile(
+        name="mimo-anthropic",
+        env={"ANTHROPIC_AUTH_TOKEN": "MIMO_API_KEY"},
+    ),
+    "kimi-api-key": AuthProfile(
+        name="kimi-api-key",
+        env={"NELSON_API_KEY": "MOONSHOT_API_KEY"},  # VERIFY-AT-WIRING: var name
+    ),
 }

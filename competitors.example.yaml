@@ -10,7 +10,27 @@
 # only run against a competitor when disclosed after its cutoff, and a case is
 # aged out once it predates every active competitor's cutoff. `auth_profile`
 # names a secret profile (never a secret value); subscription-auth runtimes
-# (claude-code, gemini-cli) inherit the signed-in host CLI and need none.
+# (claude-code, gemini-cli) inherit the signed-in host CLI and need none, while
+# API-key runtimes (raw-api-loop and the native vendor CLIs) name a profile from
+# nelson/auth.py whose value the benchmark machine supplies via the environment.
+#
+# Runtimes (the invocation method): `claude-code` and `gemini-cli` bind-mount the
+# signed-in host CLI; `raw-api-loop` is the shared agentic harness (a sandboxed
+# read/grep ReAct agent driving any OpenAI-compatible endpoint), so swapping the
+# model is an apples-to-apples comparison. A non-Anthropic model with an *official*
+# Anthropic-compatible endpoint (e.g. DeepSeek) also runs through the real
+# `claude-code` harness: set runtime `claude-code`, an `anthropic_base_url` (+ model
+# mapping `env`) in `cost_model`, and an auth_profile carrying the provider token —
+# this is preferred over an unofficial third-party CLI. `kimi-cli` / `pi-custom` are
+# native vendor agents — wired here but stubbed until their CLI is installed and
+# verified (an absent binary cleanly resolves to infra_error, never a miss).
+#
+# For `raw-api-loop`, `cost_model` is a QUOTED JSON string carrying the endpoint
+# `base_url` and optional per-million-token pricing (`input_usd_per_mtok` /
+# `output_usd_per_mtok`); pricing is best-effort (tokens are always recorded, cost
+# is null without it). VERIFY-AT-WIRING: confirm each provider's real base_url,
+# model id, and key env-var name before a live run — the values below are
+# illustrative placeholders.
 
 - name: claude-code/sonnet
   model: sonnet
@@ -26,4 +46,75 @@
   tool_profile: read-grep
   cost_model: subscription
   size_class: small
+  knowledge_cutoff: 2025-06
+
+# DeepSeek through the real Claude Code harness (its official Anthropic-compatible
+# endpoint). Same model, trusted agent. cost_model carries the endpoint + the model
+# mapping env claude reads; auth_profile supplies the token as ANTHROPIC_AUTH_TOKEN.
+# VERIFY-AT-WIRING: confirm base_url + model ids against api-docs.deepseek.com.
+- name: claude-code/deepseek
+  model: deepseek-v4-pro          # VERIFY-AT-WIRING: real model id
+  runtime: claude-code
+  tool_profile: read-grep
+  auth_profile: deepseek-anthropic
+  cost_model: '{"anthropic_base_url": "https://api.deepseek.com/anthropic", "env": {"ANTHROPIC_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash"}}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+# The same DeepSeek model through the OpenAI-compatible basic harness, for an
+# agent-vs-agent comparison on the identical model. cost_model is a JSON string.
+- name: raw-api-loop/deepseek
+  model: deepseek-chat            # VERIFY-AT-WIRING: real OpenAI-compat model id
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: deepseek-api-key  # value from $DEEPSEEK_API_KEY on the host
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.14, "output_usd_per_mtok": 0.28}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+# MiMo (Xiaomi) on both shared harnesses, like DeepSeek (platform.xiaomimimo.com).
+# Host is REGION-SPECIFIC to the account: Token-Plan (`tp-` keys) is
+# token-plan-<region>.xiaomimimo.com (e.g. -sgp Singapore, -cn China); pay-as-you-go
+# (`sk-` keys) is api.xiaomimimo.com. Models: mimo-v2.5-pro / mimo-v2.5. The -sgp
+# host below is verified working for a Singapore token plan — adjust to your region.
+- name: claude-code/mimo
+  model: mimo-v2.5-pro
+  runtime: claude-code
+  tool_profile: read-grep
+  auth_profile: mimo-anthropic
+  cost_model: '{"anthropic_base_url": "https://token-plan-sgp.xiaomimimo.com/anthropic", "env": {"ANTHROPIC_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_SONNET_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_OPUS_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mimo-v2.5-pro"}}'
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/mimo
+  model: mimo-v2.5-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: mimo-api-key      # value from $MIMO_API_KEY on the host
+  cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1"}'
+  knowledge_cutoff: 2025-06
+
+# Native agent CLI, bind-mounted (subscription sign-in on the host, no key). `agy`
+# is the Antigravity / Gemini CLI (it replaced `gemini`); Claude-Code-like, plain
+# text out, no -m (the model is the signed-in account's default).
+- name: agy/antigravity
+  model: antigravity              # informational: agy has no model flag
+  runtime: agy
+  tool_profile: read-grep
+  knowledge_cutoff: 2025-06
+
+# Wired but stubbed (no key/CLI yet): present so they enter the matrix the moment
+# creds/binaries arrive; until then each cleanly resolves to auth_failed/infra_error.
+- name: raw-api-loop/kimi
+  model: kimi-k2.6                # VERIFY-AT-WIRING: real model id
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: kimi-api-key
+  cost_model: '{"base_url": "https://api.moonshot.ai/v1"}'
+  knowledge_cutoff: 2025-06
+
+- name: pi-custom/mimo
+  model: mimo-v2.5
+  runtime: pi-custom
+  tool_profile: read-grep
+  auth_profile: mimo-api-key
   knowledge_cutoff: 2025-06
