@@ -471,15 +471,17 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     neutral audit prompt ("Sorry, I cannot fulfill your request… see the OWASP Top Ten") — a real
     model-behavior result, scored as-is (the uniform prompt is *not* tuned per model). A
     scoring-layer follow-up could distinguish a safety *refusal* from a true miss.
-  - **MiMo wired on both harnesses, live run blocked on a bad key.** MiMo (Xiaomi,
-    platform.xiaomimimo.com) also exposes Anthropic-compat (`/anthropic`, `mimo-anthropic`
-    profile) and OpenAI-compat (`/v1`, `mimo-api-key`) endpoints; both competitors are configured
-    (Token-Plan `tp-` keys → `token-plan-cn.xiaomimimo.com`, pay-as-you-go `sk-` →
-    `api.xiaomimimo.com`; model `mimo-v2.5-pro`). The supplied key returns **401 Invalid API Key**
-    on all four host/protocol combos, so no live run yet — which is the integrity rule working
-    (a rejected key → `auth_failed`, never a miss).
-  - **Still VERIFY-AT-WIRING (not yet live):** a valid MiMo key; native CLI
-    (`kimi-cli`/`pi-custom`) argv/output + their binaries.
+  - **MiMo (Xiaomi) live gate met (2026-05-28, junrar) — both harnesses HIT.** MiMo also exposes
+    Anthropic-compat (`/anthropic`, `mimo-anthropic` profile) and OpenAI-compat (`/v1`,
+    `mimo-api-key`) endpoints; the host is **region-specific** (the Token-Plan `tp-` key uses
+    `token-plan-sgp.xiaomimimo.com`, not the `-cn` host the docs implied). `claude-code/mimo`
+    (mimo-v2.5-pro) → 2 findings, CWE-22 @ L61+L35, 400 s, $0.84; `raw-api-loop/mimo` → 2 findings,
+    CWE-22 @ L61+L34, 189 s. So across DeepSeek + MiMo, all four API-harness combos ran end-to-end
+    and localized CWE-22 path-traversal findings to the vulnerable file (the P3 judge formally
+    adjudicates hit vs. a related real finding — several pointed at the prefix-match guard rather
+    than the L76 backslash zip-slip).
+  - **Still VERIFY-AT-WIRING (not yet live):** native CLI (`kimi-cli`/`pi-custom`) argv/output +
+    their binaries (no trusted official CLI installed yet).
 
 ## 9. P0 detailed breakdown (next up)
 
