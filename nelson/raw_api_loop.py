@@ -204,7 +204,8 @@ def _post_chat(url: str, payload: dict[str, Any], api_key: str) -> dict[str, Any
     """
     data = json.dumps(payload).encode("utf-8")
 
-    # model-controlled, so the http(s)-only URL-open audit warning is not a risk.
+    # operator-configured base_url, not model-controlled, so this S310 audit warning
+    # is acceptable here.
     req = urllib.request.Request(url, data=data, method="POST")  # noqa: S310
     req.add_header("Content-Type", "application/json")
     if api_key:
