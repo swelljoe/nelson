@@ -151,4 +151,21 @@ STANDARD_AUTH_PROFILES: dict[str, AuthProfile] = {
         name="openai-api-key",
         env={"OPENAI_API_KEY": "OPENAI_API_KEY"},
     ),
+    # raw-api-loop reads the key from the single container var NELSON_API_KEY,
+    # regardless of provider; each profile maps that target var to the provider's
+    # own host secret name. The secret *value* is supplied by the benchmark
+    # machine's environment — only the name lives here. (Native key env-var names
+    # for Moonshot/Kimi are VERIFY-AT-WIRING.)
+    "deepseek-api-key": AuthProfile(
+        name="deepseek-api-key",
+        env={"NELSON_API_KEY": "DEEPSEEK_API_KEY"},
+    ),
+    "mimo-api-key": AuthProfile(
+        name="mimo-api-key",
+        env={"NELSON_API_KEY": "MIMO_API_KEY"},
+    ),
+    "kimi-api-key": AuthProfile(
+        name="kimi-api-key",
+        env={"NELSON_API_KEY": "MOONSHOT_API_KEY"},  # VERIFY-AT-WIRING: var name
+    ),
 }

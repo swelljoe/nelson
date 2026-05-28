@@ -39,10 +39,13 @@ if TYPE_CHECKING:
 
 # Minimal Fedora base + the tools the agent's own grep/file tools shell out to.
 # The claude binary itself is bind-mounted at run time (see ClaudeCodeRuntime).
-IMAGE_TAG = "nelson-bench:fedora"
+# python3 backs the raw-api-loop runtime's in-container ReAct agent (stdlib only,
+# no pip). The tag carries a `-py` suffix so `ensure_image` rebuilds rather than
+# reusing an older python-less image cached under the bare `:fedora` tag.
+IMAGE_TAG = "nelson-bench:fedora-py"
 CONTAINERFILE = """\
 FROM registry.fedoraproject.org/fedora-minimal:41
-RUN microdnf install -y git ripgrep ca-certificates findutils shadow-utils \\
+RUN microdnf install -y git ripgrep ca-certificates findutils shadow-utils python3 \\
     && microdnf clean all
 # A real passwd entry so the agent's getpwuid() works and HOME is writable.
 RUN useradd -u 1000 -m -s /bin/bash agent
@@ -678,16 +681,26 @@ class BenchRunner:
         network: bool = True,
         run_timeout: float = 1800.0,
         max_budget_usd: float | None = 0.50,
+        preflight: bool = False,
     ):
         self.db = db
         self.backend = backend or PodmanBackend()
-        self.auth = auth or CredentialMountAuth()
-        self.claude_bin = Path(claude_bin) if claude_bin else _resolve_claude_bin()
+        # An explicitly-injected auth wins for every runtime (tests' FakeAuth, a
+        # future global OAuth). Left None, each runtime supplies its own default
+        # (claude -> credential mount, API-key runtimes -> env injection) in
+        # _select_auth, so the legacy claude-code default is preserved.
+        self._explicit_auth = auth
+        # Resolved lazily per-run (only the claude-code runtime needs it), so a
+        # host without `claude` can still run API-key/other runtimes; a missing
+        # claude binary then surfaces as infra_error on a claude run, not a
+        # construction crash.
+        self.claude_bin = Path(claude_bin) if claude_bin else None
         self.cache_dir = Path(cache_dir)
         self.runs_dir = Path(runs_dir)
         self.network = network
         self.run_timeout = run_timeout
         self.max_budget_usd = max_budget_usd
+        self.preflight = preflight
 
     def run_case(
         self, case: Case, competitor: Competitor, target_file: str
@@ -701,7 +714,15 @@ class BenchRunner:
         case_id = case.id if case.id is not None else self._case_id(case)
         run_id = self.db.create_run(case_id, comp_id, target_file)
 
+        # Function-body imports keep runtimes.py's module-level dependency on this
+        # module one-directional (no import cycle), matching the codebase idiom.
+        from .runtimes import RuntimeContext, get_runtime
+
         try:
+            # An unknown runtime is a config error: the model never got a fair
+            # look, so it is infra_error (handled alongside checkout/build), never
+            # a miss.
+            runtime = get_runtime(competitor.runtime)
             safe_ext = "".join(
                 ch if (ch.isalnum() or ch in ("-", "_", ".")) else "_"
                 for ch in case.ext_id
@@ -723,6 +744,21 @@ class BenchRunner:
             self.db.mark_run_infra_error(run_id, str(e))
             return RunResult(status="infra_error", error=str(e))
 
+        auth = self._select_auth(competitor, runtime)
+
+        # Cheap host-side auth probe (default off) so a dead API key fails before
+        # we spend on a container. A missing key is already auth_failed at
+        # auth.prepare(); this only avoids the wasted run.
+        if self.preflight:
+            pf = self._preflight(competitor)
+            if pf is not None and not pf.ok:
+                status = "auth_failed" if pf.status == "auth_failed" else "infra_error"
+                if status == "auth_failed":
+                    self.db.mark_run_auth_failed(run_id, pf.detail)
+                else:
+                    self.db.mark_run_infra_error(run_id, pf.detail)
+                return RunResult(status=status, error=pf.detail)
+
         name = f"nelson-run-{run_id}"
         # Managed manually (not TemporaryDirectory): the container writes into the
         # mounted config dir as a userns-mapped subuid, leaving files the host
@@ -730,21 +766,29 @@ class BenchRunner:
         staging = Path(tempfile.mkdtemp(prefix="nelson-auth-"))
         try:
             try:
-                material = self.auth.prepare(staging)
+                material = auth.prepare(staging)
             except RunnerError as e:
                 self.db.mark_run_auth_failed(run_id, str(e))
                 return RunResult(status="auth_failed", error=str(e))
 
-            spec = claude_code_spec(
-                competitor,
-                build_competitor_prompt(case, target_file),
-                checkout,
-                self.claude_bin,
-                material,
-                name=name,
-                network=self.network,
-                max_budget_usd=self.max_budget_usd,
-            )
+            try:
+                ctx = RuntimeContext(
+                    competitor=competitor,
+                    prompt=build_competitor_prompt(case, target_file),
+                    src_dir=checkout,
+                    auth=material,
+                    name=name,
+                    claude_bin=self.claude_bin,
+                    network=self.network,
+                    max_budget_usd=self.max_budget_usd,
+                )
+                spec = runtime.build_spec(ctx)
+            except RunnerError as e:
+                # e.g. a native CLI runtime whose binary isn't installed: a setup
+                # failure, never a miss.
+                self.db.mark_run_infra_error(run_id, str(e))
+                return RunResult(status="infra_error", error=str(e))
+
             self.db.start_run(run_id, container_id=name)
             started = time.monotonic()
             exec_result = self.backend.run(spec, self.run_timeout)
@@ -752,10 +796,58 @@ class BenchRunner:
         finally:
             _safe_rmtree(staging)
 
-        return self._finalize(run_id, exec_result, wall)
+        return self._finalize(run_id, exec_result, wall, runtime, competitor)
+
+    def _select_auth(self, competitor: Competitor, runtime) -> ContainerAuth:
+        """Pick the ContainerAuth for this run.
+
+        An explicitly-injected auth always wins. Otherwise a named ``auth_profile``
+        means API-key env injection; absent that, the runtime's own default
+        (claude credential mount, gemini credential mount, ...) is used. Resolution
+        of secrets is deferred to ``prepare()`` so selection itself never fails.
+        """
+        if self._explicit_auth is not None:
+            return self._explicit_auth
+        from .runtimes import auth_for_competitor
+
+        return auth_for_competitor(competitor, runtime)
+
+    def _preflight(self, competitor: Competitor):
+        """Host-side reachability/auth probe for OpenAI-compatible API runtimes.
+
+        Returns a PreflightResult, or None when preflight does not apply
+        (subscription/credential-mount runtimes, or no auth_profile). Reuses the
+        host-side OpenAIAPIAdapter purely as a cheap probe (it maps 401/403 ->
+        auth_failed, 429 -> rate_limited, connect error -> infra_error).
+        """
+        from .agents import OpenAIAPIAdapter
+        from .auth import STANDARD_AUTH_PROFILES
+        from .runtimes import (
+            API_KEY_RUNTIMES,
+            DEFAULT_OPENAI_BASE_URL,
+            parse_cost_model,
+        )
+
+        if not competitor.auth_profile or competitor.runtime not in API_KEY_RUNTIMES:
+            return None
+        profile = STANDARD_AUTH_PROFILES.get(competitor.auth_profile)
+        if profile is None:
+            return None
+        base_url = parse_cost_model(competitor.cost_model).get(
+            "base_url", DEFAULT_OPENAI_BASE_URL
+        )
+        adapter = OpenAIAPIAdapter(
+            model=competitor.model, base_url=str(base_url), auth_profile=profile
+        )
+        return adapter.preflight()
 
     def _finalize(
-        self, run_id: int, exec_result: ContainerExecResult, wall: float
+        self,
+        run_id: int,
+        exec_result: ContainerExecResult,
+        wall: float,
+        runtime,
+        competitor: Competitor,
     ) -> RunResult:
         combined = exec_result.stdout + exec_result.stderr
         if exec_result.timed_out:
@@ -804,14 +896,18 @@ class BenchRunner:
                 transcript=combined,
             )
 
-        text, tin, tout, cost = extract_result(exec_result.stdout)
-        findings = parse_competitor_findings(text)
+        # Each runtime owns its stdout contract: claude-code/raw-api-loop emit a
+        # claude-shaped result object (extract_result), gemini-cli emits its own
+        # envelope. parse_output normalizes them to text + usage + findings.
+        parsed = runtime.parse_output(exec_result, competitor)
+        text = parsed.final_text
+        findings = parsed.findings
         transcript_path = self._write_transcript(run_id, exec_result.stdout)
         self.db.complete_run(
             run_id,
-            tokens_in=tin,
-            tokens_out=tout,
-            cost_usd=cost,
+            tokens_in=parsed.tokens_in,
+            tokens_out=parsed.tokens_out,
+            cost_usd=parsed.cost,
             wall_clock_s=wall,
             transcript_path=str(transcript_path),
             raw_output=text[:10000],
@@ -832,9 +928,9 @@ class BenchRunner:
             findings=findings,
             raw_output=text,
             transcript=exec_result.stdout,
-            tokens_in=tin,
-            tokens_out=tout,
-            cost_usd=cost,
+            tokens_in=parsed.tokens_in,
+            tokens_out=parsed.tokens_out,
+            cost_usd=parsed.cost,
             wall_clock_s=wall,
             container_id=exec_result.container_id,
         )

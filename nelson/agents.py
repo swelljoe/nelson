@@ -190,6 +190,35 @@ def _parse_one(item: dict) -> Finding:
     )
 
 
+def parse_gemini_envelope(raw: str) -> tuple[str, int | None, int | None]:
+    """Pull (final_text, tokens_in, tokens_out) from ``gemini --output-format json``.
+
+    The envelope is ``{"response": <text>, "stats": {"models": {<name>:
+    {"tokens": {"input": .., "candidates": ..}}}}}``. Tokens are summed across
+    every model the CLI used (router + main). Falls back to the raw text with no
+    token counts when the output isn't the expected JSON object. Shared by the
+    host-subprocess :class:`GeminiCLIAdapter` and the containerized gemini-cli
+    runtime so both parse the envelope identically.
+    """
+    try:
+        envelope = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return raw, None, None
+    if not (isinstance(envelope, dict) and "response" in envelope):
+        return raw, None, None
+    stats = envelope.get("stats", {})
+    models_stats = stats.get("models", {}) if isinstance(stats, dict) else {}
+    total_in = 0
+    total_out = 0
+    for model_stats in models_stats.values():
+        tokens = model_stats.get("tokens", {}) if isinstance(model_stats, dict) else {}
+        total_in += tokens.get("input", 0) or 0
+        total_out += tokens.get("candidates", 0) or 0
+    tin = total_in if (total_in or total_out) else None
+    tout = total_out if (total_in or total_out) else None
+    return str(envelope["response"]), tin, tout
+
+
 def _run_cli(
     cmd: list[str],
     timeout: int,
@@ -475,29 +504,9 @@ class GeminiCLIAdapter(AgentAdapter):
             )
 
         # Parse the JSON output from gemini --output-format json
-        text_content = raw
-        tokens_in = None
-        tokens_out = None
-        try:
-            envelope = json.loads(raw)
-            if isinstance(envelope, dict) and "response" in envelope:
-                text_content = envelope["response"]
-                # Sum tokens across all models used (router + main)
-                stats = envelope.get("stats", {})
-                models_stats = stats.get("models", {})
-                total_in = 0
-                total_out = 0
-                for model_stats in models_stats.values():
-                    tokens = model_stats.get("tokens", {})
-                    total_in += tokens.get("input", 0)
-                    total_out += tokens.get("candidates", 0)
-                if total_in or total_out:
-                    tokens_in = total_in
-                    tokens_out = total_out
-        except (json.JSONDecodeError, TypeError):
-            text_content = raw
+        text_content, tokens_in, tokens_out = parse_gemini_envelope(raw)
 
-        findings = parse_findings(str(text_content))
+        findings = parse_findings(text_content)
         return AgentResult(
             findings=findings,
             raw_output=raw,

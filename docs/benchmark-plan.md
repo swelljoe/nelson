@@ -1,6 +1,6 @@
 # Nelson Benchmark Harness — Implementation Plan
 
-> Status: P6 landed (2026-05-28); P7 next. Written 2026-05-26.
+> Status: P7 landed (2026-05-28) — final phase; benchmark feature-complete. Written 2026-05-26.
 > This document is the durable source of truth for the benchmark effort. Update it as phases land.
 
 ## 1. Goal
@@ -416,8 +416,37 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     cell when it can prove the case predates that competitor's cutoff — missing dates
     default to fresh/included. Competitors are **config** (`--competitors roster.yaml`):
     declared ones are upserted, absent active ones flipped to `retired` (history kept).
-- **P7 — More runtimes**: deepseek, kimi, raw-api loop (MiMo), gemini-cli, pi-custom — each
-  a new competitor (verify CLI/auth per vendor).
+- **P7 — More runtimes** ✅ *(branch `bench-p7-runtimes`; gates green: ruff + format + ty +
+  255 pytest; image builds with python3; NOT merged — user merges per-phase)*. Closed the
+  one gap blocking every non-Claude model: `BenchRunner.run_case` was hardcoded to claude-code.
+  Delivered a **runtime-dispatch layer** (`nelson/runtimes.py`): a `ContainerRuntime` registry
+  keyed by `competitors.runtime`, with the claude path refactored into `ClaudeCodeRuntime` at
+  zero behavior change (existing runner tests untouched-green). Runtimes registered:
+  - **`raw-api-loop`** (the shared, apples-to-apples *model* harness — user chose "Both"): a
+    **stdlib-only** in-container ReAct agent (`nelson/raw_api_loop.py`) with sandboxed
+    `read_file`/`grep`/`list_dir` tools confined to `/src` (realpath-guarded against `..`,
+    absolute, and symlink escapes), driving any OpenAI-compatible endpoint and emitting a
+    claude-shaped result object so parsing stays uniform. DeepSeek/MiMo/Kimi are pure provider
+    config (`base_url` + per-token pricing in `cost_model` JSON; key via auth profile).
+  - **`gemini-cli`** (native, bind-mounted host binary; subscription-auth credential mount).
+  - **`deepseek-cli` / `kimi-cli` / `pi-custom`** (native vendor agents): wired + unit-tested
+    but stubbed — an absent host binary resolves to `infra_error`, so they compete the moment
+    the CLI is installed and verified.
+  - **Auth bridge:** `EnvKeyAuth` (resolves an AuthProfile's secret *names* → container `-e`
+    vars; a missing key → `auth_failed`, the integrity hinge), `GeminiCredentialMountAuth`,
+    and `auth_for_competitor` (profile → env injection; else the runtime's default). New
+    `STANDARD_AUTH_PROFILES`: deepseek/mimo/kimi (secret names only).
+  - **Preflight** (`BenchRunner(preflight=…)`, default-off): a cheap host-side OpenAI-compatible
+    probe so a dead key fails before container spend (integrity already guaranteed by EnvKeyAuth).
+  - **Image:** CONTAINERFILE adds `python3`; `IMAGE_TAG` bumped to `nelson-bench:fedora-py` so
+    `ensure_image` rebuilds. Verified live: python3 3.13.9 + ripgrep present, script compiles.
+  - **Integrity carried through:** unknown runtime / missing binary / missing key → never a
+    miss. No DB schema change (`runtime`/`auth_profile`/`cost_model` already existed;
+    `SCHEMA_VERSION` stays 5).
+  - **VERIFY-AT-WIRING (flagged in code, not guessed):** gemini auto-approve flag + creds path;
+    each provider's real base_url / model id / key env-var name; native CLI argv/output shapes;
+    whether DeepSeek/Kimi expose an Anthropic-compatible endpoint (a second shared harness via
+    the mounted `claude` binary). **Live gate pending creds:** a real DeepSeek/MiMo run.
 
 ## 9. P0 detailed breakdown (next up)
 

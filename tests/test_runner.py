@@ -504,6 +504,44 @@ def test_run_case_timeout_is_infra_error(tmp_path, monkeypatch):
     assert result.error == "timeout"
 
 
+def test_run_case_dispatches_on_runtime(tmp_path, monkeypatch):
+    """run_case routes to the competitor's runtime, not a hardcoded claude path."""
+    from nelson import runtimes
+    from nelson.runtimes import ParsedOutput, register_runtime
+
+    used: dict[str, bool] = {}
+
+    class _FakeRuntime:
+        name = "fake-rt"
+
+        def default_auth(self):
+            return FakeAuth()
+
+        def build_spec(self, ctx):
+            used["build_spec"] = True
+            return ContainerSpec(image="img", argv=["echo"], name=ctx.name)
+
+        def parse_output(self, exec_result, competitor):
+            used["parse_output"] = True
+            return ParsedOutput("[]", 1, 2, 0.0, [])
+
+    register_runtime(_FakeRuntime())
+    monkeypatch.setitem(runtimes._RUNTIMES, "fake-rt", _FakeRuntime())
+
+    db = Database(tmp_path / "t.db")
+    backend = FakeBackend(ContainerExecResult(0, "[]", ""))
+    runner = _runner(db, backend, monkeypatch, tmp_path)
+
+    result = runner.run_case(
+        _vetted_case(),
+        Competitor(name="fake/m", model="m", runtime="fake-rt"),
+        "x.js",
+    )
+
+    assert result.status == "complete"
+    assert used == {"build_spec": True, "parse_output": True}
+
+
 def test_run_case_requires_derived_case(tmp_path, monkeypatch):
     from nelson.runner import RunnerError
 
