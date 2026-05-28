@@ -454,12 +454,17 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
   - **Integrity carried through:** unknown runtime / missing binary / missing key → never a
     miss. No DB schema change (`runtime`/`auth_profile`/`cost_model` already existed;
     `SCHEMA_VERSION` stays 5).
-  - **VERIFY-AT-WIRING (flagged in code, not guessed):** gemini auto-approve flag + creds path;
-    each provider's real base_url / model id / key env-var name; native CLI argv/output shapes.
-    DeepSeek's Anthropic-compat endpoint is **confirmed** (`/anthropic`, `ANTHROPIC_AUTH_TOKEN`,
-    models `deepseek-v4-pro`/`-flash` per api-docs.deepseek.com) and now the preferred DeepSeek
-    harness; the model ids still want a live confirm. **Live gate pending creds + a vetted case:**
-    a real DeepSeek run on both harnesses (the checkout has no corpus DB yet).
+  - **Live gate met (2026-05-28, DeepSeek on the junrar GHSA-j273 CWE-22 case).** Both shared
+    harnesses detected the planted zip-slip end-to-end against the real DeepSeek API:
+    `claude-code/deepseek` (deepseek-v4-pro, `/anthropic` + `ANTHROPIC_AUTH_TOKEN`) → 1 finding,
+    CWE-22 @ L76, 164 s, $0.48; `raw-api-loop/deepseek` (deepseek-chat→v4-flash, OpenAI-compat)
+    → 2 findings, CWE-22 @ L82+L67, 133 s, $0.028. The gate also surfaced a real raw-api-loop
+    bug (the ReAct agent hit its 12-step cap mid-analysis and, on the forced-final turn, emitted
+    a native-format tool call as text → 0 findings); fixed by an explicit forced-final
+    instruction + a larger default step budget (12→20), after which the same model produced a
+    clean JSON hit. Endpoint values confirmed from api-docs.deepseek.com.
+  - **Still VERIFY-AT-WIRING (not yet live):** gemini auto-approve flag + creds path; MiMo/Kimi
+    base_url / model id / key env-var names; native CLI (`kimi-cli`/`pi-custom`) argv/output.
 
 ## 9. P0 detailed breakdown (next up)
 
