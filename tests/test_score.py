@@ -606,6 +606,9 @@ def test_needs_scoring_accounts_for_fp(tmp_path):
     detection_only = Scorer(db, FakeJudge(TruthVerdict(True)))
     detection_only.score_run(run_id)
     assert not detection_only.needs_scoring(run_id)  # detection settled
+    assert detection_only.needs_scoring(
+        run_id, include_precision=True
+    )  # FP still missing in persisted score
 
     precision = Scorer(
         db,

@@ -1463,7 +1463,10 @@ def bench_leaderboard(db_path: str, html_path: str | None, tolerance: int):
     scorer = Scorer(db, ClaudeTruthJudge(), tolerance=tolerance)
     run_scores = [scorer.load_run_score(r["id"]) for r in rows]
     unscored = sum(
-        1 for r in rows if r["status"] == "complete" and scorer.needs_scoring(r["id"])
+        1
+        for r in rows
+        if r["status"] == "complete"
+        and scorer.needs_scoring(r["id"], include_precision=True)
     )
     if unscored:
         click.echo(

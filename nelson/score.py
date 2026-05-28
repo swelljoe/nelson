@@ -948,15 +948,19 @@ class Scorer:
             **meta,
         )
 
-    def needs_scoring(self, run_id: int) -> bool:
+    def needs_scoring(
+        self, run_id: int, *, include_precision: bool | None = None
+    ) -> bool:
         """True if scoring this complete run would do new work (localize/judge).
 
         A run needs scoring if any finding is not yet localized, any localized
-        finding has not yet been truth-judged, or — when this Scorer does
-        precision — any FP-eligible finding has not yet been FP-judged. A
+        finding has not yet been truth-judged, or — when precision is included —
+        any FP-eligible finding has not yet been FP-judged. A
         zero-finding complete run reports as not-needing (its outcome is a settled
         miss, recomputable for free).
         """
+        if include_precision is None:
+            include_precision = self._scores_precision
         run = self.db.get_run(run_id)
         if run is None or run["status"] != "complete":
             return False
@@ -966,7 +970,7 @@ class Scorer:
             if row["matches_ground_truth"] and row["judge_truth_verdict"] is None:
                 return True
             if (
-                self._scores_precision
+                include_precision
                 and row["judge_fp_verdict"] is None
                 and _persisted_fp_eligible(
                     row["matches_ground_truth"], row["judge_truth_verdict"]
