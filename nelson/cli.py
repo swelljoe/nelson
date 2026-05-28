@@ -1277,17 +1277,17 @@ def _emit_detection_report(reports) -> None:
     """Per-competitor detection table."""
     click.echo(
         f"\n{'COMPETITOR':<26} {'DET':>5} {'HIT':>4} {'MISS':>4} "
-        f"{'JERR':>4} {'EXCL':>4} {'JUDGE$':>8}"
+        f"{'JERR':>4} {'REFU':>4} {'EXCL':>4} {'JUDGE$':>8}"
     )
     for d in reports:
         rate = f"{d.detection_rate:.0%}" if d.eligible else "-"
         click.echo(
             f"{d.competitor_name:<26} {rate:>5} {d.hits:>4} {d.misses:>4} "
-            f"{d.judge_error:>4} {d.excluded:>4} ${d.judge_cost:>7.3f}"
+            f"{d.judge_error:>4} {d.refused:>4} {d.excluded:>4} ${d.judge_cost:>7.3f}"
         )
     click.echo(
-        "\nDET = hits / eligible (hits + genuine misses). "
-        "JERR (undetermined) and EXCL (auth/infra) are never counted as misses."
+        "\nDET = hits / eligible (hits + genuine misses). JERR (undetermined), "
+        "REFU (model refused) and EXCL (auth/infra) are never counted as misses."
     )
 
 
@@ -1364,6 +1364,7 @@ def bench_score(
     """
     from .score import (
         ClaudeFPJudge,
+        ClaudeRefusalJudge,
         ClaudeTruthJudge,
         GitCodeProvider,
         Scorer,
@@ -1380,6 +1381,9 @@ def bench_score(
         tolerance=tolerance,
         fp_judge=fp_judge,
         code=code,
+        # Cheap (fires only on zero-finding, contract-ignoring runs) and
+        # detection-integral: a policy refusal is marked refused, not a miss.
+        refusal_judge=ClaudeRefusalJudge(model=judge_model),
     )
 
     if run_id is not None:
@@ -1645,7 +1649,13 @@ def bench_loop(
     from .automate import load_competitors, run_once
     from .corpus import CorpusPipeline, CVDSeedSource, load_manifest_dir
     from .runner import BenchRunner
-    from .score import ClaudeFPJudge, ClaudeTruthJudge, GitCodeProvider, Scorer
+    from .score import (
+        ClaudeFPJudge,
+        ClaudeRefusalJudge,
+        ClaudeTruthJudge,
+        GitCodeProvider,
+        Scorer,
+    )
 
     db = Database(db_path)
 
@@ -1672,6 +1682,7 @@ def bench_loop(
             tolerance=tolerance,
             fp_judge=ClaudeFPJudge(model=fp_judge_model),
             code=GitCodeProvider(root=fp_cache_dir),
+            refusal_judge=ClaudeRefusalJudge(model=judge_model),
         )
 
     pipeline = None

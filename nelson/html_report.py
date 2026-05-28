@@ -725,6 +725,7 @@ _LEADERBOARD_EXTRA_CSS = """\
 .cell-hit { color: var(--green); font-weight: 700; }
 .cell-miss { color: var(--text-muted); }
 .cell-jerr { color: var(--yellow); }
+.cell-refu { color: var(--cyan); font-style: italic; }
 .cell-excl { color: var(--orange); }
 .cell-none { color: var(--border); }
 """
@@ -852,6 +853,7 @@ _OUTCOME_CELL = {
     "hit": ("cell-hit", "HIT"),
     "miss": ("cell-miss", "miss"),
     "judge_error": ("cell-jerr", "jerr"),
+    "refused": ("cell-refu", "refu"),
     "excluded": ("cell-excl", "excl"),
 }
 
@@ -951,7 +953,8 @@ def generate_leaderboard_report(
     parts.append("</table>")
     parts.append(
         '<p class="muted">Detect = case hits / eligible (hits + genuine misses); '
-        "undetermined and auth/infra-excluded cases are not in the denominator. "
+        "undetermined, refused, and auth/infra-excluded cases are not in the "
+        "denominator. "
         "Precision = true findings / (true + false positives). Cost/latency are "
         "the competitor's own spend per audited case — judge spend is shown "
         "separately and never enters the Pareto trade-off. ★ = on a Pareto "
@@ -1025,7 +1028,8 @@ def generate_leaderboard_report(
         parts.append("</table></div>")
         parts.append(
             '<p class="muted">HIT = detected; miss = looked, found nothing; '
-            "jerr = judge undetermined (out of denominator); excl = auth/infra "
+            "jerr = judge undetermined (out of denominator); refu = model refused "
+            "the task (out of denominator, never a miss); excl = auth/infra "
             "failure (never a miss); · = not run.</p>"
         )
 

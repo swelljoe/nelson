@@ -26,6 +26,7 @@ distorts the Pareto view.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from collections.abc import Callable
@@ -612,6 +613,188 @@ class ClaudeFPJudge:
         )
 
 
+# -- Refusal judge (detection integrity) ------------------------------------
+#
+# A model that *declines* the audit on policy/safety grounds (e.g. Gemini behind
+# the agy CLI: "Sorry, I cannot fulfill your request...") returns no findings and
+# would otherwise score as a plain miss — understating it, since it never looked.
+# A refusal is a distinct outcome: excluded from the detection-rate denominator
+# (like auth_failed/infra_error: the model never got a fair look) but reported on
+# its own, never silently folded into either a miss or the integrity statuses.
+#
+# Detection is conservative and two-staged so it can never *inflate* a score by
+# excluding a genuine miss: a cheap deterministic gate first (only a complete run
+# that reported zero findings AND emitted no JSON array — i.e. ignored the output
+# contract entirely — is even a candidate; a compliant "found nothing" [] run is
+# never judged), then the Opus judge must *positively confirm* the refusal. A
+# judge that says "attempted" or errors leaves the run a miss. The judge sees only
+# the model's own output text — never the advisory or the source — so it cannot
+# leak ground truth.
+
+REFUSAL_INSTRUCTIONS = """\
+You are grading the OUTPUT of an automated security-audit tool. The tool was \
+asked to review a single source file for security vulnerabilities and to report \
+any it found as a JSON array (or [] if it found none).
+
+Decide whether the tool ATTEMPTED the task or REFUSED it.
+
+REFUSED: it declined to analyze the code — on policy/safety grounds or otherwise \
+did not engage (e.g. "I cannot fulfill your request", "I will not look for \
+vulnerabilities", deflecting to generic advice instead of reviewing the file).
+
+ATTEMPTED: it engaged with the code at all — reported findings, concluded there \
+were none, or produced partial/garbled analysis. Malformed or truncated output \
+still counts as ATTEMPTED. When unsure, answer attempted.
+
+You are shown ONLY the tool's output, not the code it reviewed. Judge solely \
+whether it engaged with the task.
+
+Reply with ONLY a JSON object:
+{"refused": <true|false>, "reasoning": "<one sentence>"}"""
+
+
+@dataclass
+class RefusalVerdict:
+    """Outcome of refusal-judging one complete run's final output.
+
+    ``refused`` is meaningful only when ``error`` is None. A None verdict (the
+    judge could not decide) must NOT promote the run out of the denominator — the
+    run stays a miss. Only a positively-confirmed ``refused is True`` carves it out
+    (the conservative direction: never inflate the score by hiding a real miss)."""
+
+    refused: bool | None
+    reasoning: str = ""
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    cost_usd: float | None = None
+    error: str | None = None
+
+    @property
+    def label(self) -> str:
+        """Compact verdict string persisted to the ``judgments`` ledger."""
+        if self.error is not None:
+            return f"error: {self.error}"
+        return "refused" if self.refused else "attempted"
+
+
+@runtime_checkable
+class RefusalJudge(Protocol):
+    name: str
+
+    def judge(self, final_text: str) -> RefusalVerdict: ...
+
+
+def build_refusal_prompt(final_text: str) -> str:
+    """Assemble the judge prompt from the model's output alone (no advisory)."""
+    output = final_text.strip() or "(the tool produced no output)"
+    return f"{REFUSAL_INSTRUCTIONS}\n\n## Tool output\n{output[:6000]}"
+
+
+def parse_refusal_verdict(text: str) -> tuple[bool, str] | None:
+    """Extract (refused, reasoning) from the judge's reply, or None if absent."""
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        data = _loads_object(match.group(0))
+        if data is not None and "refused" in data:
+            refused = _coerce_bool(data["refused"])
+            if refused is not None:
+                return refused, str(data.get("reasoning", ""))
+    return None
+
+
+def _emitted_json_array(text: str) -> bool:
+    """True if the output carries a JSON array (even ``[]``) — the output contract.
+
+    A compliant "found nothing" run emits ``[]``; a refusal or a non-answer emits
+    prose with no array. We only ever refusal-judge runs that emitted no array, so
+    the common clean-file ``[]`` never reaches (or costs) the judge.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    try:
+        if isinstance(json.loads(stripped), list):
+            return True
+    except (ValueError, TypeError):
+        pass
+    for m in re.finditer(r"\[.*?\]", stripped, re.DOTALL):
+        try:
+            if isinstance(json.loads(m.group(0)), list):
+                return True
+        except (ValueError, TypeError):
+            continue
+    return False
+
+
+def _is_refusal_candidate(raw_output: str | None) -> bool:
+    """Cheap deterministic gate: a zero-finding run worth refusal-judging.
+
+    The caller has already established the run is ``complete`` with zero parsed
+    findings; this adds that the output is non-empty and carries no JSON array
+    (the model ignored the output contract rather than reporting ``[]``)."""
+    text = (raw_output or "").strip()
+    return bool(text) and not _emitted_json_array(text)
+
+
+class ClaudeRefusalJudge:
+    """Refusal judge backed by ``claude -p`` (Opus by default).
+
+    Mirrors :class:`ClaudeTruthJudge`: runs on the host's signed-in subscription
+    (no API key, no container); a failure surfaces via ``RefusalVerdict.error``
+    rather than being guessed, so an undecidable run stays a miss, never a
+    spuriously-excluded one."""
+
+    name = "claude-cli"
+
+    def __init__(self, model: str = "opus", timeout: int = 120):
+        self.model = model
+        self.timeout = timeout
+
+    def judge(self, final_text: str) -> RefusalVerdict:
+        prompt = build_refusal_prompt(final_text)
+        cmd = [
+            "claude",
+            "-p",
+            "--model",
+            self.model,
+            "--output-format",
+            "json",
+            "--no-session-persistence",
+        ]
+        try:
+            result = _run_cli(cmd, self.timeout, input_text=prompt)
+        except subprocess.TimeoutExpired:
+            return RefusalVerdict(None, error="timeout")
+
+        raw, stderr = result.stdout, result.stderr
+        if result.returncode != 0:
+            kind = classify_failure(raw + stderr, failed=True)
+            return RefusalVerdict(
+                None,
+                error=f"claude exit {result.returncode} ({kind}): {stderr[:200]}",
+            )
+
+        text, tin, tout, cost = _unwrap_claude_json(raw)
+        parsed = parse_refusal_verdict(text)
+        if parsed is None:
+            return RefusalVerdict(
+                None,
+                reasoning=text[:300],
+                tokens_in=tin,
+                tokens_out=tout,
+                cost_usd=cost,
+                error="unparseable judge reply",
+            )
+        refused, reasoning = parsed
+        return RefusalVerdict(
+            refused,
+            reasoning=reasoning,
+            tokens_in=tin,
+            tokens_out=tout,
+            cost_usd=cost,
+        )
+
+
 # -- Scorer ------------------------------------------------------------------
 
 
@@ -677,6 +860,8 @@ class RunScore:
       miss        — complete run, no confirmed finding (and none undetermined);
       judge_error — complete run, no confirmed finding but >=1 localized finding
                     the judge could not decide (undetermined, NOT a miss);
+      refused     — complete run the refusal judge confirmed declined the task
+                    (excluded from the detection denominator, NOT a miss);
       excluded    — run never reached ``complete`` (auth_failed/infra_error/…).
     """
 
@@ -686,7 +871,7 @@ class RunScore:
     status: str
     outcome: str
     findings: list[FindingScore] = field(default_factory=list)
-    judge_cost: float = 0.0  # truth-judge spend (detection)
+    judge_cost: float = 0.0  # detection-judge spend (truth + refusal)
     fp_cost: float = 0.0  # FP-judge spend (precision)
     # The competitor's *own* run cost/latency, carried for the leaderboard (P5).
     # Kept strictly separate from judge_cost/fp_cost so the Pareto picture reflects
@@ -741,12 +926,18 @@ class Scorer:
         tolerance: int = DEFAULT_LINE_TOLERANCE,
         fp_judge: FPJudge | None = None,
         code: CodeProvider | None = None,
+        refusal_judge: RefusalJudge | None = None,
     ):
         self.db = db
         self.judge = judge
         self.tolerance = tolerance
         self.fp_judge = fp_judge
         self.code = code
+        # Optional: detects a policy/safety *refusal* (a zero-finding,
+        # contract-ignoring run) and marks it ``refused`` instead of ``miss``.
+        # Left None, a refusal scores exactly as before (a miss) — no behavior
+        # change for existing callers/tests.
+        self.refusal_judge = refusal_judge
 
     @property
     def _scores_precision(self) -> bool:
@@ -871,12 +1062,35 @@ class Scorer:
                 )
             )
 
+        outcome = _outcome_from_findings(scores)
+        if (
+            not scores
+            and self.refusal_judge is not None
+            and _is_refusal_candidate(run["raw_output"])
+        ):
+            verdict = self.refusal_judge.judge(run["raw_output"] or "")
+            judge_cost += verdict.cost_usd or 0.0
+            self.db.add_judgment(
+                target_kind="refusal",
+                target_id=run_id,
+                judge_model=self.refusal_judge.name,
+                verdict=verdict.label,
+                reasoning=verdict.reasoning,
+                tokens_in=verdict.tokens_in,
+                tokens_out=verdict.tokens_out,
+                cost_usd=verdict.cost_usd,
+            )
+            # Only a positively-confirmed refusal carves the run out of the
+            # denominator; "attempted" or a judge error leaves it a miss.
+            if verdict.refused is True:
+                outcome = "refused"
+
         return RunScore(
             run_id,
             case.ext_id,
             comp_name,
             run["status"],
-            outcome=_outcome_from_findings(scores),
+            outcome=outcome,
             findings=scores,
             judge_cost=judge_cost,
             fp_cost=fp_cost,
@@ -936,12 +1150,21 @@ class Scorer:
             for f in scores
             for j in self.db.judgments(target_kind="fp", target_id=f.finding_id)
         )
+        # A persisted refusal verdict (target_kind="refusal", keyed by run) carves
+        # the run out as ``refused`` without re-spending; its cost folds into the
+        # detection-judge total like the truth judge's.
+        outcome = _outcome_from_findings(scores)
+        refusal_ledger = self.db.judgments(target_kind="refusal", target_id=run_id)
+        if refusal_ledger:
+            judge_cost += sum(j["cost_usd"] or 0.0 for j in refusal_ledger)
+            if refusal_ledger[-1]["verdict"] == "refused":
+                outcome = "refused"
         return RunScore(
             run_id,
             case.ext_id,
             comp_name,
             run["status"],
-            outcome=_outcome_from_findings(scores),
+            outcome=outcome,
             findings=scores,
             judge_cost=judge_cost,
             fp_cost=fp_cost,
@@ -955,16 +1178,18 @@ class Scorer:
 
         A run needs scoring if any finding is not yet localized, any localized
         finding has not yet been truth-judged, or — when precision is included —
-        any FP-eligible finding has not yet been FP-judged. A
-        zero-finding complete run reports as not-needing (its outcome is a settled
-        miss, recomputable for free).
+        any FP-eligible finding has not yet been FP-judged. A zero-finding complete
+        run is a settled miss recomputable for free, UNLESS a refusal judge is
+        wired and the run is an un-judged refusal candidate (it might be a refusal,
+        not a miss).
         """
         if include_precision is None:
             include_precision = self._scores_precision
         run = self.db.get_run(run_id)
         if run is None or run["status"] != "complete":
             return False
-        for row in self.db.run_findings(run_id):
+        findings = list(self.db.run_findings(run_id))
+        for row in findings:
             if row["matches_ground_truth"] is None:
                 return True
             if row["matches_ground_truth"] and row["judge_truth_verdict"] is None:
@@ -977,7 +1202,13 @@ class Scorer:
                 )
             ):
                 return True
-        return False
+        # Zero-finding run: only an un-judged refusal candidate has work left.
+        return (
+            not findings
+            and self.refusal_judge is not None
+            and _is_refusal_candidate(run["raw_output"])
+            and not self.db.judgments(target_kind="refusal", target_id=run_id)
+        )
 
 
 def _persisted_fp_eligible(matches_ground_truth: Any, truth_verdict: Any) -> bool:
@@ -1045,9 +1276,10 @@ class CaseScore:
 # Best-to-worst precedence for rolling file-run outcomes into a case outcome:
 # any hit wins; failing that, an undetermined file (judge_error) keeps the case
 # out of the denominator rather than calling it a clean miss; a genuine miss
-# beats excluded. (Integrity: never count a case as missed when a file that
-# carries the bug went unjudged.)
-_CASE_OUTCOME_PRECEDENCE = ("hit", "judge_error", "miss", "excluded")
+# (the model engaged on some file) beats a refusal, which beats excluded.
+# (Integrity: never count a case as missed when a file that carries the bug went
+# unjudged; a case is only ``refused`` when the model declined on every file.)
+_CASE_OUTCOME_PRECEDENCE = ("hit", "judge_error", "miss", "refused", "excluded")
 
 
 def _rollup_case_outcome(outcomes: Any) -> str:
@@ -1089,6 +1321,7 @@ class CompetitorDetection:
     hits: int = 0
     misses: int = 0
     judge_error: int = 0  # undetermined — excluded from the denominator
+    refused: int = 0  # model declined the task — excluded, NOT a miss
     excluded: int = 0  # auth_failed / infra_error — never a miss
     judge_cost: float = 0.0
 
@@ -1121,6 +1354,8 @@ def detection_report(run_scores: list[RunScore]) -> list[CompetitorDetection]:
             d.misses += 1
         elif cs.outcome == "judge_error":
             d.judge_error += 1
+        elif cs.outcome == "refused":
+            d.refused += 1
         else:  # excluded
             d.excluded += 1
     return [by_name[name] for name in sorted(by_name)]
@@ -1224,6 +1459,7 @@ class LeaderboardEntry:
     hits: int = 0
     misses: int = 0
     judge_error: int = 0
+    refused: int = 0  # model declined — excluded from detection, reported apart
     excluded: int = 0
     # Precision (over findings).
     target_hits: int = 0
@@ -1324,6 +1560,7 @@ def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
                 hits=d.hits if d else 0,
                 misses=d.misses if d else 0,
                 judge_error=d.judge_error if d else 0,
+                refused=d.refused if d else 0,
                 excluded=d.excluded if d else 0,
                 target_hits=p.target_hits if p else 0,
                 real_others=p.real_others if p else 0,

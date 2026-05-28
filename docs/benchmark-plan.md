@@ -1,6 +1,8 @@
 # Nelson Benchmark Harness — Implementation Plan
 
-> Status: P7 landed (2026-05-28) — final phase; benchmark feature-complete. Written 2026-05-26.
+> Status: P7 landed + merged (PR #14); post-P7 `refused` outcome + Gemini-via-direct-API on branch
+> `bench-refusal-outcome` (2026-05-28; prompt left unchanged). Benchmark feature-complete.
+> Written 2026-05-26.
 > This document is the durable source of truth for the benchmark effort. Update it as phases land.
 
 ## 1. Goal
@@ -469,8 +471,8 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     the host `agy`; `AgyCredentialMountAuth` mounts the `~/.gemini` sign-in). On the junrar case
     the harness ran cleanly end-to-end, but the **Gemini model behind Antigravity refused** the
     neutral audit prompt ("Sorry, I cannot fulfill your request… see the OWASP Top Ten") — a real
-    model-behavior result, scored as-is (the uniform prompt is *not* tuned per model). A
-    scoring-layer follow-up could distinguish a safety *refusal* from a true miss.
+    model-behavior result, scored as-is (the uniform prompt is *not* tuned per model). This drove
+    the post-P7 follow-up below (prompt reword + a `refused` scoring outcome).
   - **MiMo (Xiaomi) live gate met (2026-05-28, junrar) — both harnesses HIT.** MiMo also exposes
     Anthropic-compat (`/anthropic`, `mimo-anthropic` profile) and OpenAI-compat (`/v1`,
     `mimo-api-key`) endpoints; the host is **region-specific** (the Token-Plan `tp-` key uses
@@ -482,6 +484,50 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     than the L76 backslash zip-slip).
   - **Still VERIFY-AT-WIRING (not yet live):** native CLI (`kimi-cli`/`pi-custom`) argv/output +
     their binaries (no trusted official CLI installed yet).
+
+- **Post-P7 — `refused` outcome + Gemini via direct API** ✅ *(branch `bench-refusal-outcome`)*.
+  Triggered by the agy/Gemini refusal. The prompt was **deliberately left unchanged** (see the
+  reword investigation below); two things shipped: a `refused` scoring outcome, and a working
+  Gemini competitor via the direct API.
+  - **`refused` scoring outcome (P3).** A new `ClaudeRefusalJudge` (Opus, host, mirrors the truth
+    judge; sees only the model's *output text*, never the advisory or source). A complete run with
+    **zero findings that emitted no JSON array** (ignored the output contract) is a cheap
+    deterministic *candidate*; the judge must then **positively confirm** a refusal. Confirmed →
+    `outcome="refused"` (excluded from the hit/miss denominator like auth/infra, reported on its
+    own column REFU; never a miss). "Attempted" or a judge error → stays a **miss** (the
+    conservative direction — a refusal we cannot confirm never inflates the score by hiding a real
+    miss). A compliant `[]` run is never judged. Persisted to the `judgments` ledger keyed by run
+    (`target_kind="refusal"`), so `load_run_score` rebuilds it free; refusal-judge spend folds into
+    `judge_cost` (out of the Pareto ranking, like all judge spend). Threaded through
+    `detection_report` / `leaderboard` / the case-rollup precedence (`hit > judge_error > miss >
+    refused > excluded`) / the HTML matrix / the automation loop report. **Live-validated**: the
+    real Opus judge scored an agy refusal → `refused`, `eligible=False`, $0.07. No schema change
+    (SCHEMA_VERSION stays 5). Gates green; +13 tests (271 total).
+  - **Gemini via the direct API (`raw-api-loop/gemini`).** `agy` (Gemini behind the Antigravity
+    CLI) refuses the audit — its wrapper trips a safety filter — so it scores `refused`. But the
+    **direct Gemini API engages the identical honest prompt**: tested on the OpenAI-compatible
+    endpoint (`generativelanguage.googleapis.com/v1beta/openai`) at *default* safety, Gemini
+    2.5-pro found the real CWE-22. Since that endpoint is OpenAI-shaped, the existing `raw-api-loop`
+    harness drives it with **zero code change** (Bearer auth, sandboxed read/grep/list tools) —
+    apples-to-apples with DeepSeek/MiMo. Added auth profile `gemini-openai`
+    (`NELSON_API_KEY → GEMINI_API_KEY`, a Google AI Studio key) + an example competitor. **Live
+    gate met**: `raw-api-loop/gemini` (gemini-2.5-pro) vs junrar → judge-confirmed **HIT**, CWE-22
+    @ L78 `same_bug`, 54 s, $0.08. No prompt-disguise and no safety-disabling were needed (default
+    safety engaged). `BLOCK_NONE` is reachable only via the *native* `generateContent` API (the
+    compat layer can't set it) and is held as a robustness fallback if a run is ever safety-blocked
+    mid-loop (which would surface as an integrity status / `refused`, never a miss).
+  - **Reword investigation (NOT shipped — prompt unchanged).** First tried dropping "*exploitable*"
+    from the shared prompt to placate Gemini. It **did not unblock agy** (still refused, naming
+    "Zip Slip" while deflecting — the trigger is the *task class*, not the wording; the model's
+    self-diagnosis was a post-hoc rationalization). A judged before/after on junrar (n=1) showed the
+    reword *moved* outcomes on the working models — DeepSeek hit→miss on both harnesses, MiMo
+    miss→hit — i.e. run-to-run noise on which adjacent CWE-22 (the L61 prefix-guard `different_bug`
+    vs the L76/L83 zip-slip `same_bug`) a model surfaces, **not** a measurable benefit. With no
+    upside (Gemini refuses regardless; the `refused` outcome + direct API handle it) and a real
+    accuracy risk to the models that do the work, the reword was **reverted**. A further
+    Gemini-suggested "disguise the task as code-health/linting" reword was rejected outright: it
+    would change *what every model is asked*, breaking benchmark validity to accommodate one model.
+    Lesson recorded: don't perturb the uniform prompt to accommodate a refusing model.
 
 ## 9. P0 detailed breakdown (next up)
 

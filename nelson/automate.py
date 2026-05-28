@@ -268,6 +268,7 @@ class LoopReport:
     spend_usd: float = 0.0
     scored: int = 0
     judge_errors: int = 0
+    refused: int = 0  # runs the refusal judge confirmed declined the task
     report_path: str | None = None
 
     @property
@@ -382,6 +383,8 @@ def run_once(
                 report.scored += 1
                 if rs.outcome == "judge_error":
                     report.judge_errors += 1
+                elif rs.outcome == "refused":
+                    report.refused += 1
         if report.scored:
             emit(f"scored {report.scored} run(s)")
 
