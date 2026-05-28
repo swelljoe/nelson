@@ -11,21 +11,25 @@ from nelson.corpus import Case
 from nelson.db import Database
 from nelson.score import (
     ClaudeFPJudge,
+    ClaudeRefusalJudge,
     ClaudeTruthJudge,
     CompetitorDetection,
     CompetitorPrecision,
     FindingScore,
     FPVerdict,
     GitCodeProvider,
+    RefusalVerdict,
     ReportedFinding,
     RunScore,
     Scorer,
     TruthVerdict,
     build_fp_prompt,
+    build_refusal_prompt,
     build_truth_prompt,
     detection_report,
     localize,
     parse_fp_verdict,
+    parse_refusal_verdict,
     parse_truth_verdict,
     paths_match,
     precision_report,
@@ -745,3 +749,216 @@ def test_claude_fp_judge_source_unavailable_short_circuits():
     verdict = ClaudeFPJudge().judge(ReportedFinding(file="x", line=1), None)
     assert verdict.is_real is None
     assert verdict.error == "source unavailable"
+
+
+# == Refusal judge (detection integrity) =====================================
+
+# The verbatim refusal captured from Gemini-behind-agy on the junrar case.
+_AGY_REFUSAL = (
+    "Sorry, I cannot fulfill your request to analyze the specified code file for "
+    "exploitable security vulnerabilities. For information on securing Java "
+    "applications you can search for the OWASP Top Ten."
+)
+
+
+class FakeRefusalJudge:
+    """Returns a canned refusal verdict; records how many times it was asked."""
+
+    name = "fake-refusal"
+
+    def __init__(self, verdict: RefusalVerdict):
+        self.verdict = verdict
+        self.calls = 0
+
+    def judge(self, final_text):
+        self.calls += 1
+        return self.verdict
+
+
+def _no_finding_run(db, case_id, *, raw_output, name="agy/antigravity"):
+    comp_id = db.upsert_competitor(
+        {"name": name, "model": "antigravity", "runtime": "agy"}
+    )
+    run_id = db.create_run(case_id, comp_id)
+    db.start_run(run_id, container_id="c1")
+    db.complete_run(
+        run_id,
+        tokens_in=1,
+        tokens_out=1,
+        cost_usd=0.0,
+        wall_clock_s=8.0,
+        raw_output=raw_output,
+    )
+    return run_id
+
+
+def test_parse_refusal_verdict_true_false_and_absent():
+    assert parse_refusal_verdict('{"refused": true, "reasoning": "declined"}') == (
+        True,
+        "declined",
+    )
+    assert parse_refusal_verdict('prose {"refused": "no"} more') == (False, "")
+    assert parse_refusal_verdict("no json here") is None
+
+
+def test_refusal_verdict_label():
+    assert RefusalVerdict(True).label == "refused"
+    assert RefusalVerdict(False).label == "attempted"
+    assert RefusalVerdict(None, error="timeout").label == "error: timeout"
+
+
+def test_build_refusal_prompt_is_output_only_no_advisory():
+    # Integrity: the refusal judge sees the model's output, never the advisory.
+    prompt = build_refusal_prompt(_AGY_REFUSAL)
+    assert _AGY_REFUSAL in prompt
+    assert "refused" in prompt.lower()
+    for leak in ("CWE-22", "GHSA", "path traversal", "Foo.java", "ground truth"):
+        assert leak not in prompt
+
+
+def test_score_run_confirmed_refusal_is_refused_not_miss(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _no_finding_run(db, case_id, raw_output=_AGY_REFUSAL)
+    refusal = FakeRefusalJudge(
+        RefusalVerdict(True, reasoning="declined", cost_usd=0.02)
+    )
+
+    rs = Scorer(db, FakeJudge(TruthVerdict(True)), refusal_judge=refusal).score_run(
+        run_id
+    )
+
+    assert rs.outcome == "refused"
+    assert not rs.eligible  # carved out of the detection denominator, not a miss
+    assert refusal.calls == 1
+    assert rs.judge_cost == pytest.approx(0.02)  # folded into detection-judge spend
+    # Persisted to the ledger keyed by the run, so reload needs no re-judging.
+    js = db.judgments(target_kind="refusal", target_id=run_id)
+    assert len(js) == 1 and js[0]["verdict"] == "refused"
+
+
+def test_score_run_attempted_verdict_stays_a_miss(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    # Output with no JSON array but the judge says the model engaged -> a miss.
+    run_id = _no_finding_run(db, case_id, raw_output="I reviewed it; looks fine.")
+    refusal = FakeRefusalJudge(RefusalVerdict(False, reasoning="analyzed, found none"))
+
+    rs = Scorer(db, FakeJudge(TruthVerdict(True)), refusal_judge=refusal).score_run(
+        run_id
+    )
+
+    assert rs.outcome == "miss" and rs.eligible
+    assert refusal.calls == 1
+
+
+def test_score_run_refusal_judge_error_stays_a_miss(tmp_path):
+    # Conservative: an undecidable refusal verdict never excludes a genuine miss.
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _no_finding_run(db, case_id, raw_output=_AGY_REFUSAL)
+    refusal = FakeRefusalJudge(RefusalVerdict(None, error="timeout"))
+
+    rs = Scorer(db, FakeJudge(TruthVerdict(True)), refusal_judge=refusal).score_run(
+        run_id
+    )
+
+    assert rs.outcome == "miss"
+    assert refusal.calls == 1
+
+
+def test_score_run_compliant_empty_array_is_never_refusal_judged(tmp_path):
+    # A clean-file "[]" answer emitted the contract -> not a candidate, no judge call.
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _no_finding_run(db, case_id, raw_output="No issues found.\n[]")
+    refusal = FakeRefusalJudge(RefusalVerdict(True))
+
+    rs = Scorer(db, FakeJudge(TruthVerdict(True)), refusal_judge=refusal).score_run(
+        run_id
+    )
+
+    assert rs.outcome == "miss"
+    assert refusal.calls == 0
+
+
+def test_score_run_refusal_without_judge_is_back_compat_miss(tmp_path):
+    # No refusal judge wired: behaviour is identical to before (a plain miss).
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _no_finding_run(db, case_id, raw_output=_AGY_REFUSAL)
+
+    rs = Scorer(db, FakeJudge(TruthVerdict(True))).score_run(run_id)
+
+    assert rs.outcome == "miss"
+    assert not db.judgments(target_kind="refusal", target_id=run_id)
+
+
+def test_needs_scoring_refusal_candidate_until_judged(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _no_finding_run(db, case_id, raw_output=_AGY_REFUSAL)
+
+    # Without a refusal judge, a zero-finding run is a settled miss (no work).
+    assert not Scorer(db, FakeJudge(TruthVerdict(True))).needs_scoring(run_id)
+
+    # With one wired, the un-judged candidate needs scoring; not after judging.
+    scorer = Scorer(
+        db,
+        FakeJudge(TruthVerdict(True)),
+        refusal_judge=FakeRefusalJudge(RefusalVerdict(True, cost_usd=0.01)),
+    )
+    assert scorer.needs_scoring(run_id)
+    scorer.score_run(run_id)
+    assert not scorer.needs_scoring(run_id)
+
+
+def test_load_run_score_reflects_persisted_refusal_without_rejudging(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _no_finding_run(db, case_id, raw_output=_AGY_REFUSAL)
+    refusal = FakeRefusalJudge(RefusalVerdict(True, cost_usd=0.02))
+    scorer = Scorer(db, FakeJudge(TruthVerdict(True)), refusal_judge=refusal)
+    scorer.score_run(run_id)
+
+    reloaded = scorer.load_run_score(run_id)
+    assert reloaded.outcome == "refused"
+    assert reloaded.judge_cost == pytest.approx(0.02)
+    assert refusal.calls == 1  # load_run_score did not re-judge
+
+
+def test_detection_report_counts_refused_apart_from_miss():
+    # refused is its own column and stays out of the detection denominator.
+    scores = [
+        RunScore(1, "c1", "alpha", "complete", "hit"),
+        RunScore(2, "c2", "alpha", "complete", "miss"),
+        RunScore(3, "c3", "alpha", "complete", "refused"),
+    ]
+    d = {r.competitor_name: r for r in detection_report(scores)}["alpha"]
+    assert d.hits == 1 and d.misses == 1 and d.refused == 1
+    assert d.excluded == 0
+    assert d.eligible == 2  # refused not in the denominator
+    assert d.detection_rate == 0.5
+
+
+def test_case_scores_miss_beats_refused_refused_beats_excluded():
+    from nelson.score import case_scores
+
+    # Engaged on one file (miss) but refused another -> the case counts as a miss.
+    mixed = [
+        RunScore(1, "GHSA-a", "alpha", "complete", "refused"),
+        RunScore(2, "GHSA-a", "alpha", "complete", "miss"),
+    ]
+    assert case_scores(mixed)[0].outcome == "miss"
+    # Refused everywhere it ran -> the case is refused (not a miss, not excluded).
+    all_refused = [
+        RunScore(3, "GHSA-b", "alpha", "complete", "refused"),
+        RunScore(4, "GHSA-b", "alpha", "auth_failed", "excluded"),
+    ]
+    assert case_scores(all_refused)[0].outcome == "refused"
+
+
+def test_claude_refusal_judge_is_a_refusaljudge():
+    from nelson.score import RefusalJudge
+
+    assert isinstance(ClaudeRefusalJudge(), RefusalJudge)

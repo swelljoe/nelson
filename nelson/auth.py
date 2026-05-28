@@ -185,4 +185,16 @@ STANDARD_AUTH_PROFILES: dict[str, AuthProfile] = {
         name="kimi-api-key",
         env={"NELSON_API_KEY": "MOONSHOT_API_KEY"},  # VERIFY-AT-WIRING: var name
     ),
+    # Gemini through its OpenAI-compatible endpoint
+    # (generativelanguage.googleapis.com/v1beta/openai), so the shared raw-api-loop
+    # harness drives it apples-to-apples with the other raw-api competitors. Uses a
+    # Google AI Studio key. NOTE: the compat layer engages the audit at *default*
+    # safety (unlike the `agy` CLI, whose wrapper refuses) and cannot set
+    # safety_settings; if a run is ever safety-blocked it surfaces as an integrity
+    # status / refused, never a miss. (The unused `gemini-api-key` above is for a
+    # future *native* generateContent runtime that could pass BLOCK_NONE.)
+    "gemini-openai": AuthProfile(
+        name="gemini-openai",
+        env={"NELSON_API_KEY": "GEMINI_API_KEY"},
+    ),
 }

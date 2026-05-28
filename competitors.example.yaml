@@ -102,6 +102,20 @@
   tool_profile: read-grep
   knowledge_cutoff: 2025-06
 
+# Gemini through its OpenAI-compatible endpoint, on the shared raw-api-loop harness
+# (apples-to-apples with the other raw-api competitors). The `agy` CLI above refuses
+# the audit (its wrapper trips a safety filter) and scores as `refused`; the direct
+# API engages the identical prompt at default safety. Needs a Google AI Studio key
+# ($GEMINI_API_KEY on the host). Models: gemini-2.5-pro (stable) or a 3.x preview
+# (gemini-3.1-pro-preview / gemini-3.5-flash) — pick per what you want to measure.
+- name: raw-api-loop/gemini
+  model: gemini-2.5-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: gemini-openai     # value from $GEMINI_API_KEY on the host
+  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai"}'
+  knowledge_cutoff: 2025-01
+
 # Wired but stubbed (no key/CLI yet): present so they enter the matrix the moment
 # creds/binaries arrive; until then each cleanly resolves to auth_failed/infra_error.
 - name: raw-api-loop/kimi
