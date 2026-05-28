@@ -173,6 +173,14 @@ STANDARD_AUTH_PROFILES: dict[str, AuthProfile] = {
         name="mimo-api-key",
         env={"NELSON_API_KEY": "MIMO_API_KEY"},
     ),
+    # MiMo (Xiaomi) through the Claude Code harness (its Anthropic-compatible
+    # endpoint), mirroring deepseek-anthropic. Same secret, presented as the var
+    # `claude` reads. Endpoint URL + model mappings live in the competitor's
+    # cost_model JSON. (Token-Plan keys are `tp-...`, pay-as-you-go `sk-...`.)
+    "mimo-anthropic": AuthProfile(
+        name="mimo-anthropic",
+        env={"ANTHROPIC_AUTH_TOKEN": "MIMO_API_KEY"},
+    ),
     "kimi-api-key": AuthProfile(
         name="kimi-api-key",
         env={"NELSON_API_KEY": "MOONSHOT_API_KEY"},  # VERIFY-AT-WIRING: var name

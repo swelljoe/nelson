@@ -463,8 +463,23 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
     a native-format tool call as text → 0 findings); fixed by an explicit forced-final
     instruction + a larger default step budget (12→20), after which the same model produced a
     clean JSON hit. Endpoint values confirmed from api-docs.deepseek.com.
-  - **Still VERIFY-AT-WIRING (not yet live):** gemini auto-approve flag + creds path; MiMo/Kimi
-    base_url / model id / key env-var names; native CLI (`kimi-cli`/`pi-custom`) argv/output.
+  - **`agy` (Antigravity / Gemini) live-tested (2026-05-28).** The old `gemini` CLI was renamed
+    to `agy`, with a Claude-Code-like interface (`-p`, `--dangerously-skip-permissions`,
+    `--add-dir`, plain-text out, no `-m`/JSON), so `GeminiCliRuntime` → `AgyRuntime` (bind-mount
+    the host `agy`; `AgyCredentialMountAuth` mounts the `~/.gemini` sign-in). On the junrar case
+    the harness ran cleanly end-to-end, but the **Gemini model behind Antigravity refused** the
+    neutral audit prompt ("Sorry, I cannot fulfill your request… see the OWASP Top Ten") — a real
+    model-behavior result, scored as-is (the uniform prompt is *not* tuned per model). A
+    scoring-layer follow-up could distinguish a safety *refusal* from a true miss.
+  - **MiMo wired on both harnesses, live run blocked on a bad key.** MiMo (Xiaomi,
+    platform.xiaomimimo.com) also exposes Anthropic-compat (`/anthropic`, `mimo-anthropic`
+    profile) and OpenAI-compat (`/v1`, `mimo-api-key`) endpoints; both competitors are configured
+    (Token-Plan `tp-` keys → `token-plan-cn.xiaomimimo.com`, pay-as-you-go `sk-` →
+    `api.xiaomimimo.com`; model `mimo-v2.5-pro`). The supplied key returns **401 Invalid API Key**
+    on all four host/protocol combos, so no live run yet — which is the integrity rule working
+    (a rejected key → `auth_failed`, never a miss).
+  - **Still VERIFY-AT-WIRING (not yet live):** a valid MiMo key; native CLI
+    (`kimi-cli`/`pi-custom`) argv/output + their binaries.
 
 ## 9. P0 detailed breakdown (next up)
 

@@ -72,12 +72,23 @@
   size_class: large
   knowledge_cutoff: 2025-06
 
+# MiMo (Xiaomi) on both shared harnesses, like DeepSeek (platform.xiaomimimo.com).
+# Host: `tp-` (Token Plan) keys use token-plan-cn.xiaomimimo.com; `sk-`
+# (pay-as-you-go) keys use api.xiaomimimo.com. Models: mimo-v2.5-pro / mimo-v2.5.
+- name: claude-code/mimo
+  model: mimo-v2.5-pro
+  runtime: claude-code
+  tool_profile: read-grep
+  auth_profile: mimo-anthropic
+  cost_model: '{"anthropic_base_url": "https://token-plan-cn.xiaomimimo.com/anthropic", "env": {"ANTHROPIC_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_SONNET_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_OPUS_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mimo-v2.5-pro"}}'
+  knowledge_cutoff: 2025-06
+
 - name: raw-api-loop/mimo
-  model: mimo-v2.5                # VERIFY-AT-WIRING: real model id
+  model: mimo-v2.5-pro
   runtime: raw-api-loop
   tool_profile: read-grep
   auth_profile: mimo-api-key      # value from $MIMO_API_KEY on the host
-  cost_model: '{"base_url": "https://api.example-mimo.invalid/v1"}'
+  cost_model: '{"base_url": "https://token-plan-cn.xiaomimimo.com/v1"}'
   knowledge_cutoff: 2025-06
 
 # Native agent CLI, bind-mounted (subscription sign-in on the host, no key). `agy`
