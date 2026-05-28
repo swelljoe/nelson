@@ -29,6 +29,7 @@ from __future__ import annotations
 import re
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .agents import _run_cli, classify_failure
@@ -62,6 +63,23 @@ def _normalize_path(path: str) -> str:
         if p.startswith(prefix):
             p = p[len(prefix) :]
             break
+    return p.lstrip("/")
+
+
+def _repo_relative(path: str) -> str:
+    """The repo-root-relative path for a finding, for ``git show vuln_commit:…``.
+
+    Findings report paths *relative to the /src mount* (which is the repo root),
+    so they are already repo-relative; we only peel a redundant absolute ``/src/``
+    mount prefix or a leading ``./`` a model might prepend. Unlike
+    :func:`_normalize_path` (used for suffix *matching*) this never strips a real
+    top-level ``src/`` directory — ``git show`` needs the exact path.
+    """
+    p = path.strip().replace("\\", "/")
+    if p.startswith("/src/"):
+        p = p[len("/src/") :]
+    elif p.startswith("./"):
+        p = p[2:]
     return p.lstrip("/")
 
 
@@ -313,7 +331,282 @@ class ClaudeTruthJudge:
         )
 
 
+# -- FP judge (precision) ----------------------------------------------------
+#
+# Every reported finding that is NOT the confirmed target bug — a finding that
+# didn't localize, OR one that localized but the truth judge ruled a *different*
+# bug — is a precision candidate: a real bug the model usefully found, or noise?
+# The FP judge reads the actual pre-patch source and rules confirmed /
+# false_positive / needs_review. Unlike the truth judge it is NEVER shown the
+# advisory (that would invite circularity / over-trust); its judge() takes only
+# the finding + source, so the advisory cannot leak into precision by construction.
+
+# Bound the source sent to the judge. A finding deep in a large file gets a window
+# centred on its line (so the flagged code and nearby callers survive) rather than
+# a blind head-truncation.
+_MAX_CODE_CHARS = 16000
+_FP_CONTEXT_LINES = 200
+
+FP_INSTRUCTIONS = """\
+You are a senior security engineer triaging a single finding from an automated \
+vulnerability scanner. You are NOT told whether the code contains a known bug — \
+do not assume the scanner is right. Read the actual source and decide whether the \
+reported finding is a REAL, exploitable security vulnerability or a FALSE POSITIVE.
+
+Trace whether attacker-controlled input can reach the flagged code, account for \
+validation or mitigations already present, and weigh realistic exploitability over \
+theoretical possibility.
+
+Reply with ONLY a JSON object:
+{"verdict": "<confirmed|false_positive|needs_review>", "reasoning": "<why>"}
+where confirmed = a real, exploitable bug, false_positive = not a real/exploitable \
+security bug, and needs_review = you genuinely cannot tell from the code shown."""
+
+
+@dataclass
+class FPVerdict:
+    """Outcome of FP-judging one non-target finding.
+
+    ``is_real`` is True (a real bug), False (a false positive), or None when the
+    judge could not decide. None splits two ways via ``error``: a clean
+    ``needs_review`` (error is None) versus a judge *failure* (error set). Either
+    way a None verdict is *undetermined* — never counted as a false positive
+    (that would penalize the model for the judge's indecision) nor as a real bug.
+    """
+
+    is_real: bool | None
+    reasoning: str = ""
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    cost_usd: float | None = None
+    error: str | None = None
+
+    @property
+    def label(self) -> str:
+        """Compact verdict string persisted to ``judge_fp_verdict``."""
+        if self.error is not None:
+            return f"error: {self.error}"
+        if self.is_real is None:
+            return "needs_review"
+        return "real_bug" if self.is_real else "false_positive"
+
+
+@runtime_checkable
+class CodeProvider(Protocol):
+    def source(self, case: Case, file: str | None) -> str | None: ...
+
+
+@runtime_checkable
+class FPJudge(Protocol):
+    name: str
+
+    def judge(self, finding: ReportedFinding, source: str | None) -> FPVerdict: ...
+
+
+class _GitShow(Protocol):
+    """The slice of a GitRunner the code provider needs (prepare + show)."""
+
+    def prepare(self, repo_url: str, commit: str, dest: Path) -> None: ...
+    def show(self, dest: Path, rev: str, path: str) -> str: ...
+
+
+class GitCodeProvider:
+    """Reads a finding's pre-patch source via ``git show vuln_commit:path``.
+
+    The competitor audited the tree at ``case.vuln_commit``, so that revision is
+    the code the FP judge must reason about. A per-(repo, commit) shallow fetch
+    and resolved file contents are both cached, so scoring many findings in one
+    file costs one fetch + one show. A file absent at that revision (a path the
+    model mis-reported, or a generated file) yields None, which the judge surfaces
+    as undetermined — never a false positive.
+    """
+
+    def __init__(
+        self,
+        git: _GitShow | None = None,
+        *,
+        root: Path | str | None = None,
+        timeout: float = 180.0,
+    ):
+        from .derive import SubprocessGitRunner
+
+        self.git: _GitShow = git or SubprocessGitRunner(timeout=timeout)
+        self.root = Path(root) if root else Path(".nelson_cache/fpjudge")
+        self._prepared: set[tuple[str, str]] = set()
+        self._cache: dict[tuple[str, str, str], str | None] = {}
+
+    def source(self, case: Case, file: str | None) -> str | None:
+        if not file or not case.repo_url or not case.vuln_commit:
+            return None
+        from .derive import GitError, _repo_slug
+
+        norm = _repo_relative(file)
+        key = (case.repo_url, case.vuln_commit, norm)
+        if key in self._cache:
+            return self._cache[key]
+        dest = self.root / _repo_slug(case.repo_url)
+        text: str | None
+        try:
+            prep_key = (case.repo_url, case.vuln_commit)
+            if prep_key not in self._prepared:
+                self.git.prepare(case.repo_url, case.vuln_commit, dest)
+                self._prepared.add(prep_key)
+            text = self.git.show(dest, case.vuln_commit, norm)
+        except GitError:
+            text = None
+        self._cache[key] = text
+        return text
+
+
+def _clip_source(source: str, line: int | None) -> tuple[str, str]:
+    """Bound the source for the prompt; returns (text, header note).
+
+    Small files are sent whole. A large file is windowed to ±_FP_CONTEXT_LINES
+    around the finding's line, and the note records the absolute line range so
+    the judge can map the reported line number onto the excerpt.
+    """
+    if len(source) <= _MAX_CODE_CHARS:
+        return source, ""
+    lines = source.splitlines()
+    if line is not None and 1 <= line <= len(lines):
+        lo = max(0, line - 1 - _FP_CONTEXT_LINES)
+        hi = min(len(lines), line + _FP_CONTEXT_LINES)
+        excerpt = "\n".join(lines[lo:hi])[:_MAX_CODE_CHARS]
+        return excerpt, f" (lines {lo + 1}-{hi} of {len(lines)}, clipped)"
+    return source[:_MAX_CODE_CHARS], " (clipped to first portion)"
+
+
+def build_fp_prompt(finding: ReportedFinding, source: str) -> str:
+    """Assemble the finding + its source into an FP-judge prompt.
+
+    Deliberately takes no Case: the advisory must never reach the FP judge.
+    """
+    line_no = finding.line if finding.line is not None else "?"
+    location = f"{finding.file or '?'}:{line_no}"
+    reported = "\n".join(
+        f"{label}: {value}"
+        for label, value in (
+            ("Location", location),
+            ("Reported CWE", finding.cwe),
+            ("Confidence", finding.confidence),
+            ("Explanation", finding.description),
+        )
+        if value
+    )
+    clipped, note = _clip_source(source, finding.line)
+    return (
+        f"{FP_INSTRUCTIONS}\n\n"
+        f"## Reported finding\n{reported}\n\n"
+        f"## Source: {finding.file or '?'}{note}\n"
+        f"```\n{clipped}\n```"
+    )
+
+
+_FP_REAL = {"confirmed", "real", "real_bug", "true_positive", "yes", "vulnerable"}
+_FP_FALSE = {"false_positive", "false", "fp", "not_exploitable", "no", "safe"}
+_FP_REVIEW = {"needs_review", "unsure", "unknown", "uncertain", "maybe", "review"}
+
+
+def parse_fp_verdict(text: str) -> tuple[bool | None, str] | None:
+    """Extract (is_real, reasoning) from the judge's reply, or None if unusable.
+
+    The inner ``is_real`` is None for an explicit ``needs_review``; the outer
+    None means nothing parseable was found, so the caller records a judge failure
+    (the two are different: a deliberate "can't tell" vs a broken reply).
+    """
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        data = _loads_object(match.group(0))
+        if data is not None and "verdict" in data:
+            verdict = str(data["verdict"]).strip().lower()
+            reasoning = str(data.get("reasoning", ""))
+            if verdict in _FP_REAL:
+                return True, reasoning
+            if verdict in _FP_FALSE:
+                return False, reasoning
+            if verdict in _FP_REVIEW:
+                return None, reasoning
+    return None
+
+
+class ClaudeFPJudge:
+    """FP judge backed by ``claude -p`` (Opus by default).
+
+    Mirrors the truth / pre-vet judges: host CLI, subscription auth, no container,
+    failures surfaced not guessed. Its ``judge`` signature carries no Case, so the
+    advisory cannot leak into the precision side of scoring.
+    """
+
+    name = "claude-cli"
+
+    def __init__(self, model: str = "opus", timeout: int = 180):
+        self.model = model
+        self.timeout = timeout
+
+    def judge(self, finding: ReportedFinding, source: str | None) -> FPVerdict:
+        if source is None:
+            # No code to ground the judgment -> undetermined, never an FP.
+            return FPVerdict(None, error="source unavailable")
+        prompt = build_fp_prompt(finding, source)
+        cmd = [
+            "claude",
+            "-p",
+            "--model",
+            self.model,
+            "--output-format",
+            "json",
+            "--no-session-persistence",
+        ]
+        try:
+            # env=None: inherit the host's authenticated claude CLI session.
+            result = _run_cli(cmd, self.timeout, input_text=prompt)
+        except subprocess.TimeoutExpired:
+            return FPVerdict(None, error="timeout")
+
+        raw, stderr = result.stdout, result.stderr
+        if result.returncode != 0:
+            kind = classify_failure(raw + stderr, failed=True)
+            return FPVerdict(
+                None,
+                error=f"claude exit {result.returncode} ({kind}): {stderr[:200]}",
+            )
+
+        text, tin, tout, cost = _unwrap_claude_json(raw)
+        parsed = parse_fp_verdict(text)
+        if parsed is None:
+            return FPVerdict(
+                None,
+                reasoning=text[:300],
+                tokens_in=tin,
+                tokens_out=tout,
+                cost_usd=cost,
+                error="unparseable judge reply",
+            )
+        is_real, reasoning = parsed
+        return FPVerdict(
+            is_real,
+            reasoning=reasoning,
+            tokens_in=tin,
+            tokens_out=tout,
+            cost_usd=cost,
+        )
+
+
 # -- Scorer ------------------------------------------------------------------
+
+
+def _fp_eligible(localized: bool, truth: TruthVerdict | None) -> bool:
+    """Is this finding a precision candidate (i.e. should it be FP-judged)?
+
+    Yes for any finding that is neither the confirmed target hit nor a localized
+    finding the truth judge left undetermined. So: a non-localized finding, or a
+    localized finding the judge ruled a *different* bug.
+    """
+    if not localized:
+        return True  # a non-localized finding is always a precision candidate
+    # Localized: a precision item only if the truth judge *decided* a different
+    # bug. A same_bug hit, an undetermined verdict, or no verdict are all skipped.
+    return truth is not None and truth.same_bug is False
 
 
 @dataclass
@@ -325,6 +618,36 @@ class FindingScore:
     line: int | None
     localized: bool
     truth: TruthVerdict | None = None  # None unless the finding reached the judge
+    fp: FPVerdict | None = None  # None unless the finding reached the FP judge
+
+    @property
+    def is_target_hit(self) -> bool:
+        """The localized finding the truth judge confirmed is the same bug."""
+        return (
+            self.localized and self.truth is not None and self.truth.same_bug is True
+        )
+
+    @property
+    def fp_category(self) -> str | None:
+        """Precision bucket, or None if this finding is not a precision item.
+
+        None = the confirmed target hit, or a localized finding the truth judge
+        left undetermined (a candidate target, not noise). Otherwise:
+        ``real_other`` (a genuine *different* bug — credited, not penalized),
+        ``false_positive``, or ``undetermined`` (needs_review, FP-judge failure,
+        or FP judge not yet run).
+        """
+        if self.is_target_hit:
+            return None
+        if self.localized and (self.truth is None or self.truth.error is not None):
+            return None
+        if self.fp is None:
+            return "undetermined"
+        if self.fp.is_real is True:
+            return "real_other"
+        if self.fp.is_real is False:
+            return "false_positive"
+        return "undetermined"
 
 
 @dataclass
@@ -345,7 +668,8 @@ class RunScore:
     status: str
     outcome: str
     findings: list[FindingScore] = field(default_factory=list)
-    judge_cost: float = 0.0
+    judge_cost: float = 0.0  # truth-judge spend (detection)
+    fp_cost: float = 0.0  # FP-judge spend (precision)
 
     @property
     def eligible(self) -> bool:
@@ -372,7 +696,13 @@ def _outcome_from_findings(findings: list[FindingScore]) -> str:
 
 
 class Scorer:
-    """Localizes + truth-judges run findings and persists/aggregates the result."""
+    """Localizes + truth-judges run findings, then (if an FP judge is wired)
+    FP-judges the non-target findings, persisting/aggregating both.
+
+    Detection scoring needs only the truth judge. Precision scoring is opt-in:
+    pass both ``fp_judge`` and ``code`` (a CodeProvider) and ``score_run`` will
+    also FP-judge every non-target finding. Without them, scoring is detection
+    only, exactly as in P3."""
 
     def __init__(
         self,
@@ -380,10 +710,18 @@ class Scorer:
         judge: TruthJudge,
         *,
         tolerance: int = DEFAULT_LINE_TOLERANCE,
+        fp_judge: FPJudge | None = None,
+        code: CodeProvider | None = None,
     ):
         self.db = db
         self.judge = judge
         self.tolerance = tolerance
+        self.fp_judge = fp_judge
+        self.code = code
+
+    @property
+    def _scores_precision(self) -> bool:
+        return self.fp_judge is not None and self.code is not None
 
     def _labels(self, run: Any) -> tuple[Case, str]:
         """Load the run's case (with ground truth) and competitor name."""
@@ -397,9 +735,10 @@ class Scorer:
         return Case.from_row(case_row), comp_name
 
     def score_run(self, run_id: int) -> RunScore:
-        """Score one run: localize every finding, judge the localized ones, persist.
+        """Score one run: localize, truth-judge the localized findings, and (if a
+        FP judge is wired) FP-judge the non-target findings; persist all of it.
 
-        Calls the truth judge — use :meth:`load_run_score` to rebuild a RunScore
+        Calls the judge(s) — use :meth:`load_run_score` to rebuild a RunScore
         from already-persisted columns without re-spending judge budget.
         """
         run = self.db.get_run(run_id)
@@ -416,13 +755,15 @@ class Scorer:
 
         scores: list[FindingScore] = []
         judge_cost = 0.0
+        fp_cost = 0.0
         for row in self.db.run_findings(run_id):
+            reported = ReportedFinding.from_row(row)
             loc = localize(
                 row["file"], row["line_start"], case.gt_hunks, self.tolerance
             )
             truth: TruthVerdict | None = None
             if loc.matched:
-                truth = self.judge.judge(case, ReportedFinding.from_row(row))
+                truth = self.judge.judge(case, reported)
                 judge_cost += truth.cost_usd or 0.0
                 self.db.add_judgment(
                     target_kind="truth",
@@ -440,6 +781,30 @@ class Scorer:
                 judge_truth_verdict=truth.label if truth is not None else None,
                 judge_reasoning=truth.reasoning if truth is not None else None,
             )
+
+            # Precision: every finding that isn't the target hit (and isn't a
+            # localized-but-undetermined candidate) is FP-judged against the code.
+            fp: FPVerdict | None = None
+            if (
+                self.fp_judge is not None
+                and self.code is not None
+                and _fp_eligible(loc.matched, truth)
+            ):
+                source = self.code.source(case, row["file"])
+                fp = self.fp_judge.judge(reported, source)
+                fp_cost += fp.cost_usd or 0.0
+                self.db.add_judgment(
+                    target_kind="fp",
+                    target_id=row["id"],
+                    judge_model=self.fp_judge.name,
+                    verdict=fp.label,
+                    reasoning=fp.reasoning,
+                    tokens_in=fp.tokens_in,
+                    tokens_out=fp.tokens_out,
+                    cost_usd=fp.cost_usd,
+                )
+                self.db.record_fp_verdict(row["id"], verdict=fp.label)
+
             scores.append(
                 FindingScore(
                     finding_id=row["id"],
@@ -447,6 +812,7 @@ class Scorer:
                     line=row["line_start"],
                     localized=loc.matched,
                     truth=truth,
+                    fp=fp,
                 )
             )
 
@@ -458,6 +824,7 @@ class Scorer:
             outcome=_outcome_from_findings(scores),
             findings=scores,
             judge_cost=judge_cost,
+            fp_cost=fp_cost,
         )
 
     def load_run_score(self, run_id: int) -> RunScore:
@@ -480,6 +847,12 @@ class Scorer:
                 truth = _verdict_from_label(verdict, row["judge_reasoning"] or "")
             elif localized:
                 truth = None  # localized but never judged -> undetermined
+            fp: FPVerdict | None = None
+            fp_label = row["judge_fp_verdict"]
+            if fp_label is not None:
+                ledger = self.db.judgments(target_kind="fp", target_id=row["id"])
+                reasoning = ledger[-1]["reasoning"] if ledger else ""
+                fp = _fp_verdict_from_label(fp_label, reasoning or "")
             scores.append(
                 FindingScore(
                     finding_id=row["id"],
@@ -487,6 +860,7 @@ class Scorer:
                     line=row["line_start"],
                     localized=localized,
                     truth=truth,
+                    fp=fp,
                 )
             )
 
@@ -494,6 +868,11 @@ class Scorer:
             j["cost_usd"] or 0.0
             for f in scores
             for j in self.db.judgments(target_kind="truth", target_id=f.finding_id)
+        )
+        fp_cost = sum(
+            j["cost_usd"] or 0.0
+            for f in scores
+            for j in self.db.judgments(target_kind="fp", target_id=f.finding_id)
         )
         return RunScore(
             run_id,
@@ -503,14 +882,17 @@ class Scorer:
             outcome=_outcome_from_findings(scores),
             findings=scores,
             judge_cost=judge_cost,
+            fp_cost=fp_cost,
         )
 
     def needs_scoring(self, run_id: int) -> bool:
         """True if scoring this complete run would do new work (localize/judge).
 
-        A run needs scoring if any finding is not yet localized, or any localized
-        finding has not yet been judged. A zero-finding complete run reports as
-        not-needing (its outcome is a settled miss, recomputable for free).
+        A run needs scoring if any finding is not yet localized, any localized
+        finding has not yet been truth-judged, or — when this Scorer does
+        precision — any FP-eligible finding has not yet been FP-judged. A
+        zero-finding complete run reports as not-needing (its outcome is a settled
+        miss, recomputable for free).
         """
         run = self.db.get_run(run_id)
         if run is None or run["status"] != "complete":
@@ -520,7 +902,29 @@ class Scorer:
                 return True
             if row["matches_ground_truth"] and row["judge_truth_verdict"] is None:
                 return True
+            if (
+                self._scores_precision
+                and row["judge_fp_verdict"] is None
+                and _persisted_fp_eligible(
+                    row["matches_ground_truth"], row["judge_truth_verdict"]
+                )
+            ):
+                return True
         return False
+
+
+def _persisted_fp_eligible(matches_ground_truth: Any, truth_verdict: Any) -> bool:
+    """``_fp_eligible`` reconstructed from the persisted truth columns.
+
+    Reached only after localization is recorded (matches_ground_truth set), so a
+    localized finding's truth verdict is already settled to same_bug /
+    different_bug / error: … here.
+    """
+    if not bool(matches_ground_truth):
+        return True
+    # Localized: a precision item only if the truth judge decided a *different*
+    # bug (a settled non-same_bug, non-error verdict).
+    return truth_verdict == "different_bug"
 
 
 def _verdict_from_label(label: str, reasoning: str) -> TruthVerdict:
@@ -530,6 +934,17 @@ def _verdict_from_label(label: str, reasoning: str) -> TruthVerdict:
             None, reasoning=reasoning, error=label[len("error:") :].strip()
         )
     return TruthVerdict(label == "same_bug", reasoning=reasoning)
+
+
+def _fp_verdict_from_label(label: str, reasoning: str = "") -> FPVerdict:
+    """Inverse of FPVerdict.label for verdicts read back from the DB."""
+    if label.startswith("error:"):
+        return FPVerdict(
+            None, reasoning=reasoning, error=label[len("error:") :].strip()
+        )
+    if label == "needs_review":
+        return FPVerdict(None, reasoning=reasoning)
+    return FPVerdict(label == "real_bug", reasoning=reasoning)
 
 
 # -- Case rollup -------------------------------------------------------------
@@ -549,6 +964,7 @@ class CaseScore:
     outcome: str
     runs: list[RunScore] = field(default_factory=list)
     judge_cost: float = 0.0
+    fp_cost: float = 0.0
 
     @property
     def eligible(self) -> bool:
@@ -589,6 +1005,7 @@ def case_scores(run_scores: list[RunScore]) -> list[CaseScore]:
                 outcome=_rollup_case_outcome(r.outcome for r in runs),
                 runs=runs,
                 judge_cost=sum(r.judge_cost for r in runs),
+                fp_cost=sum(r.fp_cost for r in runs),
             )
         )
     return out
@@ -639,4 +1056,75 @@ def detection_report(run_scores: list[RunScore]) -> list[CompetitorDetection]:
             d.judge_error += 1
         else:  # excluded
             d.excluded += 1
+    return [by_name[name] for name in sorted(by_name)]
+
+
+# -- Precision report --------------------------------------------------------
+
+
+@dataclass
+class CompetitorPrecision:
+    """Aggregated precision metrics for one competitor (over all its findings).
+
+    A finding is a *true finding* if it is the confirmed target bug
+    (``target_hits``) or a confirmed real but different bug (``real_others`` —
+    credited, never penalized). ``false_positives`` are findings the FP judge
+    rejected against the code. ``undetermined`` (needs_review, FP-judge failure,
+    or not yet judged) is excluded from precision — the integrity rule again: the
+    judge's indecision never counts against the model.
+    """
+
+    competitor_name: str
+    target_hits: int = 0
+    real_others: int = 0
+    false_positives: int = 0
+    undetermined: int = 0
+    cases: int = 0  # distinct cases with a complete run (the FP/case denominator)
+    fp_cost: float = 0.0
+
+    @property
+    def true_findings(self) -> int:
+        return self.target_hits + self.real_others
+
+    @property
+    def precision(self) -> float | None:
+        """True findings / (true findings + false positives); None if neither."""
+        decided = self.true_findings + self.false_positives
+        return self.true_findings / decided if decided else None
+
+    @property
+    def fp_per_case(self) -> float | None:
+        """Mean confirmed false positives per audited case; None if no cases."""
+        return self.false_positives / self.cases if self.cases else None
+
+
+def precision_report(run_scores: list[RunScore]) -> list[CompetitorPrecision]:
+    """Per-competitor precision over every reported finding, alphabetical.
+
+    Counts findings (not cases): a noisy model is penalized per false finding,
+    while ``fp_per_case`` normalizes the FP count by the cases it audited.
+    """
+    by_name: dict[str, CompetitorPrecision] = {}
+    cases_seen: dict[str, set[str]] = {}
+    for rs in run_scores:
+        p = by_name.setdefault(
+            rs.competitor_name, CompetitorPrecision(rs.competitor_name)
+        )
+        p.fp_cost += rs.fp_cost
+        if rs.status == "complete":
+            cases_seen.setdefault(rs.competitor_name, set()).add(rs.case_ext_id)
+        for f in rs.findings:
+            if f.is_target_hit:
+                p.target_hits += 1
+                continue
+            category = f.fp_category
+            if category == "real_other":
+                p.real_others += 1
+            elif category == "false_positive":
+                p.false_positives += 1
+            elif category == "undetermined":
+                p.undetermined += 1
+            # category is None -> candidate-undetermined target; not a precision item
+    for name, p in by_name.items():
+        p.cases = len(cases_seen.get(name, set()))
     return [by_name[name] for name in sorted(by_name)]

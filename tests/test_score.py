@@ -10,16 +10,25 @@ import pytest
 from nelson.corpus import Case
 from nelson.db import Database
 from nelson.score import (
+    ClaudeFPJudge,
     ClaudeTruthJudge,
     CompetitorDetection,
+    CompetitorPrecision,
+    FindingScore,
+    FPVerdict,
+    GitCodeProvider,
     ReportedFinding,
+    RunScore,
     Scorer,
     TruthVerdict,
+    build_fp_prompt,
     build_truth_prompt,
     detection_report,
     localize,
+    parse_fp_verdict,
     parse_truth_verdict,
     paths_match,
+    precision_report,
 )
 
 # -- Localization gate -------------------------------------------------------
@@ -365,3 +374,357 @@ def test_claude_truth_judge_is_a_truthjudge():
     from nelson.score import TruthJudge
 
     assert isinstance(ClaudeTruthJudge(), TruthJudge)
+
+
+# == P4: FP judge (precision) ================================================
+
+# -- FP-verdict parsing ------------------------------------------------------
+
+
+def test_parse_fp_verdict_confirmed_false_review():
+    assert parse_fp_verdict('{"verdict": "confirmed", "reasoning": "r"}') == (True, "r")
+    assert parse_fp_verdict('{"verdict": "false_positive", "reasoning": "n"}') == (
+        False,
+        "n",
+    )
+    # needs_review -> inner None (a deliberate "can't tell"), with reasoning.
+    assert parse_fp_verdict('{"verdict": "needs_review", "reasoning": "u"}') == (
+        None,
+        "u",
+    )
+
+
+def test_parse_fp_verdict_tolerates_prose_and_synonyms():
+    text = 'My call:\n```json\n{"verdict": "FALSE", "reasoning": "safe"}\n```'
+    assert parse_fp_verdict(text) == (False, "safe")
+
+
+def test_parse_fp_verdict_none_when_unusable():
+    # Outer None = nothing parseable -> the caller records a judge failure.
+    assert parse_fp_verdict("I really cannot say") is None
+    assert parse_fp_verdict('{"verdict": "banana"}') is None  # unknown verdict word
+
+
+def test_fp_verdict_label():
+    assert FPVerdict(True).label == "real_bug"
+    assert FPVerdict(False).label == "false_positive"
+    assert FPVerdict(None).label == "needs_review"  # clean undetermined
+    assert FPVerdict(None, error="timeout").label == "error: timeout"  # failure
+
+
+def test_build_fp_prompt_has_finding_and_source_only():
+    # build_fp_prompt takes no Case, so the advisory cannot reach the FP judge.
+    finding = ReportedFinding(
+        file="Foo.java", line=42, description="cmd injection", cwe="CWE-78"
+    )
+    prompt = build_fp_prompt(finding, "void run(String s){ exec(s); }")
+    assert "Foo.java:42" in prompt
+    assert "CWE-78" in prompt
+    assert "cmd injection" in prompt
+    assert "exec(s)" in prompt
+
+
+# -- Orchestrated precision scoring (fake FP judge + code) -------------------
+
+
+class FakeFPJudge:
+    """Returns a canned FP verdict; records the (finding, source) it was given."""
+
+    name = "fake-fp"
+
+    def __init__(self, verdict: FPVerdict):
+        self.verdict = verdict
+        self.calls = 0
+        self.seen: list[tuple] = []
+
+    def judge(self, finding, source):
+        self.calls += 1
+        self.seen.append((finding, source))
+        return self.verdict
+
+
+class FakeCode:
+    """Canned CodeProvider; ``None`` text simulates an unavailable source."""
+
+    def __init__(self, text: str | None = "void f(){}"):
+        self.text = text
+        self.calls = 0
+
+    def source(self, case, file):
+        self.calls += 1
+        return self.text
+
+
+def test_score_run_fp_judges_off_target_finding(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Other.java", 10)])
+    truth = FakeJudge(TruthVerdict(True))  # never reached (not localized)
+    fp = FakeFPJudge(FPVerdict(False, reasoning="not exploitable", cost_usd=0.02))
+
+    rs = Scorer(db, truth, fp_judge=fp, code=FakeCode()).score_run(run_id)
+
+    assert truth.calls == 0 and fp.calls == 1
+    assert rs.outcome == "miss"  # off-target -> detection miss
+    assert rs.fp_cost == 0.02
+    assert rs.findings[0].fp_category == "false_positive"
+    row = db.run_findings(run_id)[0]
+    assert row["judge_fp_verdict"] == "false_positive"
+    js = db.judgments(target_kind="fp")
+    assert len(js) == 1 and js[0]["cost_usd"] == 0.02
+
+
+def test_score_run_fp_judges_localized_different_bug(tmp_path):
+    # Q2: a finding that localized but the truth judge ruled a *different* bug is
+    # still FP-judged — a genuine extra bug should be credited, not ignored.
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Foo.java", 76)])
+    truth = FakeJudge(TruthVerdict(False, reasoning="different flaw"))
+    fp = FakeFPJudge(FPVerdict(True, reasoning="real but other bug"))
+
+    rs = Scorer(db, truth, fp_judge=fp, code=FakeCode()).score_run(run_id)
+
+    assert truth.calls == 1  # localized -> truth-judged
+    assert fp.calls == 1  # different_bug -> also FP-judged
+    assert rs.outcome == "miss"  # detection: not the target bug
+    assert rs.findings[0].fp_category == "real_other"
+    assert db.run_findings(run_id)[0]["judge_fp_verdict"] == "real_bug"
+
+
+def test_score_run_does_not_fp_judge_the_target_hit(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Foo.java", 76)])
+    fp = FakeFPJudge(FPVerdict(False))
+
+    rs = Scorer(
+        db, FakeJudge(TruthVerdict(True)), fp_judge=fp, code=FakeCode()
+    ).score_run(run_id)
+
+    assert rs.outcome == "hit"
+    assert fp.calls == 0  # the confirmed target bug is not a precision candidate
+    assert rs.findings[0].fp_category is None
+    assert db.run_findings(run_id)[0]["judge_fp_verdict"] is None
+
+
+def test_score_run_does_not_fp_judge_undetermined_candidate(tmp_path):
+    # A localized finding the truth judge could not decide might BE the target;
+    # it is not handed to the FP judge (and stays out of precision).
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Foo.java", 76)])
+    fp = FakeFPJudge(FPVerdict(False))
+
+    rs = Scorer(
+        db, FakeJudge(TruthVerdict(None, error="timeout")), fp_judge=fp, code=FakeCode()
+    ).score_run(run_id)
+
+    assert rs.outcome == "judge_error"
+    assert fp.calls == 0
+    assert rs.findings[0].fp_category is None
+
+
+def test_fp_needs_review_is_undetermined_not_a_false_positive(tmp_path):
+    # Integrity: the FP judge's indecision never counts as a false positive.
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Other.java", 10)])
+    fp = FakeFPJudge(FPVerdict(None, reasoning="cannot tell"))
+
+    rs = Scorer(
+        db, FakeJudge(TruthVerdict(True)), fp_judge=fp, code=FakeCode()
+    ).score_run(run_id)
+
+    assert rs.findings[0].fp_category == "undetermined"
+    assert db.run_findings(run_id)[0]["judge_fp_verdict"] == "needs_review"
+
+
+def test_score_run_source_unavailable_never_an_fp(tmp_path):
+    # No code to ground the verdict -> undetermined, never a false positive. Uses
+    # the real ClaudeFPJudge, which short-circuits on a None source (no network).
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Other.java", 10)])
+
+    rs = Scorer(
+        db, FakeJudge(TruthVerdict(True)), fp_judge=ClaudeFPJudge(), code=FakeCode(None)
+    ).score_run(run_id)
+
+    f = rs.findings[0]
+    assert f.fp is not None and f.fp.error == "source unavailable"
+    assert f.fp_category == "undetermined"
+    assert db.run_findings(run_id)[0]["judge_fp_verdict"] == "error: source unavailable"
+
+
+def test_fp_judge_never_receives_the_advisory(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = db.upsert_case(
+        {
+            "source": "cvd",
+            "ext_id": "GHSA-secret",
+            "description": "SECRET-ADVISORY-TEXT",
+            "gt_files": ["Foo.java"],
+            "gt_hunks": [{"file": "Foo.java", "start": 73, "end": 79}],
+        }
+    )
+    run_id = _complete_run(db, case_id, findings=[("Other.java", 5)])
+    fp = FakeFPJudge(FPVerdict(False))
+    code = FakeCode("clean source")
+
+    Scorer(db, FakeJudge(TruthVerdict(True)), fp_judge=fp, code=code).score_run(run_id)
+
+    finding, source = fp.seen[0]
+    # The FP judge sees only the finding + its source — never the advisory.
+    assert "SECRET-ADVISORY-TEXT" not in (finding.description or "")
+    assert "SECRET-ADVISORY-TEXT" not in (source or "")
+
+
+def test_load_run_score_rebuilds_fp_verdicts(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Other.java", 10)])
+    fp = FakeFPJudge(FPVerdict(False, reasoning="safe", cost_usd=0.02))
+    scorer = Scorer(db, FakeJudge(TruthVerdict(True)), fp_judge=fp, code=FakeCode())
+
+    scorer.score_run(run_id)
+    assert fp.calls == 1
+
+    reloaded = scorer.load_run_score(run_id)
+    assert fp.calls == 1  # no new FP-judge calls
+    reloaded_fp = reloaded.findings[0].fp
+    assert reloaded_fp is not None and reloaded_fp.reasoning == "safe"
+    assert reloaded.findings[0].fp_category == "false_positive"
+    assert reloaded.fp_cost == pytest.approx(0.02)
+
+
+def test_needs_scoring_accounts_for_fp(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Other.java", 10)])
+
+    detection_only = Scorer(db, FakeJudge(TruthVerdict(True)))
+    detection_only.score_run(run_id)
+    assert not detection_only.needs_scoring(run_id)  # detection settled
+
+    precision = Scorer(
+        db,
+        FakeJudge(TruthVerdict(True)),
+        fp_judge=FakeFPJudge(FPVerdict(False)),
+        code=FakeCode(),
+    )
+    assert precision.needs_scoring(run_id)  # FP not yet done
+    precision.score_run(run_id)
+    assert not precision.needs_scoring(run_id)
+
+
+# -- GitCodeProvider ---------------------------------------------------------
+
+
+class FakeGit:
+    """A _GitShow whose tree is a {repo_path: contents} dict."""
+
+    def __init__(self, contents: dict[str, str]):
+        self.contents = contents
+        self.prepared: list[tuple[str, str]] = []
+
+    def prepare(self, repo_url, commit, dest):
+        self.prepared.append((repo_url, commit))
+
+    def show(self, dest, rev, path):
+        from nelson.derive import GitError
+
+        if path not in self.contents:
+            raise GitError(f"missing {path} at {rev}")
+        return self.contents[path]
+
+
+def test_git_code_provider_resolves_repo_relative_path(tmp_path):
+    case = Case(source="cvd", ext_id="x", repo_url="https://r", vuln_commit="abc")
+    git = FakeGit({"src/main/Foo.java": "the code"})
+    cp = GitCodeProvider(git, root=tmp_path)
+    # A mount-absolute path is peeled to repo-relative; a real top-level src/ is
+    # preserved (unlike the matching normalizer).
+    assert cp.source(case, "/src/src/main/Foo.java") == "the code"
+    assert cp.source(case, "src/main/Foo.java") == "the code"
+
+
+def test_git_code_provider_caches_one_fetch_per_repo_commit(tmp_path):
+    case = Case(source="cvd", ext_id="x", repo_url="https://r", vuln_commit="abc")
+    git = FakeGit({"a.py": "A", "b.py": "B"})
+    cp = GitCodeProvider(git, root=tmp_path)
+    cp.source(case, "a.py")
+    cp.source(case, "b.py")
+    cp.source(case, "a.py")
+    assert git.prepared == [("https://r", "abc")]  # prepared once for the repo@commit
+
+
+def test_git_code_provider_missing_file_is_none(tmp_path):
+    case = Case(source="cvd", ext_id="x", repo_url="https://r", vuln_commit="abc")
+    cp = GitCodeProvider(FakeGit({}), root=tmp_path)
+    # A path absent at that revision -> None -> the judge reports undetermined.
+    assert cp.source(case, "Nope.java") is None
+
+
+def test_git_code_provider_without_repo_is_none(tmp_path):
+    case = Case(source="cvd", ext_id="x")  # no repo_url / vuln_commit
+    cp = GitCodeProvider(FakeGit({"x.py": "y"}), root=tmp_path)
+    assert cp.source(case, "x.py") is None
+
+
+# -- Precision report --------------------------------------------------------
+
+
+def test_precision_report_counts_and_rate():
+    findings = [
+        FindingScore(1, "Foo.java", 76, True, truth=TruthVerdict(True)),  # target hit
+        FindingScore(2, "G.java", 5, False, fp=FPVerdict(True)),  # real other bug
+        FindingScore(3, "H.java", 6, False, fp=FPVerdict(False)),  # false positive
+        FindingScore(4, "I.java", 7, False, fp=FPVerdict(None)),  # undetermined
+    ]
+    rs = RunScore(
+        1, "GHSA-a", "alpha", "complete", "hit", findings=findings, fp_cost=0.06
+    )
+    p = {r.competitor_name: r for r in precision_report([rs])}["alpha"]
+
+    assert (p.target_hits, p.real_others, p.false_positives, p.undetermined) == (
+        1,
+        1,
+        1,
+        1,
+    )
+    assert p.true_findings == 2
+    assert p.precision == pytest.approx(2 / 3)  # 2 true / (2 true + 1 fp)
+    assert p.cases == 1
+    assert p.fp_per_case == pytest.approx(1.0)
+    assert p.fp_cost == pytest.approx(0.06)
+
+
+def test_precision_is_none_when_nothing_decided():
+    # Only an undetermined finding -> precision is None (not a misleading 0%).
+    findings = [FindingScore(1, "F.java", 5, False, fp=FPVerdict(None))]
+    rs = RunScore(1, "GHSA-x", "alpha", "complete", "miss", findings=findings)
+    p = precision_report([rs])[0]
+    assert p.precision is None
+    assert p.false_positives == 0
+    assert p.undetermined == 1
+
+
+def test_competitor_precision_guards_empty_denominators():
+    p = CompetitorPrecision("x", false_positives=2, cases=0)
+    assert p.fp_per_case is None  # no audited cases
+    p2 = CompetitorPrecision("y")  # nothing reported
+    assert p2.precision is None
+
+
+def test_claude_fp_judge_is_an_fpjudge():
+    from nelson.score import FPJudge
+
+    assert isinstance(ClaudeFPJudge(), FPJudge)
+
+
+def test_claude_fp_judge_source_unavailable_short_circuits():
+    # No network: a None source returns an undetermined verdict immediately.
+    verdict = ClaudeFPJudge().judge(ReportedFinding(file="x", line=1), None)
+    assert verdict.is_real is None
+    assert verdict.error == "source unavailable"

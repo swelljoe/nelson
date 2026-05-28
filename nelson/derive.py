@@ -97,6 +97,14 @@ class SubprocessGitRunner:
     def diff(self, dest: Path, base: str, head: str) -> str:
         return self._run(["diff", base, head], dest)
 
+    def show(self, dest: Path, rev: str, path: str) -> str:
+        """Contents of ``path`` at ``rev`` (``git show rev:path``).
+
+        ``path`` must be repo-root-relative with forward slashes. Used by the P4
+        FP judge to read the pre-patch source it grounds its verdict on; raises
+        GitError if the file does not exist at that revision."""
+        return self._run(["show", f"{rev}:{path}"], dest)
+
 
 @dataclass
 class Derivation:

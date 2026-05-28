@@ -1,6 +1,6 @@
 # Nelson Benchmark Harness — Implementation Plan
 
-> Status: P3 landed (2026-05-27); P4 next. Written 2026-05-26.
+> Status: P4 landed (2026-05-27); P5 next. Written 2026-05-26.
 > This document is the durable source of truth for the benchmark effort. Update it as phases land.
 
 ## 1. Goal
@@ -143,9 +143,19 @@ Rolled up to the **case** (the detection unit): a case is detected (**hit**) iff
 file-runs hit; precedence for the rest is `judge_error` > `miss` > `excluded` (an undetermined
 file keeps the case out of the denominator rather than scoring it a clean miss). `judge_error`
 and `excluded` cases are excluded from the detection-rate denominator — never counted as misses.
-- **false positives**: every *other* reported finding (not matching ground truth) → FP-judge
-  → real-bug vs false-positive. **The FP-judge must NOT see the CVE description** (avoid
-  over-trust / circularity); the truth-judge *does* (that's the ground truth).
+- **false positives (P4)**: every reported finding that is *not the confirmed target bug* —
+  a finding that didn't localize, **or one that localized but the truth judge ruled a
+  *different* bug** — is FP-judged. The FP judge is **code-grounded**: it reads the actual
+  pre-patch source (`git show vuln_commit:path`) and rules `confirmed` (a real bug) /
+  `false_positive` / `needs_review`. **The FP-judge must NOT see the CVE description** (avoid
+  over-trust / circularity) — its inputs are *only* the finding + the source, so the advisory
+  cannot leak by construction; the truth-judge *does* see the advisory (that's the ground
+  truth). A confirmed *different* bug is credited as a real finding (`real_other`), never
+  penalized; a `needs_review`, a judge failure, or a missing source is **undetermined** —
+  excluded from precision, never scored as a false positive (the integrity rule again).
+  - **precision** = true findings / (true findings + false positives), where true findings =
+    target-bug hits + confirmed other real bugs. Plus **false-positives-per-case** (FP count
+    normalized by the cases a competitor audited).
 
 Metrics: detection rate (recall over eligible cases), precision / false-positives-per-case,
 cost per case, wall-clock latency, model size-class. Pareto frontier over
@@ -283,7 +293,39 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
       a phantom miss. Now: try the whole text, then fenced ```json blocks, then every balanced
       array, accepting only one that carries finding *objects* and preferring the last; invalid
       backslash escapes are repaired (shared with pre-vet). 141 tests.
-- **P4 — Precision**: FP judge over non-ground-truth findings → precision metrics.
+- **P4 — Precision** ✅ *(branch `bench-p4-precision`)*. Code-grounded FP judge over every
+  non-target finding → precision + false-positives-per-case.
+  *Gate met: the live FP judge, given junrar's real pre-patch source and **no advisory**,
+  confirmed a genuine different bug and rejected a plausible-sounding hallucination (below).*
+  Delivered: `Database.record_fp_verdict` (fills `run_findings.judge_fp_verdict`, FP cost
+  logged to the `judgments` ledger as `target_kind='fp'`, tracked separately from both
+  competitor and truth-judge spend); `SubprocessGitRunner.show` (`git show rev:path`);
+  `nelson/score.py` — `FPVerdict`, an `FPJudge` Protocol, a `CodeProvider` /
+  `GitCodeProvider` (per-(repo,commit) shallow-fetch + file cache; a path absent at the
+  revision → None → undetermined), `build_fp_prompt` (takes **no Case** — the advisory cannot
+  reach the FP judge), `parse_fp_verdict`, and `ClaudeFPJudge` (host `claude -p`, code-grounded,
+  failures surfaced not guessed); the `Scorer` now optionally FP-judges (`fp_judge` + `code`),
+  with `FindingScore.is_target_hit` / `fp_category`, `load_run_score` + `needs_scoring` made
+  FP-aware, and a `precision_report` / `CompetitorPrecision`; `bench score` gains
+  `--precision/--no-precision`, `--fp-judge-model`, `--cache-dir` and a precision table.
+  165 tests total.
+  - **Two gates, two judges.** The truth judge (P3) answers "is this *the* bug?" from the
+    advisory; the FP judge answers "is this a *real* bug?" from the code, never the advisory.
+    Splitting them keeps precision honest: a model is credited for finding a genuine *other*
+    bug (`real_other`) and penalized only for noise (`false_positive`), and the judge's
+    indecision (`needs_review` / failure / unfetchable source) is *undetermined*, never an FP.
+  - **Path resolution.** Findings report paths *relative to the `/src` mount* (the repo root),
+    so they are already repo-relative; the FP judge peels only a redundant `/src/` prefix for
+    `git show` (it must NOT strip a real top-level `src/`, unlike the localization matcher).
+  - **Gate run (junrar GHSA-j273, pre-patch `LocalFolderExtractor.java`, no advisory).** Real
+    `GitCodeProvider` fetched the file via `git show c7041fc0:…`; the real Opus FP judge then
+    (a) **confirmed** the weak `startsWith` prefix-check at line 61 as a genuine CWE-22 sibling-
+    directory traversal — independently deriving the attacker-controlled `getFileName`, the
+    `/tmp/out` vs `/tmp/out-evil` bypass, exploitability, and the correct fix — and (b) rejected
+    a confident "resource leak" claim at line 51 as a **false_positive**, noting the line is
+    inside try-with-resources so `close()` is guaranteed. ~$0.14 for the two calls. The
+    code-grounded judge discriminates real bugs from plausible noise without the advisory —
+    exactly the precision signal P4 needed.
 - **P5 — Leaderboard + Pareto** reporting.
 - **P6 — Automation loop**: scheduling + corpus/competitor lifecycle.
 - **P7 — More runtimes**: deepseek, kimi, raw-api loop (MiMo), gemini-cli, pi-custom — each
