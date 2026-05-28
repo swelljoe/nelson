@@ -627,6 +627,7 @@ class FakeGit:
     def __init__(self, contents: dict[str, str]):
         self.contents = contents
         self.prepared: list[tuple[str, str]] = []
+        self.shown: list[str] = []
 
     def prepare(self, repo_url, commit, dest):
         self.prepared.append((repo_url, commit))
@@ -634,6 +635,7 @@ class FakeGit:
     def show(self, dest, rev, path):
         from nelson.derive import GitError
 
+        self.shown.append(path)
         if path not in self.contents:
             raise GitError(f"missing {path} at {rev}")
         return self.contents[path]
@@ -647,6 +649,18 @@ def test_git_code_provider_resolves_repo_relative_path(tmp_path):
     # preserved (unlike the matching normalizer).
     assert cp.source(case, "/src/src/main/Foo.java") == "the code"
     assert cp.source(case, "src/main/Foo.java") == "the code"
+    assert cp.source(case, "C:\\src\\main\\Foo.java") == "the code"
+
+
+def test_git_code_provider_rejects_unsafe_repo_path_inputs(tmp_path):
+    case = Case(source="cvd", ext_id="x", repo_url="https://r", vuln_commit="abc")
+    git = FakeGit({"src/main/Foo.java": "the code"})
+    cp = GitCodeProvider(git, root=tmp_path)
+
+    assert cp.source(case, "/etc/passwd") is None
+    assert cp.source(case, "src/../main/Foo.java") is None
+    assert cp.source(case, "src/main/Foo:java") is None
+    assert git.shown == []
 
 
 def test_git_code_provider_caches_one_fetch_per_repo_commit(tmp_path):

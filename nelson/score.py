@@ -80,7 +80,17 @@ def _repo_relative(path: str) -> str:
         p = p[len("/src/") :]
     elif p.startswith("./"):
         p = p[2:]
-    return p.lstrip("/")
+    elif p.startswith("/"):
+        return ""
+
+    parts = [part for part in p.split("/") if part and part != "."]
+    if parts and parts[0].endswith(":"):
+        parts = parts[1:]
+    if not parts:
+        return ""
+    if any(part == ".." or ":" in part for part in parts):
+        return ""
+    return "/".join(parts)
 
 
 def paths_match(finding_path: str | None, gt_path: str | None) -> bool:
@@ -441,6 +451,8 @@ class GitCodeProvider:
         from .derive import GitError, _repo_slug
 
         norm = _repo_relative(file)
+        if not norm:
+            return None
         key = (case.repo_url, case.vuln_commit, norm)
         if key in self._cache:
             return self._cache[key]
