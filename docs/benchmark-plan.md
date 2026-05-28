@@ -212,7 +212,7 @@ cost per case, wall-clock latency, model size-class. Pareto frontier over
   stream-json output parsing (`extract_result` /
   `parse_competitor_findings`), and the `BenchRunner` orchestrator; `nelson bench
   run/runs/show-run` CLI. Tested with an injected fake backend + fake auth (no podman /
-  network / credentials), 107 tests total.
+  network / credentials), covered by the test suite.
   - **Container design.** Minimal `fedora-minimal:41` image (git + ripgrep); the host's
     229 MB `claude` binary is **bind-mounted read-only** rather than baked in, so the
     image tracks the host CLI version. The case repo is checked out at `vuln_commit` and
