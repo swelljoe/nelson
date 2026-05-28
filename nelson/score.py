@@ -623,9 +623,7 @@ class FindingScore:
     @property
     def is_target_hit(self) -> bool:
         """The localized finding the truth judge confirmed is the same bug."""
-        return (
-            self.localized and self.truth is not None and self.truth.same_bug is True
-        )
+        return self.localized and self.truth is not None and self.truth.same_bug is True
 
     @property
     def fp_category(self) -> str | None:
