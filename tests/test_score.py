@@ -320,6 +320,21 @@ def test_detection_report_rates_and_exclusions():
     assert report["beta"].detection_rate == 1.0
 
 
+def test_drop_competitors_filters_named_competitors():
+    from nelson.score import RunScore, drop_competitors
+
+    scores = [
+        RunScore(1, "c1", "alpha", "complete", "hit"),
+        RunScore(2, "c1", "agy", "complete", "refused"),
+        RunScore(3, "c2", "beta", "complete", "miss"),
+    ]
+    kept = drop_competitors(scores, {"agy"})
+    assert [rs.competitor_name for rs in kept] == ["alpha", "beta"]
+    # empty exclusion set is a no-op; unknown names are ignored
+    assert drop_competitors(scores, set()) == scores
+    assert len(drop_competitors(scores, {"nope"})) == 3
+
+
 def test_competitor_detection_zero_eligible_is_zero_rate():
     d = CompetitorDetection("x", hits=0, misses=0, excluded=3)
     assert d.eligible == 0

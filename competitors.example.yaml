@@ -125,21 +125,18 @@
   cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1", "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4}'
   knowledge_cutoff: 2025-06
 
-# Native agent CLI, bind-mounted (subscription sign-in on the host, no key). `agy`
-# is the Antigravity / Gemini CLI (it replaced `gemini`); Claude-Code-like, plain
-# text out, no -m (the model is the signed-in account's default).
-- name: agy/antigravity
-  model: antigravity              # informational: agy has no model flag
-  runtime: agy
-  tool_profile: read-grep
-  knowledge_cutoff: 2025-06
+# NOTE: the `agy/antigravity` competitor (the Antigravity / Gemini CLI, native
+# subscription) was REMOVED 2026-05-29. Its wrapper trips a safety filter that
+# refuses the large majority of security-audit prompts (most runs returned no
+# output in ~8s), so it yields no usable signal — only occasional, inconsistent
+# engagement. Re-add it only if Antigravity stops refusing security questions.
+# Gemini itself is still tested via the raw-api-loop competitors below, which
+# engage the identical prompt at default safety through the OpenAI-compat endpoint.
 
 # Gemini through its OpenAI-compatible endpoint, on the shared raw-api-loop harness
-# (apples-to-apples with the other raw-api competitors). The `agy` CLI above refuses
-# the audit (its wrapper trips a safety filter) and scores as `refused`; the direct
-# API engages the identical prompt at default safety. Needs a Google AI Studio key
-# ($GEMINI_API_KEY on the host). All three below share one auth profile + endpoint;
-# they differ only by `model`.
+# (apples-to-apples with the other raw-api competitors). Needs a Google AI Studio
+# key ($GEMINI_API_KEY on the host). All three below share one auth profile +
+# endpoint; they differ only by `model`.
 #
 # CAVEAT: recency does NOT guarantee engagement — gate each model's *engagement*
 # before trusting its score. Live-checked 2026-05-28 on junrar GHSA-j273 (CWE-22):
