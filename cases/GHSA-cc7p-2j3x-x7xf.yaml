@@ -1,0 +1,72 @@
+ext_id: GHSA-cc7p-2j3x-x7xf
+source: cvd
+cve_id: CVE-2026-32267
+ghsa_id: GHSA-cc7p-2j3x-x7xf
+ant_id: ANT-2026-ZQ8AY22X
+project: CraftCMS
+repo_url: https://github.com/craftcms/cms
+fix_commit: 6301e217c5f15617d939c432cb770db50af14b33
+vuln_commit: e370b5a098420ef2fe9c569c17ed2bfe047bebd9
+bug_class: privilege-escalation
+cwe: CWE-863
+severity: high
+disclosure_date: '2026-05-20T07:40:37.681447Z'
+status: vetted
+vet_confidence: 0.8
+vet_notes: 'The advisory (CWE-863 privilege escalation via token) matches the fix:
+  the pre-patch `Controller::requireToken()` shown in the diff only checks `!$this->request->getHadToken()`
+  — i.e. that *a* valid token exists — rather than verifying the token''s route matches
+  the requested route, so any valid token (e.g. one minted for a low-privilege route)
+  could be replayed against the impersonate endpoint. That vulnerable line is present
+  in the removed/context lines, and a capable model with the full source could plausibly
+  spot the missing token-to-route binding, though it requires cross-file reasoning
+  about the token system rather than a single obvious line.'
+description: Privilege Escalation/Bypass through UsersController->actionImpersonateWithToken()
+build_recipe: null
+gt_files:
+- CHANGELOG.md
+- src/helpers/UrlHelper.php
+- src/services/Tokens.php
+- src/web/Controller.php
+- src/web/Request.php
+- src/web/UrlManager.php
+gt_hunks:
+- file: CHANGELOG.md
+  start: 1
+  end: 5
+- file: src/helpers/UrlHelper.php
+  start: 658
+  end: 666
+- file: src/services/Tokens.php
+  start: 34
+  end: 39
+- file: src/services/Tokens.php
+  start: 137
+  end: 160
+- file: src/services/Tokens.php
+  start: 163
+  end: 168
+- file: src/web/Controller.php
+  start: 526
+  end: 532
+- file: src/web/Request.php
+  start: 17
+  end: 22
+- file: src/web/Request.php
+  start: 197
+  end: 202
+- file: src/web/Request.php
+  start: 510
+  end: 516
+- file: src/web/Request.php
+  start: 519
+  end: 524
+- file: src/web/Request.php
+  start: 549
+  end: 558
+- file: src/web/UrlManager.php
+  start: 548
+  end: 553
+- file: src/web/UrlManager.php
+  start: 557
+  end: 566

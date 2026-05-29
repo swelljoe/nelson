@@ -1,0 +1,35 @@
+ext_id: GHSA-f26g-jm89-4g65
+source: cvd
+cve_id: null
+ghsa_id: GHSA-f26g-jm89-4g65
+ant_id: ANT-2026-6SNS6KMP
+project: GitoxideLabs/gitoxide
+repo_url: https://github.com/GitoxideLabs/gitoxide
+fix_commit: e3ca1e64b0bcd627c7c5d3620f891cc22d1d03c7
+vuln_commit: 95b0399abca3e040686591388991b08c794050cd
+bug_class: rce
+cwe: CWE-183, CWE-349, CWE-501, CWE-77
+severity: high
+disclosure_date: '2026-05-20T07:40:37.681447Z'
+status: vetted
+vet_confidence: 0.72
+vet_notes: 'The advisory (RCE via submodule `update = !command` from a malicious .gitmodules)
+  matches the fix, which corrects a genuine logic flaw present in the pre-patch code:
+  the guard checks whether *any* foreign-section value exists for the submodule rather
+  than whether the *actually-returned* value came from the untrusted modules file,
+  so a command from .gitmodules slips through whenever an unrelated foreign section
+  is also present. It is a real authorization/source-confusion bug (CWE-349), not
+  a version bump, and is localized to one function with an evident security intent,
+  though pinpointing it requires understanding gix-config''s last-wins string() vs.
+  any-section semantics, which makes it moderately rather than trivially findable.'
+description: RCE when updating a Git submodule of a malicious repository
+build_recipe: null
+gt_files:
+- gix-submodule/src/access.rs
+gt_hunks:
+- file: gix-submodule/src/access.rs
+  start: 166
+  end: 172
+- file: gix-submodule/src/access.rs
+  start: 175
+  end: 188

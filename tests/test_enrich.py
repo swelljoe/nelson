@@ -75,6 +75,47 @@ def test_osv_not_found_yields_no_updates():
     assert OSVEnricher(http).enrich(case) == {}
 
 
+def test_osv_follows_ghsa_alias_from_404_message():
+    # The 2026 seed reality: the CVE id 404s, but OSV names the GHSA alias it
+    # *does* index in the error body, and that record carries the /commit/ ref.
+    case = Case(source="cvd", ext_id="CVE-2026-7474")
+    http = FakeHttp(
+        {
+            OSV_VULN_URL + "CVE-2026-7474": (
+                404,
+                {
+                    "code": 5,
+                    "message": (
+                        "Bug not found, but the following aliases were: "
+                        "GHSA-jq35-85cj-fj4p"
+                    ),
+                },
+            ),
+            OSV_VULN_URL + "GHSA-jq35-85cj-fj4p": (200, _fx("osv_refs_only")),
+        }
+    )
+    updates = OSVEnricher(http).enrich(case)
+    assert updates["fix_commit"]
+    assert updates["repo_url"] == "https://github.com/moby/moby"
+
+
+def test_osv_follows_known_ghsa_id_when_ext_id_misses():
+    # If the case already carries a ghsa_id (from the seed), follow it directly
+    # without needing the 404 body to name an alias.
+    case = Case(source="cvd", ext_id="CVE-2026-7474", ghsa_id="GHSA-jq35-85cj-fj4p")
+    http = FakeHttp({OSV_VULN_URL + "GHSA-jq35-85cj-fj4p": (200, _fx("osv_refs_only"))})
+    updates = OSVEnricher(http).enrich(case)
+    assert updates["repo_url"] == "https://github.com/moby/moby"
+
+
+def test_osv_alias_miss_still_yields_nothing():
+    # CVE 404s with no alias in the body -> no second lookup, no updates.
+    case = Case(source="cvd", ext_id="CVE-2026-27654")
+    http = FakeHttp({})  # default 404 body has no aliases
+    assert OSVEnricher(http).enrich(case) == {}
+    assert http.calls == [OSV_VULN_URL + "CVE-2026-27654"]
+
+
 def test_osv_does_not_overwrite_existing_values():
     case = Case(
         source="manual",

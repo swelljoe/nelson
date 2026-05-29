@@ -5,6 +5,7 @@ nelson.db-shm
 # Benchmark run artifacts (regenerated each run)
 bench-runs/
 bench-cache/
+corpus-cache/
 .nelson_cache/
 bench-report.html
 

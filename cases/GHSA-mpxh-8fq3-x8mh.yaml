@@ -1,0 +1,33 @@
+ext_id: GHSA-mpxh-8fq3-x8mh
+source: cvd
+cve_id: null
+ghsa_id: GHSA-mpxh-8fq3-x8mh
+ant_id: ANT-2026-H97FY6C8, ANT-2026-HN9XZXJ9, ANT-2026-RXYVE4DZ
+project: freerdp
+repo_url: https://github.com/FreeRDP/FreeRDP
+fix_commit: 4a065a941ae134a0433d1497c03b3c3eb91b9f85
+vuln_commit: f16118b40291c1f9dcf454e3b0388b251f6abe8b
+bug_class: heap-buffer-overflow
+cwe: CWE-787
+severity: high
+disclosure_date: '2026-05-20T07:40:37.681447Z'
+status: vetted
+vet_confidence: 0.85
+vet_notes: 'The advisory and the one-line fix describe the same real bug: when writing
+  into the internal temp buffer (stride nTempStep), the pre-patch bounds check at
+  planar.c:969 validates against the caller-provided nDstStep rather than nTempStep,
+  permitting an OOB heap write — clearly present in the removed/context lines, not
+  a version bump or hardening. A capable model reading the pre-patch code can plausibly
+  spot the wrong-stride bounds check, though it must connect that pTempData is sized
+  by nTempStep, which is a moderately subtle inference.'
+description: 'Heap-buffer-overflow write in FreeRDP''s planar bitmap decoder: freerdp_bitmap_decompress_planar()
+  in libfreerdp/codec/planar.c validates the X destination coordinate nXDst against
+  the caller-provided nDstStep even when writing into the internal temp buffer pTempData,
+  instead of the temp stride nTempStep, allowing an out-of-bounds heap write.'
+build_recipe: null
+gt_files:
+- libfreerdp/codec/planar.c
+gt_hunks:
+- file: libfreerdp/codec/planar.c
+  start: 966
+  end: 977
