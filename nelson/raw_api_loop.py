@@ -216,6 +216,23 @@ def _post_chat(url: str, payload: dict[str, Any], api_key: str) -> dict[str, Any
     return parsed if isinstance(parsed, dict) else {}
 
 
+def usage_delta(usage: dict[str, Any]) -> tuple[int, int]:
+    """(input, output) tokens from one response's ``usage`` block.
+
+    Output is taken as ``total_tokens - prompt_tokens`` when that exceeds the
+    reported ``completion_tokens``. Reasoning ("thinking") models bill their
+    thinking tokens at the output rate, and some providers — notably Gemini's
+    OpenAI-compatible layer — fold those into ``total_tokens`` but omit them from
+    ``completion_tokens``, so summing ``completion_tokens`` alone undercounts
+    billed output (and the cost derived from it). ``max`` keeps the fallback safe
+    when ``total_tokens`` is absent or inconsistent (then output = completion).
+    """
+    prompt = usage.get("prompt_tokens") or 0
+    completion = usage.get("completion_tokens") or 0
+    total = usage.get("total_tokens") or 0
+    return prompt, max(completion, total - prompt)
+
+
 def compute_cost(
     tokens_in: int, tokens_out: int, in_price: float | None, out_price: float | None
 ) -> float | None:
@@ -296,9 +313,9 @@ def run_loop(
             payload["tool_choice"] = "auto"
 
         resp = post(url, payload, api_key)
-        usage = resp.get("usage") or {}
-        total_in += usage.get("prompt_tokens") or 0
-        total_out += usage.get("completion_tokens") or 0
+        step_in, step_out = usage_delta(resp.get("usage") or {})
+        total_in += step_in
+        total_out += step_out
         choices = resp.get("choices") or [{}]
         msg = (choices[0].get("message") or {}) if choices else {}
         tool_calls = msg.get("tool_calls") or []

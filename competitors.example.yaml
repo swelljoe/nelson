@@ -28,9 +28,13 @@
 # For `raw-api-loop`, `cost_model` is a QUOTED JSON string carrying the endpoint
 # `base_url` and optional per-million-token pricing (`input_usd_per_mtok` /
 # `output_usd_per_mtok`); pricing is best-effort (tokens are always recorded, cost
-# is null without it). VERIFY-AT-WIRING: confirm each provider's real base_url,
-# model id, and key env-var name before a live run — the values below are
-# illustrative placeholders.
+# is null without it). The same pricing keys also set cost for a non-Anthropic
+# model run via `claude-code` over an Anthropic-compatible endpoint: claude's own
+# reported cost prices the *mapped Anthropic model*, not the provider, so declared
+# pricing overrides it (native claude declares none and keeps its real cost).
+# Prices below are USD/MTok, standard tier, verified 2026-05-28 (see per-entry
+# notes); update when a provider's promo expires. VERIFY-AT-WIRING: confirm each
+# provider's real base_url, model id, and key env-var name before a live run.
 
 - name: claude-code/sonnet
   model: sonnet
@@ -52,12 +56,15 @@
 # endpoint). Same model, trusted agent. cost_model carries the endpoint + the model
 # mapping env claude reads; auth_profile supplies the token as ANTHROPIC_AUTH_TOKEN.
 # VERIFY-AT-WIRING: confirm base_url + model ids against api-docs.deepseek.com.
+# PRICING: deepseek-v4-pro is 75% off (0.435/0.87) until 2026-05-31 15:59 UTC;
+# standard rate after is 1.74/3.48 — UPDATE then. (claude reports an Anthropic-priced
+# cost for this third-party model, so the declared pricing below overrides it.)
 - name: claude-code/deepseek
   model: deepseek-v4-pro          # VERIFY-AT-WIRING: real model id
   runtime: claude-code
   tool_profile: read-grep
   auth_profile: deepseek-anthropic
-  cost_model: '{"anthropic_base_url": "https://api.deepseek.com/anthropic", "env": {"ANTHROPIC_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash"}}'
+  cost_model: '{"anthropic_base_url": "https://api.deepseek.com/anthropic", "env": {"ANTHROPIC_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash"}, "input_usd_per_mtok": 0.435, "output_usd_per_mtok": 0.87}'
   size_class: large
   knowledge_cutoff: 2025-06
 
@@ -77,12 +84,15 @@
 # token-plan-<region>.xiaomimimo.com (e.g. -sgp Singapore, -cn China); pay-as-you-go
 # (`sk-` keys) is api.xiaomimimo.com. Models: mimo-v2.5-pro / mimo-v2.5. The -sgp
 # host below is verified working for a Singapore token plan — adjust to your region.
+# MiMo pricing (overseas/USD tier, matching the -sgp endpoint): mimo-v2.5-pro
+# 0.20/0.40, mimo-v2.5 0.08/0.16. Xiaomi cut MiMo prices sharply on 2026-05-27;
+# these are the post-cut rates — re-verify if they move again.
 - name: claude-code/mimo
   model: mimo-v2.5-pro
   runtime: claude-code
   tool_profile: read-grep
   auth_profile: mimo-anthropic
-  cost_model: '{"anthropic_base_url": "https://token-plan-sgp.xiaomimimo.com/anthropic", "env": {"ANTHROPIC_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_SONNET_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_OPUS_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mimo-v2.5-pro"}}'
+  cost_model: '{"anthropic_base_url": "https://token-plan-sgp.xiaomimimo.com/anthropic", "env": {"ANTHROPIC_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_SONNET_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_OPUS_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mimo-v2.5-pro"}, "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4}'
   knowledge_cutoff: 2025-06
 
 - name: raw-api-loop/mimo
@@ -90,7 +100,7 @@
   runtime: raw-api-loop
   tool_profile: read-grep
   auth_profile: mimo-api-key      # value from $MIMO_API_KEY on the host
-  cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1"}'
+  cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1", "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4}'
   knowledge_cutoff: 2025-06
 
 # Native agent CLI, bind-mounted (subscription sign-in on the host, no key). `agy`
@@ -117,35 +127,41 @@
 #                              (adjacency noise — n=1, averages out over the matrix)
 #   gemini-3-flash-preview  -> REFUSES at default safety (would only score `refused`;
 #                              NOT added below for that reason)
+#
+# COST: the compat endpoint returns token usage but no dollar cost, so the
+# raw-api-loop harness computes it from the per-MTok prices below (standard tier,
+# <200k-token prompts; verified against ai.google.dev/gemini-api/docs/pricing on
+# 2026-05-28). These are reasoning models — they bill "thinking" tokens at the
+# output rate, which the compat layer reports in total_tokens but not in
+# completion_tokens; the harness derives output as total-prompt so those are
+# counted (see usage_delta in raw_api_loop.py).
 - name: raw-api-loop/gemini
   model: gemini-2.5-pro
   runtime: raw-api-loop
   tool_profile: read-grep
   auth_profile: gemini-openai     # value from $GEMINI_API_KEY on the host
-  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai"}'
+  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "input_usd_per_mtok": 1.25, "output_usd_per_mtok": 10.0}'
   knowledge_cutoff: 2025-01
 
 # Newer Gemini, same endpoint/auth. 3.1-pro-preview is the stronger contender (clean
 # judged HIT); 3.5-flash is the low-cost near-frontier entry — likely not a top
 # contender, but cheap to include and useful to compare against the other low-cost
-# near-frontier models. NOTE: knowledge_cutoff below is a placeholder inherited from
-# the 2.5 family — VERIFY-AT-WIRING (it feeds the cutoff-vs-disclosure integrity
-# check, so a wrong date can mis-include/exclude a case).
+# near-frontier models.
 - name: raw-api-loop/gemini-3.1-pro-preview
   model: gemini-3.1-pro-preview
   runtime: raw-api-loop
   tool_profile: read-grep
   auth_profile: gemini-openai
-  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai"}'
-  knowledge_cutoff: 2025-01       # VERIFY-AT-WIRING
+  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "input_usd_per_mtok": 2.0, "output_usd_per_mtok": 12.0}'
+  knowledge_cutoff: 2025-01
 
 - name: raw-api-loop/gemini-3.5-flash
   model: gemini-3.5-flash
   runtime: raw-api-loop
   tool_profile: read-grep
   auth_profile: gemini-openai
-  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai"}'
-  knowledge_cutoff: 2025-01       # VERIFY-AT-WIRING
+  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "input_usd_per_mtok": 1.5, "output_usd_per_mtok": 9.0}'
+  knowledge_cutoff: 2026-01
 
 # Wired but stubbed (no key/CLI yet): present so they enter the matrix the moment
 # creds/binaries arrive; until then each cleanly resolves to auth_failed/infra_error.
@@ -154,7 +170,7 @@
   runtime: raw-api-loop
   tool_profile: read-grep
   auth_profile: kimi-api-key
-  cost_model: '{"base_url": "https://api.moonshot.ai/v1"}'
+  cost_model: '{"base_url": "https://api.moonshot.ai/v1", "input_usd_per_mtok": 0.95, "output_usd_per_mtok": 4.0}'
   knowledge_cutoff: 2025-06
 
 - name: pi-custom/mimo
@@ -162,4 +178,5 @@
   runtime: pi-custom
   tool_profile: read-grep
   auth_profile: mimo-api-key
+  cost_model: '{"input_usd_per_mtok": 0.08, "output_usd_per_mtok": 0.16}'
   knowledge_cutoff: 2025-06

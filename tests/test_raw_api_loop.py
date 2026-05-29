@@ -15,6 +15,7 @@ from nelson.raw_api_loop import (
     tool_grep,
     tool_list_dir,
     tool_read_file,
+    usage_delta,
 )
 
 # -- Scripted-response helpers ----------------------------------------------
@@ -176,3 +177,21 @@ def test_compute_cost_from_prices():
 
 def test_compute_cost_none_without_prices():
     assert compute_cost(1000, 200, None, None) is None
+
+
+def test_usage_delta_counts_thinking_tokens_in_output():
+    # A reasoning model (e.g. Gemini compat): completion_tokens is the visible
+    # output only; total_tokens additionally carries billed thinking tokens.
+    # Output must be total - prompt (1929 + 189 thinking + 7 visible = 2125).
+    assert usage_delta(
+        {"prompt_tokens": 1929, "completion_tokens": 7, "total_tokens": 2125}
+    ) == (1929, 196)
+
+
+def test_usage_delta_falls_back_to_completion_without_total():
+    # Non-thinking provider, or no total_tokens: output = completion_tokens.
+    assert usage_delta({"prompt_tokens": 100, "completion_tokens": 40}) == (100, 40)
+    assert usage_delta(
+        {"prompt_tokens": 100, "completion_tokens": 40, "total_tokens": 140}
+    ) == (100, 40)
+    assert usage_delta({}) == (0, 0)
