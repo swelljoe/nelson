@@ -52,6 +52,20 @@
   size_class: small
   knowledge_cutoff: 2025-06
 
+# Native Claude Opus through the real Claude Code harness (host subscription, no
+# key, host's current binary — no pin needed; the message-shape break only affects
+# third-party anthropic proxies). This is the strong-frontier baseline: what the
+# best widely-available model does on the same prompt the others get. `--model opus`
+# resolves to the host default (Opus 4.8). subscription cost_model → claude reports
+# its real Anthropic-priced cost (correct here, since the model IS Anthropic's).
+- name: claude-code/opus
+  model: opus
+  runtime: claude-code
+  tool_profile: read-grep
+  cost_model: subscription
+  size_class: large
+  knowledge_cutoff: 2025-06
+
 # DeepSeek through the real Claude Code harness (its official Anthropic-compatible
 # endpoint). Same model, trusted agent. cost_model carries the endpoint + the model
 # mapping env claude reads; auth_profile supplies the token as ANTHROPIC_AUTH_TOKEN.
