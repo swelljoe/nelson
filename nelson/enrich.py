@@ -33,6 +33,13 @@ _GITHUB_COMMIT_RE = re.compile(
     r"github\.com/([^/\s]+)/([^/\s]+?)(?:\.git)?/commit/([0-9a-f]{7,40})"
 )
 
+# OSV returns 404 for an id it doesn't index directly but names the aliases it
+# *does* index in the error body, e.g.
+#   {"code":5,"message":"Bug not found, but the following aliases were: GHSA-..."}
+# Many fresh CVEs are only indexed under their GHSA alias (which carries the GIT
+# range / commit URL), so we follow the alias on a miss.
+_GHSA_ID_RE = re.compile(r"GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}", re.IGNORECASE)
+
 
 @runtime_checkable
 class HttpClient(Protocol):
@@ -125,9 +132,32 @@ class OSVEnricher:
     def __init__(self, client: HttpClient):
         self.client = client
 
+    def _lookup(self, ext_id: str) -> tuple[dict[str, Any] | None, Any]:
+        """Fetch one OSV record by id.
+
+        Returns ``(record, body)`` where ``record`` is the parsed vuln dict on a
+        200 and ``None`` otherwise; ``body`` is the raw parsed response (the 404
+        error body names aliases we can follow).
+        """
+        status, body = self.client.get_json(OSV_VULN_URL + ext_id)
+        if status == 200 and isinstance(body, dict):
+            return body, body
+        return None, body
+
     def enrich(self, case: Case) -> dict[str, Any]:
-        status, osv = self.client.get_json(OSV_VULN_URL + case.ext_id)
-        if status != 200 or not isinstance(osv, dict):
+        osv, body = self._lookup(case.ext_id)
+        if osv is None:
+            # Direct miss: OSV's 404 body may name a GHSA alias it *does* index.
+            # Re-query it (a known ghsa_id first, else one parsed from the error
+            # message) — that record usually carries the GIT range/commit URL.
+            alias = case.ghsa_id
+            if not alias and isinstance(body, dict):
+                m = _GHSA_ID_RE.search(body.get("message", ""))
+                if m:
+                    alias = m.group(0)
+            if alias and alias != case.ext_id:
+                osv, _ = self._lookup(alias)
+        if osv is None:
             return {}
 
         updates: dict[str, Any] = {}
