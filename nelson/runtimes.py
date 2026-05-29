@@ -293,10 +293,35 @@ class ClaudeCodeRuntime:
         return CredentialMountAuth()
 
     def build_spec(self, ctx: RuntimeContext) -> ContainerSpec:
+        cfg = parse_cost_model(ctx.competitor.cost_model)
         # Resolve the host claude binary lazily here (not at BenchRunner
         # construction), so a host without claude can still run other runtimes; a
-        # missing claude then becomes infra_error on a claude run.
-        claude_bin = ctx.claude_bin or _resolve_claude_bin()
+        # missing claude then becomes infra_error on a claude run. A competitor may
+        # pin its own ``claude_bin`` (an absolute host path) in cost_model — used to
+        # hold a third-party Anthropic-compat competitor on an older client version
+        # whose message shape that provider's proxy still accepts, without touching
+        # the host's default claude (judges, interactive CLI). The read-only mount
+        # means the pinned binary can't self-update inside the container.
+        pinned = cfg.get("claude_bin")
+        if pinned:
+            if not isinstance(pinned, str) or not Path(pinned).is_absolute():
+                raise RunnerError("cost_model.claude_bin must be a non-empty absolute host path")
+            claude_bin = Path(pinned)
+        else:
+            claude_bin = ctx.claude_bin or _resolve_claude_bin()
+        # Optional Anthropic-compatible passthrough (e.g. DeepSeek via its official
+        # Claude Code endpoint). base_url + the model-mapping env come from the
+        # competitor's cost_model JSON; the token arrives via the auth profile.
+        # VERIFY-AT-WIRING: provider base_url (e.g. https://api.deepseek.com/anthropic)
+        # and the model-mapping env vars.
+        base_url = cfg.get("anthropic_base_url")
+        # claude's --max-budget-usd enforces ITS OWN cost accounting, which prices a
+        # third-party model as the mapped *Anthropic* model (opus/sonnet rates) — wildly
+        # inflated, so a real compat run trips ``error_max_budget_usd`` mid-audit and is
+        # lost as infra_error. Disable the per-run cap for compat runs; real cost comes
+        # from declared pricing, and ``--timeout`` + global ``--max-spend-usd`` still
+        # bound spend. Native claude (no base_url) keeps the backstop.
+        max_budget = None if base_url else ctx.max_budget_usd
         spec = claude_code_spec(
             ctx.competitor,
             ctx.prompt,
@@ -305,16 +330,8 @@ class ClaudeCodeRuntime:
             ctx.auth,
             name=ctx.name,
             network=ctx.network,
-            max_budget_usd=ctx.max_budget_usd,
+            max_budget_usd=max_budget,
         )
-        # Optional Anthropic-compatible passthrough (e.g. DeepSeek via its official
-        # Claude Code endpoint). base_url + the model-mapping env come from the
-        # competitor's cost_model JSON; the token arrives via the auth profile.
-        # VERIFY-AT-WIRING: provider base_url (e.g. https://api.deepseek.com/anthropic),
-        # the model-mapping env vars, and that --max-budget-usd is harmless against a
-        # third-party endpoint (set max_budget_usd=None for compat runs if not).
-        cfg = parse_cost_model(ctx.competitor.cost_model)
-        base_url = cfg.get("anthropic_base_url")
         if base_url:
             spec.env["ANTHROPIC_BASE_URL"] = str(base_url)
             extra = cfg.get("env")
