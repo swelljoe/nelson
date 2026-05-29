@@ -59,12 +59,17 @@
 # PRICING: deepseek-v4-pro is 75% off (0.435/0.87) until 2026-05-31 15:59 UTC;
 # standard rate after is 1.74/3.48 — UPDATE then. (claude reports an Anthropic-priced
 # cost for this third-party model, so the declared pricing below overrides it.)
+# CLIENT PIN: Claude Code 2.1.156 puts a `system`-role entry in the messages array,
+# which DeepSeek's anthropic proxy rejects (400 "messages[1].role ... got 'system'");
+# 2.1.153 does not. `claude_bin` mounts that older host binary read-only for THIS
+# competitor only — host claude/judges stay current. HOST-SPECIFIC PATH; re-verify
+# when DeepSeek's endpoint accepts the newer shape (then drop the pin).
 - name: claude-code/deepseek
   model: deepseek-v4-pro          # VERIFY-AT-WIRING: real model id
   runtime: claude-code
   tool_profile: read-grep
   auth_profile: deepseek-anthropic
-  cost_model: '{"anthropic_base_url": "https://api.deepseek.com/anthropic", "env": {"ANTHROPIC_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash"}, "input_usd_per_mtok": 0.435, "output_usd_per_mtok": 0.87}'
+  cost_model: '{"anthropic_base_url": "https://api.deepseek.com/anthropic", "env": {"ANTHROPIC_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash"}, "input_usd_per_mtok": 0.435, "output_usd_per_mtok": 0.87, "claude_bin": "/home/joe/.local/share/claude/versions/2.1.153"}'
   size_class: large
   knowledge_cutoff: 2025-06
 
@@ -87,12 +92,15 @@
 # MiMo pricing (overseas/USD tier, matching the -sgp endpoint): mimo-v2.5-pro
 # 0.20/0.40, mimo-v2.5 0.08/0.16. Xiaomi cut MiMo prices sharply on 2026-05-27;
 # these are the post-cut rates — re-verify if they move again.
+# CLIENT PIN: MiMo's anthropic proxy rejects Claude Code 2.1.156's `system`-in-messages
+# shape identically to DeepSeek (400 "messages[1].role ... got 'system'"), so this
+# competitor is pinned to 2.1.153 via claude_bin too (see claude-code/deepseek note).
 - name: claude-code/mimo
   model: mimo-v2.5-pro
   runtime: claude-code
   tool_profile: read-grep
   auth_profile: mimo-anthropic
-  cost_model: '{"anthropic_base_url": "https://token-plan-sgp.xiaomimimo.com/anthropic", "env": {"ANTHROPIC_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_SONNET_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_OPUS_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mimo-v2.5-pro"}, "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4}'
+  cost_model: '{"anthropic_base_url": "https://token-plan-sgp.xiaomimimo.com/anthropic", "env": {"ANTHROPIC_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_SONNET_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_OPUS_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mimo-v2.5-pro"}, "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4, "claude_bin": "/home/joe/.local/share/claude/versions/2.1.153"}'
   knowledge_cutoff: 2025-06
 
 - name: raw-api-loop/mimo
@@ -165,13 +173,21 @@
 
 # Wired but stubbed (no key/CLI yet): present so they enter the matrix the moment
 # creds/binaries arrive; until then each cleanly resolves to auth_failed/infra_error.
-- name: raw-api-loop/kimi
-  model: kimi-k2.6                # VERIFY-AT-WIRING: real model id
-  runtime: raw-api-loop
-  tool_profile: read-grep
-  auth_profile: kimi-api-key
-  cost_model: '{"base_url": "https://api.moonshot.ai/v1", "input_usd_per_mtok": 0.95, "output_usd_per_mtok": 4.0}'
-  knowledge_cutoff: 2025-06
+#
+# kimi is COMMENTED OUT until a Moonshot key exists: raw-api-loop hits a REAL endpoint,
+# so a missing key yields auth_failed — and 3 consecutive auth_failed trip the loop's
+# circuit breaker, which then aborts the rest of the matrix (it can't tell a keyless
+# stub from an expired host login). That starved raw-api-loop/mimo of all its cells in
+# the 2026-05-28 run. Re-enable (uncomment) the moment $MOONSHOT_API_KEY is on the host.
+# (pi-custom/mimo is safe to keep: its runtime binary is absent, so it resolves to
+# infra_error, which does NOT count toward the auth breaker.)
+# - name: raw-api-loop/kimi
+#   model: kimi-k2.6                # VERIFY-AT-WIRING: real model id
+#   runtime: raw-api-loop
+#   tool_profile: read-grep
+#   auth_profile: kimi-api-key
+#   cost_model: '{"base_url": "https://api.moonshot.ai/v1", "input_usd_per_mtok": 0.95, "output_usd_per_mtok": 4.0}'
+#   knowledge_cutoff: 2025-06
 
 - name: pi-custom/mimo
   model: mimo-v2.5

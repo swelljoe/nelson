@@ -290,6 +290,89 @@ def test_claude_code_native_has_no_anthropic_base_url(tmp_path):
     assert "ANTHROPIC_BASE_URL" not in spec.env  # native subscription, unchanged
 
 
+def _claude_mount_source(spec):
+    """Host path bind-mounted to the in-container claude binary, or None."""
+    for src, dest, _mode in spec.mounts:
+        if dest == "/usr/local/bin/claude":
+            return src
+    return None
+
+
+def test_claude_bin_pin_overrides_default_binary(tmp_path):
+    # A competitor may pin an older host claude (e.g. for a third-party anthropic
+    # endpoint that rejects the current client's message shape). The pinned path is
+    # mounted for THIS competitor; ctx.claude_bin (the host default) is ignored.
+    comp = Competitor(
+        name="claude-code/deepseek",
+        model="deepseek-v4-pro",
+        runtime="claude-code",
+        cost_model='{"anthropic_base_url": "https://api.deepseek.com/anthropic", '
+        '"claude_bin": "/opt/claude/versions/2.1.153"}',
+    )
+    ctx = RuntimeContext(
+        competitor=comp,
+        prompt="audit a.c",
+        src_dir=tmp_path / "src",
+        auth=AuthMaterial(env={"ANTHROPIC_AUTH_TOKEN": "sk-ds"}, mounts=[]),
+        name="r1",
+        claude_bin=Path("/usr/bin/claude"),  # host default — must be overridden
+    )
+    spec = ClaudeCodeRuntime().build_spec(ctx)
+    assert _claude_mount_source(spec) == "/opt/claude/versions/2.1.153"
+
+
+def test_compat_run_disables_claude_max_budget(tmp_path):
+    # claude prices a third-party model as the mapped Anthropic model, so its
+    # --max-budget-usd accounting is inflated and trips mid-audit. Compat runs (with
+    # an anthropic_base_url) must drop the per-run cap entirely.
+    comp = Competitor(
+        name="claude-code/deepseek",
+        model="deepseek-v4-pro",
+        runtime="claude-code",
+        cost_model='{"anthropic_base_url": "https://api.deepseek.com/anthropic"}',
+    )
+    ctx = RuntimeContext(
+        competitor=comp,
+        prompt="audit a.c",
+        src_dir=tmp_path / "src",
+        auth=AuthMaterial(env={"ANTHROPIC_AUTH_TOKEN": "sk-ds"}, mounts=[]),
+        name="r1",
+        claude_bin=Path("/usr/bin/claude"),
+        max_budget_usd=0.50,
+    )
+    spec = ClaudeCodeRuntime().build_spec(ctx)
+    assert "--max-budget-usd" not in spec.argv
+
+
+def test_native_run_keeps_claude_max_budget(tmp_path):
+    comp = Competitor(name="claude-code/sonnet", model="sonnet", runtime="claude-code")
+    ctx = RuntimeContext(
+        competitor=comp,
+        prompt="audit a.c",
+        src_dir=tmp_path / "src",
+        auth=AuthMaterial(env={}, mounts=[]),
+        name="r1",
+        claude_bin=Path("/usr/bin/claude"),
+        max_budget_usd=0.50,
+    )
+    spec = ClaudeCodeRuntime().build_spec(ctx)
+    assert "--max-budget-usd" in spec.argv
+
+
+def test_claude_bin_defaults_to_ctx_when_unpinned(tmp_path):
+    comp = Competitor(name="claude-code/sonnet", model="sonnet", runtime="claude-code")
+    ctx = RuntimeContext(
+        competitor=comp,
+        prompt="audit a.c",
+        src_dir=tmp_path / "src",
+        auth=AuthMaterial(env={}, mounts=[]),
+        name="r1",
+        claude_bin=Path("/usr/bin/claude"),
+    )
+    spec = ClaudeCodeRuntime().build_spec(ctx)
+    assert _claude_mount_source(spec) == "/usr/bin/claude"
+
+
 def test_raw_api_loop_parse_output_ingests_result_object():
     parsed = RawApiLoopRuntime().parse_output(
         ContainerExecResult(0, _RESULT, ""), Competitor(name="x", model="m")

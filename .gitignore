@@ -2,6 +2,11 @@
 nelson.db
 nelson.db-wal
 nelson.db-shm
+# Benchmark run artifacts (regenerated each run)
+bench-runs/
+bench-cache/
+.nelson_cache/
+bench-report.html
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
