@@ -303,9 +303,12 @@ class ClaudeCodeRuntime:
         # the host's default claude (judges, interactive CLI). The read-only mount
         # means the pinned binary can't self-update inside the container.
         pinned = cfg.get("claude_bin")
-        claude_bin = (
-            Path(str(pinned)) if pinned else (ctx.claude_bin or _resolve_claude_bin())
-        )
+        if pinned:
+            if not isinstance(pinned, str) or not Path(pinned).is_absolute():
+                raise RunnerError("cost_model.claude_bin must be a non-empty absolute host path")
+            claude_bin = Path(pinned)
+        else:
+            claude_bin = ctx.claude_bin or _resolve_claude_bin()
         # Optional Anthropic-compatible passthrough (e.g. DeepSeek via its official
         # Claude Code endpoint). base_url + the model-mapping env come from the
         # competitor's cost_model JSON; the token arrives via the auth profile.
