@@ -102,12 +102,8 @@ def test_osv_follows_ghsa_alias_from_404_message():
 def test_osv_follows_known_ghsa_id_when_ext_id_misses():
     # If the case already carries a ghsa_id (from the seed), follow it directly
     # without needing the 404 body to name an alias.
-    case = Case(
-        source="cvd", ext_id="CVE-2026-7474", ghsa_id="GHSA-jq35-85cj-fj4p"
-    )
-    http = FakeHttp(
-        {OSV_VULN_URL + "GHSA-jq35-85cj-fj4p": (200, _fx("osv_refs_only"))}
-    )
+    case = Case(source="cvd", ext_id="CVE-2026-7474", ghsa_id="GHSA-jq35-85cj-fj4p")
+    http = FakeHttp({OSV_VULN_URL + "GHSA-jq35-85cj-fj4p": (200, _fx("osv_refs_only"))})
     updates = OSVEnricher(http).enrich(case)
     assert updates["repo_url"] == "https://github.com/moby/moby"
 

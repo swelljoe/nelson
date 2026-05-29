@@ -305,7 +305,9 @@ class ClaudeCodeRuntime:
         pinned = cfg.get("claude_bin")
         if pinned:
             if not isinstance(pinned, str) or not Path(pinned).is_absolute():
-                raise RunnerError("cost_model.claude_bin must be a non-empty absolute host path")
+                raise RunnerError(
+                    "cost_model.claude_bin must be a non-empty absolute host path"
+                )
             claude_bin = Path(pinned)
         else:
             claude_bin = ctx.claude_bin or _resolve_claude_bin()
