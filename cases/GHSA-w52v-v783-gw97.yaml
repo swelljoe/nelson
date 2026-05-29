@@ -1,0 +1,46 @@
+ext_id: GHSA-w52v-v783-gw97
+source: cvd
+cve_id: CVE-2026-26980
+ghsa_id: GHSA-w52v-v783-gw97
+ant_id: ANT-2026-H5T8XKWR
+project: TryGhost/Ghost
+repo_url: https://github.com/TryGhost/Ghost
+fix_commit: 30868d632b2252b638bc8a4c8ebf73964592ed91
+vuln_commit: ebf4bb79cb45e487e277318df61c6c559752fd0a
+bug_class: sql-injection
+cwe: CWE-89
+severity: critical
+disclosure_date: '2026-05-20T07:40:37.681447Z'
+status: vetted
+vet_confidence: 0.92
+vet_notes: The pre-patch `slug-filter-order.js` builds a raw SQL CASE clause via direct
+  string interpolation of user-supplied filter slug values (`= '${slug}'`), a textbook
+  CWE-89 SQL injection matching the critical Content API advisory; the fix replaces
+  it with `?` placeholders and bindings, confirming the same real bug. The vulnerable
+  string-interpolation pattern is plainly visible in the removed lines and is a classic,
+  easily recognizable injection a capable model would flag.
+description: SQL injection in Content API
+build_recipe: null
+gt_files:
+- ghost/core/core/server/api/endpoints/utils/serializers/input/utils/slug-filter-order.js
+- ghost/core/core/server/models/base/plugins/crud.js
+- ghost/core/package.json
+- ghost/core/test/e2e-api/content/tags.test.js
+- ghost/core/test/unit/api/endpoints/utils/serializers/input/utils/slug-filter-order.test.js
+- yarn.lock
+gt_hunks:
+- file: ghost/core/core/server/api/endpoints/utils/serializers/input/utils/slug-filter-order.js
+  start: 3
+  end: 17
+- file: ghost/core/core/server/models/base/plugins/crud.js
+  start: 101
+  end: 107
+- file: ghost/core/package.json
+  start: 72
+  end: 78
+- file: ghost/core/test/e2e-api/content/tags.test.js
+  start: 126
+  end: 131
+- file: yarn.lock
+  start: 8699
+  end: 8793

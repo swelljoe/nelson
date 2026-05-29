@@ -1,0 +1,46 @@
+ext_id: GHSA-j273-m5qq-6825
+source: cvd
+cve_id: CVE-2026-28208
+ghsa_id: GHSA-j273-m5qq-6825
+ant_id: ANT-2026-9VJ9JJXQ
+project: junrar
+repo_url: https://github.com/junrar/junrar
+fix_commit: 947ff1d33f00f940aa68ae2593500291d799d954
+vuln_commit: c7041fc07df2cc397ea46ba516933ee9725af250
+bug_class: path-traversal
+cwe: CWE-22
+severity: medium
+disclosure_date: '2026-05-20T07:40:37.681447Z'
+status: vetted
+vet_confidence: 0.85
+vet_notes: 'The diff shows a genuine backslash path-traversal bug: pre-patch, createFile''s
+  canonical-path check treats backslashes as literal characters (passing on Linux),
+  but makeFile then splits the name on backslash and reconstructs directories, allowing
+  escape outside the destination; the fix normalizes backslashes to forward slashes
+  before the check. The vulnerable logic is fully visible in the removed/context lines
+  and a capable model could reason about the inconsistency between the canonical check
+  and the backslash split.'
+description: Arbitrary file write due to backslash path traversal
+build_recipe: null
+gt_files:
+- src/main/java/com/github/junrar/LocalFolderExtractor.java
+- src/test/java/com/github/junrar/LocalFolderExtractorTest.java
+gt_hunks:
+- file: src/main/java/com/github/junrar/LocalFolderExtractor.java
+  start: 55
+  end: 61
+- file: src/main/java/com/github/junrar/LocalFolderExtractor.java
+  start: 73
+  end: 79
+- file: src/main/java/com/github/junrar/LocalFolderExtractor.java
+  start: 93
+  end: 97
+- file: src/test/java/com/github/junrar/LocalFolderExtractorTest.java
+  start: 1
+  end: 6
+- file: src/test/java/com/github/junrar/LocalFolderExtractorTest.java
+  start: 12
+  end: 17
+- file: src/test/java/com/github/junrar/LocalFolderExtractorTest.java
+  start: 55
+  end: 58
