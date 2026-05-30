@@ -33,6 +33,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -43,8 +44,32 @@ MAX_TOOL_OUTPUT = 20_000  # chars; keep a single tool result from blowing contex
 # Per-API-call read timeout. Reasoning models (Gemini 3.x pro, MiMo) can think for
 # minutes on a single turn over a large C file; a tight cap aborts the whole run as
 # an infra_error and silently drops the slowest (often strongest) models from the
-# matrix. 600s lets a slow reasoner finish a turn rather than penalising it.
-HTTP_TIMEOUT = 600  # seconds per API call
+# matrix. 600s lets a slow reasoner finish a turn rather than penalising it. A slow
+# self-hosted box (e.g. a 27B on an APU, where one big-context turn can exceed 600s)
+# raises it via NELSON_HTTP_TIMEOUT (set from the competitor's cost_model http_timeout).
+HTTP_TIMEOUT = 600  # default seconds per API call
+
+
+def _http_timeout() -> int:
+    """Per-call read timeout: NELSON_HTTP_TIMEOUT if set and valid, else the default."""
+    raw = os.environ.get("NELSON_HTTP_TIMEOUT")
+    if raw:
+        with contextlib.suppress(ValueError):
+            return int(raw)
+    return HTTP_TIMEOUT
+
+
+# Transient faults that warrant a retry rather than failing the whole run: provider
+# rate limits (429 — Mistral caps tokens/minute, which an agentic burst of large-
+# context calls trips even on a paid tier) and the 5xx family, plus transport errors
+# (a self-hosted endpoint like LM Studio closing the socket mid-response on a heavy
+# request). We pace-and-recover with exponential backoff; a persistent outage still
+# surfaces after the cap so the runner records a real infra_error, never a false
+# "found nothing".
+HTTP_RETRY_STATUS = (429, 500, 502, 503, 504)
+MAX_HTTP_RETRIES = 5  # retries after the first attempt (6 tries total)
+BACKOFF_BASE_S = 2.0  # exponential: 1, 2, 4, 8, 16 s ...
+BACKOFF_CAP_S = 60.0  # never wait longer than this between tries
 
 SYSTEM_PROMPT = (
     "You are a tool-using security auditor. Use the provided tools to read the "
@@ -199,25 +224,65 @@ def dispatch_tool(name: str, args: dict[str, Any], src_root: str | None = None) 
 # -- HTTP + cost -------------------------------------------------------------
 
 
-def _post_chat(url: str, payload: dict[str, Any], api_key: str) -> dict[str, Any]:
+def _retry_after_seconds(err: urllib.error.HTTPError) -> float | None:
+    """Parse a Retry-After header (delta-seconds form) from a 429/503, if present."""
+    with contextlib.suppress(Exception):
+        raw = err.headers.get("Retry-After") if err.headers else None
+        if raw is not None:
+            return max(0.0, float(raw.strip()))
+    return None
+
+
+def _post_chat(
+    url: str,
+    payload: dict[str, Any],
+    api_key: str,
+    *,
+    max_retries: int = MAX_HTTP_RETRIES,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
     """POST a chat/completions request and return the parsed JSON body.
 
-    Raises urllib.error.HTTPError / URLError on HTTP or transport failure; main()
-    turns those into a non-zero exit + the provider error so the runner classifies
-    auth/rate/infra. Injectable in tests via ``run_loop(post=...)``.
+    Transient faults are retried with exponential backoff (honoring Retry-After):
+    HTTP 429/5xx and transport errors (connection reset, the provider closing the
+    socket mid-response, TLS read errors). This lets a rate-limited provider and a
+    flaky self-hosted endpoint pace-and-recover instead of failing the whole run on
+    the first hiccup. After ``max_retries`` the last error propagates so main()
+    still exits non-zero with the provider error — the runner then classifies a
+    persistent failure as auth/infra, never masking it as a model finding nothing.
+    Injectable in tests via ``run_loop(post=...)``; ``sleep`` is injectable too.
     """
     data = json.dumps(payload).encode("utf-8")
-
-    # operator-configured base_url, not model-controlled, so this S310 audit warning
-    # is acceptable here.
-    req = urllib.request.Request(url, data=data, method="POST")  # noqa: S310
-    req.add_header("Content-Type", "application/json")
-    if api_key:
-        req.add_header("Authorization", f"Bearer {api_key}")
-    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
-        body = resp.read().decode("utf-8", errors="replace")
-    parsed = json.loads(body)
-    return parsed if isinstance(parsed, dict) else {}
+    for attempt in range(max_retries + 1):
+        # operator-configured base_url, not model-controlled, so this S310 audit
+        # warning is acceptable here. A fresh Request per attempt keeps retries clean.
+        req = urllib.request.Request(url, data=data, method="POST")  # noqa: S310
+        req.add_header("Content-Type", "application/json")
+        if api_key:
+            req.add_header("Authorization", f"Bearer {api_key}")
+        try:
+            with urllib.request.urlopen(req, timeout=_http_timeout()) as resp:  # noqa: S310
+                body = resp.read().decode("utf-8", errors="replace")
+            parsed = json.loads(body)
+            return parsed if isinstance(parsed, dict) else {}
+        except urllib.error.HTTPError as e:
+            if e.code in HTTP_RETRY_STATUS and attempt < max_retries:
+                delay = _retry_after_seconds(e)
+                if delay is None:
+                    delay = min(BACKOFF_CAP_S, BACKOFF_BASE_S**attempt)
+                sleep(delay)
+                continue
+            raise
+        except urllib.error.URLError:
+            # Transport-level failure (connection refused/reset, socket closed
+            # mid-response, TLS read error). HTTPError is a URLError subclass but is
+            # handled above, so this is purely the no-HTTP-response case.
+            if attempt < max_retries:
+                sleep(min(BACKOFF_CAP_S, BACKOFF_BASE_S**attempt))
+                continue
+            raise
+    # Unreachable: the final attempt either returns or raises. Satisfy type checkers.
+    raise RuntimeError("retry loop exited without returning")  # pragma: no cover
 
 
 def usage_delta(usage: dict[str, Any]) -> tuple[int, int]:
