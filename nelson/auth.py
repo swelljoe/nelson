@@ -197,6 +197,14 @@ STANDARD_AUTH_PROFILES: dict[str, AuthProfile] = {
         name="gemini-openai",
         env={"NELSON_API_KEY": "GEMINI_API_KEY"},
     ),
+    # Mistral (la Plateforme) through its OpenAI-compatible endpoint
+    # (api.mistral.ai/v1), on the shared raw-api-loop harness. A European frontier
+    # lab — a distinct jurisdiction from the US/China models, which matters to some
+    # security-sensitive users. Tool-calling verified live 2026-05-30.
+    "mistral-api-key": AuthProfile(
+        name="mistral-api-key",
+        env={"NELSON_API_KEY": "MISTRAL_API_KEY"},
+    ),
     # A self-hosted OpenAI-compatible server (LM Studio / vLLM / Ollama) on the
     # LAN. The endpoint doesn't authenticate, but the raw-api-loop runtime requires
     # an auth_profile (its default is _FailingAuth) and resolving an unset secret

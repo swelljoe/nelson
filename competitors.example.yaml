@@ -176,6 +176,25 @@
   cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "input_usd_per_mtok": 1.5, "output_usd_per_mtok": 9.0}'
   knowledge_cutoff: 2026-01
 
+# Mistral Medium via Mistral's OpenAI-compatible endpoint (api.mistral.ai/v1), on the
+# shared raw-api-loop harness. Near-frontier and relatively low-cost, like the flash/mimo
+# tier — but a EUROPEAN model (Mistral AI, Paris), a distinct jurisdiction from the US and
+# Chinese labs, which some security-sensitive users specifically prefer. Tool-calling
+# verified live 2026-05-30 (clean OpenAI tool_calls + standard usage shape). Needs a la
+# Plateforme key ($MISTRAL_API_KEY on the host; secret file /home/joe/secrets/mistral).
+# PRICING: mistral-medium-latest is 0.40/2.0 USD/MTok (input/output) — VERIFY-AT-WIRING
+# against mistral.ai/pricing; standard tier, update if it moves.
+# knowledge_cutoff 2025-06 matches the cohort and keeps the May-2026 corpus in the gate;
+# raise it if Mistral Medium's real training cutoff postdates a case's disclosure.
+- name: raw-api-loop/mistral-medium
+  model: mistral-medium-latest
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: mistral-api-key    # value from $MISTRAL_API_KEY on the host
+  cost_model: '{"base_url": "https://api.mistral.ai/v1", "input_usd_per_mtok": 0.4, "output_usd_per_mtok": 2.0}'
+  size_class: medium
+  knowledge_cutoff: 2025-06
+
 # Self-hosted Qwen 3.6 27B (8-bit) via LM Studio's OpenAI-compatible server, on the
 # shared raw-api-loop harness — apples-to-apples with the hosted models above, and the
 # point of comparison for "can a model you can actually run yourself do this work?".
