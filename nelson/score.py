@@ -1472,6 +1472,8 @@ class LeaderboardEntry:
     judge_cost: float = 0.0  # truth-judge spend, tracked but never in cost/case
     fp_cost: float = 0.0  # FP-judge spend, likewise
     wall_clock_s: float = 0.0  # total wall over complete runs
+    tokens_in: int = 0  # total prompt tokens over complete runs (resends included)
+    tokens_out: int = 0  # total completion (+reasoning) tokens over complete runs
 
     @property
     def eligible(self) -> int:
@@ -1504,6 +1506,16 @@ class LeaderboardEntry:
     def latency_per_case(self) -> float | None:
         """Mean wall-clock to audit one case (its file-runs summed), over cases."""
         return self.wall_clock_s / self.cases if self.cases else None
+
+    @property
+    def tokens_per_case(self) -> float | None:
+        """Mean total tokens (in + out) to audit one case; None if no cases.
+
+        Reflects what the API *reported*, so it is only as honest as the
+        provider's usage block — some OpenAI-compat layers under-report (see the
+        report's data-quality note), in which case this understates true usage.
+        """
+        return (self.tokens_in + self.tokens_out) / self.cases if self.cases else None
 
     @property
     def quality(self) -> float:
@@ -1546,6 +1558,8 @@ def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
 
     cost: dict[str, float] = {}
     wall: dict[str, float] = {}
+    tok_in: dict[str, int] = {}
+    tok_out: dict[str, int] = {}
     cases_seen: dict[str, set[str]] = {}
     size: dict[str, str | None] = {}
     cutoff: dict[str, str | None] = {}
@@ -1558,6 +1572,12 @@ def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
             )
             wall[rs.competitor_name] = wall.get(rs.competitor_name, 0.0) + (
                 rs.wall_clock_s or 0.0
+            )
+            tok_in[rs.competitor_name] = tok_in.get(rs.competitor_name, 0) + (
+                rs.tokens_in or 0
+            )
+            tok_out[rs.competitor_name] = tok_out.get(rs.competitor_name, 0) + (
+                rs.tokens_out or 0
             )
             cases_seen.setdefault(rs.competitor_name, set()).add(rs.case_ext_id)
 
@@ -1584,6 +1604,8 @@ def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
                 judge_cost=d.judge_cost if d else 0.0,
                 fp_cost=p.fp_cost if p else 0.0,
                 wall_clock_s=wall.get(name, 0.0),
+                tokens_in=tok_in.get(name, 0),
+                tokens_out=tok_out.get(name, 0),
             )
         )
 

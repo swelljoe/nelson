@@ -1415,22 +1415,38 @@ def _emit_leaderboard(entries) -> None:
     """Per-competitor leaderboard table (detection + precision + economics)."""
     click.echo(
         f"\n{'#':>2} {'COMPETITOR':<26} {'SIZE':<8} {'DET':>5} {'PREC':>5} "
-        f"{'FP/C':>5} {'COST/C':>8} {'LAT':>6} {'CASES':>5}"
+        f"{'FP/C':>5} {'OTHER':>5} {'COST/C':>8} {'LAT':>6} {'TOK/C':>7} {'CASES':>5}"
     )
     for i, e in enumerate(entries, 1):
         det = f"{e.detection_rate:.0%}" if e.eligible else "-"
         prec = f"{e.precision:.0%}" if e.precision is not None else "-"
         fpc = f"{e.fp_per_case:.2f}" if e.fp_per_case is not None else "-"
+        other = str(e.real_others) if e.real_others else "-"
         cpc = f"${e.cost_per_case:.3f}" if e.cost_per_case is not None else "-"
         lat = f"{e.latency_per_case:.0f}s" if e.latency_per_case is not None else "-"
+        tpc = e.tokens_per_case
+        tok = _fmt_tokens(tpc) if tpc is not None else "-"
         click.echo(
             f"{i:>2} {e.competitor_name:<26} {(e.size_class or '-'):<8} "
-            f"{det:>5} {prec:>5} {fpc:>5} {cpc:>8} {lat:>6} {e.cases:>5}"
+            f"{det:>5} {prec:>5} {fpc:>5} {other:>5} {cpc:>8} {lat:>6} "
+            f"{tok:>7} {e.cases:>5}"
         )
     click.echo(
-        "\nRanked by detection, then precision, then cost/case. COST/C and LAT are "
-        "the competitor's own spend per audited case (judge spend excluded)."
+        "\nRanked by detection, then precision, then cost/case. OTHER = confirmed "
+        "real bugs found that are not the planted target CVE. COST/C, LAT and TOK/C "
+        "are the competitor's own spend/time/tokens per audited case (judge spend "
+        "excluded). TOK/C reflects provider-reported usage — under-reporting compat "
+        "endpoints understate it."
     )
+
+
+def _fmt_tokens(v: float) -> str:
+    """Compact token count for the CLI table: 1.2M / 340k / 980."""
+    if v >= 1_000_000:
+        return f"{v / 1_000_000:.1f}M"
+    if v >= 1_000:
+        return f"{v / 1_000:.0f}k"
+    return f"{v:.0f}"
 
 
 @bench.command(name="leaderboard")
