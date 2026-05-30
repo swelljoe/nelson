@@ -927,8 +927,11 @@ def generate_leaderboard_report(
         '<th class="lead-rank">#</th><th>Competitor</th><th>Size</th>'
         '<th class="num">Detect</th><th class="num">Hits/Elig</th>'
         '<th class="num">Precision</th><th class="num">FP/case</th>'
+        '<th class="num" title="Confirmed real bugs the model found that are not '
+        "the planted target CVE — credited capability, but does not count toward "
+        'detection">Other real</th>'
         '<th class="num">Cost/case</th><th class="num">Latency</th>'
-        '<th class="num">Cases</th><th class="num">Judge $</th>'
+        '<th class="num">Cases</th>'
         "</tr>"
     )
     for i, e in enumerate(entries, 1):
@@ -945,19 +948,20 @@ def generate_leaderboard_report(
             f'<td class="num">{e.hits}/{e.eligible}</td>'
             f'<td class="num">{_pct(e.precision)}</td>'
             f'<td class="num">{f"{e.fp_per_case:.2f}" if e.fp_per_case is not None else "—"}</td>'
+            f'<td class="num">{e.real_others if e.real_others else "—"}</td>'
             f'<td class="num">{_money2(e.cost_per_case)}</td>'
             f'<td class="num">{_secs(e.latency_per_case)}</td>'
-            f'<td class="num">{e.cases}</td>'
-            f'<td class="num muted">{_money2(e.judge_cost + e.fp_cost)}</td></tr>'
+            f'<td class="num">{e.cases}</td></tr>'
         )
     parts.append("</table>")
     parts.append(
         '<p class="muted">Detect = case hits / eligible (hits + genuine misses); '
         "undetermined, refused, and auth/infra-excluded cases are not in the "
         "denominator. "
-        "Precision = true findings / (true + false positives). Cost/latency are "
-        "the competitor's own spend per audited case — judge spend is shown "
-        "separately and never enters the Pareto trade-off. ★ = on a Pareto "
+        "Precision = true findings / (true + false positives). Other real = "
+        "confirmed real bugs the model found that are not the planted target CVE "
+        "(extra capability, but not counted as detection). Cost/latency are "
+        "the competitor's own spend per audited case. ★ = on a Pareto "
         "frontier below.</p>"
     )
 

@@ -303,6 +303,8 @@ def test_generate_leaderboard_report_renders_table_pareto_and_matrix():
     assert "Per-case results" in html
     assert "HIT" in html  # a matrix cell
     assert "scatter-pt-frontier" in html  # beta is on the cost frontier
+    assert "Other real" in html  # off-target real-bug column is shown
+    assert "Judge $" not in html  # judge spend dropped from the model table
 
 
 def test_generate_leaderboard_report_handles_no_runs():
