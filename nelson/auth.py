@@ -197,4 +197,15 @@ STANDARD_AUTH_PROFILES: dict[str, AuthProfile] = {
         name="gemini-openai",
         env={"NELSON_API_KEY": "GEMINI_API_KEY"},
     ),
+    # A self-hosted OpenAI-compatible server (LM Studio / vLLM / Ollama) on the
+    # LAN. The endpoint doesn't authenticate, but the raw-api-loop runtime requires
+    # an auth_profile (its default is _FailingAuth) and resolving an unset secret
+    # would auth_fail — risking the loop's 3-strike circuit breaker. So map
+    # NELSON_API_KEY to a host var holding any non-empty placeholder; the harness
+    # only sends the bearer header when the value is truthy, and the server ignores
+    # it. Export e.g. `LMSTUDIO_API_KEY=lm-studio` on the benchmark machine.
+    "lmstudio-api-key": AuthProfile(
+        name="lmstudio-api-key",
+        env={"NELSON_API_KEY": "LMSTUDIO_API_KEY"},
+    ),
 }

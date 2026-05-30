@@ -176,6 +176,37 @@
   cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "input_usd_per_mtok": 1.5, "output_usd_per_mtok": 9.0}'
   knowledge_cutoff: 2026-01
 
+# Self-hosted Qwen 3.6 27B (8-bit) via LM Studio's OpenAI-compatible server, on the
+# shared raw-api-loop harness — apples-to-apples with the hosted models above, and the
+# point of comparison for "can a model you can actually run yourself do this work?".
+# Tool-calling verified live 2026-05-30: the model emits clean OpenAI tool_calls and
+# reports usage (reasoning tokens folded into the completion, which usage_delta handles).
+#
+# NETWORKING: the harness runs in a podman container with its own netns, so the endpoint
+# must be reachable at a real routable IP — NOT a loopback ssh-tunnel on the VM (the
+# container can't see the VM's 127.0.0.1). Enable LM Studio > Developer > "Serve on Local
+# Network" (binds 0.0.0.0) on the physical host and point base_url at that host's LAN IP.
+# >>> REPLACE the placeholder IP below before a live run. <<<
+#
+# COST: self-hosted has no per-token dollar price, so no pricing is declared — cost stays
+# null (electricity/amortization is out of scope) while tokens are still recorded, which is
+# exactly the comparison you want (free-to-run vs paid frontier on the same matrix).
+#
+# AUTH: LM Studio doesn't check the key, but raw-api-loop requires an auth_profile; export
+# a dummy `LMSTUDIO_API_KEY=lm-studio` on the host (see lmstudio-api-key in nelson/auth.py).
+#
+# knowledge_cutoff 2025-06 matches the cohort and keeps every (May-2026) corpus case in
+# the gate while staying plausibly pre-disclosure. VERIFY-AT-WIRING: if Qwen 3.6's real
+# training cutoff is later than a case's disclosure, raise this so memorized cases gate out.
+- name: raw-api-loop/qwen3.6-27b
+  model: qwen/qwen3.6-27b          # must match LM Studio's loaded model id exactly
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key   # value (any non-empty) from $LMSTUDIO_API_KEY on the host
+  cost_model: '{"base_url": "http://192.168.122.1:1234/v1"}'  # libvirt host bridge gateway
+  size_class: small
+  knowledge_cutoff: 2025-06
+
 # Wired but stubbed (no key/CLI yet): present so they enter the matrix the moment
 # creds/binaries arrive; until then each cleanly resolves to auth_failed/infra_error.
 #
