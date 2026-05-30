@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -1517,6 +1517,19 @@ class LeaderboardEntry:
         """
         p = self.precision if self.precision is not None else 1.0
         return self.detection_rate * p
+
+
+def drop_competitors(
+    run_scores: list[RunScore], names: Iterable[str]
+) -> list[RunScore]:
+    """Filter out run scores belonging to the named competitors.
+
+    Used to keep retired competitors out of the leaderboard / report while
+    leaving their historical runs in the DB (retiring a competitor means "stop
+    testing and stop reporting", not "delete the record").
+    """
+    excluded = set(names)
+    return [rs for rs in run_scores if rs.competitor_name not in excluded]
 
 
 def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:

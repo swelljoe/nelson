@@ -1454,7 +1454,13 @@ def bench_leaderboard(db_path: str, html_path: str | None, tolerance: int):
     `bench score` first to score new runs). Prints the leaderboard table, and with
     --html writes a report with Pareto scatter plots and a per-case drilldown.
     """
-    from .score import ClaudeTruthJudge, Scorer, case_scores, leaderboard
+    from .score import (
+        ClaudeTruthJudge,
+        Scorer,
+        case_scores,
+        drop_competitors,
+        leaderboard,
+    )
 
     db = Database(db_path)
     rows = db.list_runs()
@@ -1465,7 +1471,10 @@ def bench_leaderboard(db_path: str, html_path: str | None, tolerance: int):
     # A Scorer is needed only for load_run_score / needs_scoring; its judge is
     # never invoked here (leaderboard reflects already-persisted scores).
     scorer = Scorer(db, ClaudeTruthJudge(), tolerance=tolerance)
-    run_scores = [scorer.load_run_score(r["id"]) for r in rows]
+    retired = {c["name"] for c in db.list_competitors() if c["status"] == "retired"}
+    run_scores = drop_competitors(
+        [scorer.load_run_score(r["id"]) for r in rows], retired
+    )
     unscored = sum(
         1
         for r in rows
