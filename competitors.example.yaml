@@ -140,7 +140,6 @@
 #
 # CAVEAT: recency does NOT guarantee engagement — gate each model's *engagement*
 # before trusting its score. Live-checked 2026-05-28 on junrar GHSA-j273 (CWE-22):
-#   gemini-2.5-pro          -> HIT (baseline)
 #   gemini-3.1-pro-preview  -> HIT (judged same_bug)
 #   gemini-3.5-flash        -> engaged, real CWE-22 findings; MISS on this one case
 #                              (adjacency noise — n=1, averages out over the matrix)
@@ -154,18 +153,13 @@
 # output rate, which the compat layer reports in total_tokens but not in
 # completion_tokens; the harness derives output as total-prompt so those are
 # counted (see usage_delta in raw_api_loop.py).
-- name: raw-api-loop/gemini
-  model: gemini-2.5-pro
-  runtime: raw-api-loop
-  tool_profile: read-grep
-  auth_profile: gemini-openai     # value from $GEMINI_API_KEY on the host
-  cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "input_usd_per_mtok": 1.25, "output_usd_per_mtok": 10.0}'
-  knowledge_cutoff: 2025-01
-
-# Newer Gemini, same endpoint/auth. 3.1-pro-preview is the stronger contender (clean
+# Gemini via the direct OpenAI-compat API (auth_profile gemini-openai reads
+# $GEMINI_API_KEY on the host). 3.1-pro-preview is the stronger contender (clean
 # judged HIT); 3.5-flash is the low-cost near-frontier entry — likely not a top
 # contender, but cheap to include and useful to compare against the other low-cost
-# near-frontier models.
+# near-frontier models. (gemini-2.5-pro was dropped: an early, pre-cost-tracking
+# model whose compat endpoint under-reported token usage — confounding, and no
+# one needs 2.5 results now.)
 - name: raw-api-loop/gemini-3.1-pro-preview
   model: gemini-3.1-pro-preview
   runtime: raw-api-loop
