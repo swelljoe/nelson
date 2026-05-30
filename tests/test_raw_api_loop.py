@@ -6,8 +6,15 @@ ones: a tool must never read outside the source root, even via ``..`` or a symli
 """
 
 import json
+import urllib.error
+from email.message import Message
 
+import pytest
+
+import nelson.raw_api_loop as ral
 from nelson.raw_api_loop import (
+    MAX_HTTP_RETRIES,
+    _post_chat,
     _resolve_in_src,
     compute_cost,
     dispatch_tool,
@@ -195,3 +202,109 @@ def test_usage_delta_falls_back_to_completion_without_total():
         {"prompt_tokens": 100, "completion_tokens": 40, "total_tokens": 140}
     ) == (100, 40)
     assert usage_delta({}) == (0, 0)
+
+
+# -- _post_chat retry / backoff ----------------------------------------------
+#
+# Transient faults (provider 429 tokens/min, a self-hosted endpoint dropping the
+# socket mid-response) must be retried with backoff, not fail the whole run. The
+# real urlopen is monkeypatched; sleep is injected so no test actually waits.
+
+
+class _FakeResp:
+    def __init__(self, body: str):
+        self._body = body.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+    def read(self):
+        return self._body
+
+
+def _http_error(code: int, retry_after=None) -> urllib.error.HTTPError:
+    hdrs = Message()
+    if retry_after is not None:
+        hdrs["Retry-After"] = str(retry_after)
+    return urllib.error.HTTPError(
+        "http://x/v1/chat/completions", code, "err", hdrs, None
+    )
+
+
+def _scripted_urlopen(events):
+    """Return a fake urlopen yielding each event: raise Exceptions, return responses."""
+    it = iter(events)
+
+    def fake(_req, timeout=None):
+        ev = next(it)
+        if isinstance(ev, Exception):
+            raise ev
+        return ev
+
+    return fake
+
+
+def test_post_chat_retries_on_429_then_succeeds(monkeypatch):
+    slept = []
+    monkeypatch.setattr(
+        ral.urllib.request,
+        "urlopen",
+        _scripted_urlopen(
+            [_http_error(429), _http_error(429), _FakeResp('{"ok": true}')]
+        ),
+    )
+    out = _post_chat("http://x", {"m": 1}, "k", sleep=slept.append)
+    assert out == {"ok": True}
+    assert len(slept) == 2  # backed off before each of the two retries
+
+
+def test_post_chat_honors_retry_after_header(monkeypatch):
+    slept = []
+    monkeypatch.setattr(
+        ral.urllib.request,
+        "urlopen",
+        _scripted_urlopen([_http_error(429, retry_after=7), _FakeResp('{"ok": 1}')]),
+    )
+    _post_chat("http://x", {}, "k", sleep=slept.append)
+    assert slept == [7.0]  # honored the server's Retry-After, not the backoff curve
+
+
+def test_post_chat_retries_on_transport_error(monkeypatch):
+    slept = []
+    monkeypatch.setattr(
+        ral.urllib.request,
+        "urlopen",
+        _scripted_urlopen(
+            [urllib.error.URLError("connection reset"), _FakeResp('{"ok": 1}')]
+        ),
+    )
+    out = _post_chat("http://x", {}, "k", sleep=slept.append)
+    assert out == {"ok": 1}
+    assert len(slept) == 1
+
+
+def test_post_chat_gives_up_after_max_retries(monkeypatch):
+    monkeypatch.setattr(
+        ral.urllib.request,
+        "urlopen",
+        _scripted_urlopen([_http_error(429)] * (MAX_HTTP_RETRIES + 1)),
+    )
+    # A persistent rate limit still surfaces (so the runner records infra_error).
+    with pytest.raises(urllib.error.HTTPError):
+        _post_chat("http://x", {}, "k", sleep=lambda _s: None)
+
+
+def test_post_chat_does_not_retry_non_retryable_status(monkeypatch):
+    calls = []
+
+    def fake(_req, timeout=None):
+        calls.append(1)
+        raise _http_error(400)
+
+    monkeypatch.setattr(ral.urllib.request, "urlopen", fake)
+    with pytest.raises(urllib.error.HTTPError):
+        _post_chat("http://x", {}, "k", sleep=lambda _s: None)
+    assert len(calls) == 1  # 400 is a client error, not retried
