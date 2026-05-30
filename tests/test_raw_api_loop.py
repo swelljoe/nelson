@@ -297,6 +297,15 @@ def test_post_chat_gives_up_after_max_retries(monkeypatch):
         _post_chat("http://x", {}, "k", sleep=lambda _s: None)
 
 
+def test_http_timeout_defaults_and_env_override(monkeypatch):
+    monkeypatch.delenv("NELSON_HTTP_TIMEOUT", raising=False)
+    assert ral._http_timeout() == ral.HTTP_TIMEOUT  # default when unset
+    monkeypatch.setenv("NELSON_HTTP_TIMEOUT", "1800")
+    assert ral._http_timeout() == 1800  # slow self-hosted box raises it
+    monkeypatch.setenv("NELSON_HTTP_TIMEOUT", "not-an-int")
+    assert ral._http_timeout() == ral.HTTP_TIMEOUT  # garbage falls back to default
+
+
 def test_post_chat_does_not_retry_non_retryable_status(monkeypatch):
     calls = []
 

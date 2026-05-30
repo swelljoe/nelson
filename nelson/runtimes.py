@@ -380,6 +380,10 @@ class RawApiLoopRuntime:
             env["NELSON_INPUT_USD_PER_MTOK"] = str(cfg["input_usd_per_mtok"])
         if cfg.get("output_usd_per_mtok") is not None:
             env["NELSON_OUTPUT_USD_PER_MTOK"] = str(cfg["output_usd_per_mtok"])
+        if cfg.get("http_timeout") is not None:
+            # Slow self-hosted endpoints raise the per-API-call read timeout so a single
+            # big-context turn isn't cut off as an infra_error (see _http_timeout).
+            env["NELSON_HTTP_TIMEOUT"] = str(cfg["http_timeout"])
         mounts = [
             (str(_RAW_API_SCRIPT_HOST), _RAW_API_SCRIPT_CONTAINER, "ro"),
             (str(ctx.src_dir), "/src", "ro"),

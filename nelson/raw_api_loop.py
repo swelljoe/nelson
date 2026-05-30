@@ -44,8 +44,20 @@ MAX_TOOL_OUTPUT = 20_000  # chars; keep a single tool result from blowing contex
 # Per-API-call read timeout. Reasoning models (Gemini 3.x pro, MiMo) can think for
 # minutes on a single turn over a large C file; a tight cap aborts the whole run as
 # an infra_error and silently drops the slowest (often strongest) models from the
-# matrix. 600s lets a slow reasoner finish a turn rather than penalising it.
-HTTP_TIMEOUT = 600  # seconds per API call
+# matrix. 600s lets a slow reasoner finish a turn rather than penalising it. A slow
+# self-hosted box (e.g. a 27B on an APU, where one big-context turn can exceed 600s)
+# raises it via NELSON_HTTP_TIMEOUT (set from the competitor's cost_model http_timeout).
+HTTP_TIMEOUT = 600  # default seconds per API call
+
+
+def _http_timeout() -> int:
+    """Per-call read timeout: NELSON_HTTP_TIMEOUT if set and valid, else the default."""
+    raw = os.environ.get("NELSON_HTTP_TIMEOUT")
+    if raw:
+        with contextlib.suppress(ValueError):
+            return int(raw)
+    return HTTP_TIMEOUT
+
 
 # Transient faults that warrant a retry rather than failing the whole run: provider
 # rate limits (429 — Mistral caps tokens/minute, which an agentic burst of large-
@@ -249,7 +261,7 @@ def _post_chat(
         if api_key:
             req.add_header("Authorization", f"Bearer {api_key}")
         try:
-            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:  # noqa: S310
+            with urllib.request.urlopen(req, timeout=_http_timeout()) as resp:  # noqa: S310
                 body = resp.read().decode("utf-8", errors="replace")
             parsed = json.loads(body)
             return parsed if isinstance(parsed, dict) else {}
