@@ -15,8 +15,8 @@ and ``EnvKeyAuth``):
 - ``NELSON_BASE_URL``     OpenAI-compatible base, e.g. ``https://api.deepseek.com``
 - ``NELSON_MODEL``        model id passed to the endpoint
 - ``NELSON_API_KEY``      bearer token (injected from a secret name)
-- ``NELSON_MAX_STEPS``    tool-use turn cap (default 20)
-- ``NELSON_TOKEN_BUDGET`` cumulative token cap (default 200000)
+- ``NELSON_MAX_STEPS``    tool-use turn cap (default 40)
+- ``NELSON_TOKEN_BUDGET`` cumulative token cap (default 500000)
 - ``NELSON_INPUT_USD_PER_MTOK`` / ``NELSON_OUTPUT_USD_PER_MTOK`` optional pricing
 
 Integrity: an auth/transport failure exits non-zero and prints the provider error
@@ -40,7 +40,11 @@ from typing import Any
 
 SRC_ROOT = "/src"
 MAX_TOOL_OUTPUT = 20_000  # chars; keep a single tool result from blowing context
-HTTP_TIMEOUT = 120  # seconds per API call
+# Per-API-call read timeout. Reasoning models (Gemini 3.x pro, MiMo) can think for
+# minutes on a single turn over a large C file; a tight cap aborts the whole run as
+# an infra_error and silently drops the slowest (often strongest) models from the
+# matrix. 600s lets a slow reasoner finish a turn rather than penalising it.
+HTTP_TIMEOUT = 600  # seconds per API call
 
 SYSTEM_PROMPT = (
     "You are a tool-using security auditor. Use the provided tools to read the "
@@ -263,8 +267,8 @@ def run_loop(
     base_url: str,
     model: str,
     api_key: str,
-    max_steps: int = 20,
-    token_budget: int = 200_000,
+    max_steps: int = 40,
+    token_budget: int = 500_000,
     post: Callable[[str, dict[str, Any], str], dict[str, Any]] = _post_chat,
     src_root: str | None = None,
 ) -> tuple[str, int, int, list[dict[str, Any]]]:
@@ -392,8 +396,8 @@ def main() -> None:
             base_url=base_url,
             model=model,
             api_key=api_key,
-            max_steps=_int_env("NELSON_MAX_STEPS", 20),
-            token_budget=_int_env("NELSON_TOKEN_BUDGET", 200_000),
+            max_steps=_int_env("NELSON_MAX_STEPS", 40),
+            token_budget=_int_env("NELSON_TOKEN_BUDGET", 500_000),
         )
     except urllib.error.HTTPError as e:
         body = ""

@@ -372,8 +372,8 @@ class RawApiLoopRuntime:
             "HOME": "/home/agent",
             "NELSON_BASE_URL": base_url,
             "NELSON_MODEL": ctx.competitor.model,
-            "NELSON_MAX_STEPS": str(cfg.get("max_steps", 20)),
-            "NELSON_TOKEN_BUDGET": str(cfg.get("token_budget", 200000)),
+            "NELSON_MAX_STEPS": str(cfg.get("max_steps", 40)),
+            "NELSON_TOKEN_BUDGET": str(cfg.get("token_budget", 500000)),
             **ctx.auth.env,
         }
         if cfg.get("input_usd_per_mtok") is not None:
