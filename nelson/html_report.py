@@ -728,6 +728,7 @@ _LEADERBOARD_EXTRA_CSS = """\
 .cell-refu { color: var(--cyan); font-style: italic; }
 .cell-excl { color: var(--orange); }
 .cell-none { color: var(--border); }
+.token-bar { fill: var(--blue); opacity: 0.85; }
 """
 
 
@@ -741,6 +742,65 @@ def _money2(v: float | None) -> str:
 
 def _secs(v: float | None) -> str:
     return f"{v:.0f}s" if v is not None else "—"
+
+
+def _tok(v: float | None) -> str:
+    """Compact token count: 1.2M / 340k / 980."""
+    if v is None:
+        return "—"
+    if v >= 1_000_000:
+        return f"{v / 1_000_000:.1f}M"
+    if v >= 1_000:
+        return f"{v / 1_000:.0f}k"
+    return f"{v:.0f}"
+
+
+def _token_bars_svg(entries: list[LeaderboardEntry]) -> str:
+    """Horizontal bar chart of tokens/case per competitor (descending), each bar
+    annotated with its latency/case. Linear scale, so the heavy brute-forcers
+    dominate visually and the light models read as short bars — the point is to
+    expose the order-of-magnitude spread. Pure string building, no JS/assets.
+    """
+    pts = [
+        (e.competitor_name, e.tokens_per_case, e.latency_per_case)
+        for e in entries
+        if e.tokens_per_case is not None
+    ]
+    if not pts:
+        return '<p class="muted">No token usage recorded.</p>'
+    pts.sort(key=lambda p: p[1], reverse=True)
+
+    row_h, mt, mb, ml = 26, 10, 26, 200
+    width = 720
+    height = mt + mb + row_h * len(pts)
+    bar_x = ml + 6
+    bar_w_max = width - bar_x - 70  # leave room for the value label
+    vmax = max(p[1] for p in pts) or 1.0
+
+    s: list[str] = [
+        f'<svg viewBox="0 0 {width} {height}" width="100%" role="img" '
+        'aria-label="tokens per case per competitor">'
+    ]
+    for i, (name, tpc, lat) in enumerate(pts):
+        y = mt + i * row_h
+        cy = y + row_h / 2
+        bw = max(1.0, (tpc / vmax) * bar_w_max)
+        label = name if len(name) <= 30 else name[:29] + "…"
+        s.append(
+            f'<text class="scatter-label" x="{ml - 6}" y="{cy + 3:.1f}" '
+            f'text-anchor="end">{escape(label)}</text>'
+        )
+        s.append(
+            f'<rect class="token-bar" x="{bar_x}" y="{y + 4:.1f}" '
+            f'width="{bw:.1f}" height="{row_h - 10}" rx="2"/>'
+        )
+        lat_str = f" · {lat:.0f}s" if lat is not None else ""
+        s.append(
+            f'<text class="scatter-tick" x="{bar_x + bw + 6:.1f}" '
+            f'y="{cy + 3:.1f}">{escape(_tok(tpc))}{escape(lat_str)}</text>'
+        )
+    s.append("</svg>")
+    return "".join(s)
 
 
 def _scatter_svg(
@@ -931,6 +991,9 @@ def generate_leaderboard_report(
         "the planted target CVE — credited capability, but does not count toward "
         'detection">Other real</th>'
         '<th class="num">Cost/case</th><th class="num">Latency</th>'
+        '<th class="num" title="Mean total tokens (prompt + completion) reported '
+        "per audited case — only as honest as the provider's usage metering "
+        '(see note below the chart)">Tokens/case</th>'
         '<th class="num">Cases</th>'
         "</tr>"
     )
@@ -951,6 +1014,7 @@ def generate_leaderboard_report(
             f'<td class="num">{e.real_others if e.real_others else "—"}</td>'
             f'<td class="num">{_money2(e.cost_per_case)}</td>'
             f'<td class="num">{_secs(e.latency_per_case)}</td>'
+            f'<td class="num">{_tok(e.tokens_per_case)}</td>'
             f'<td class="num">{e.cases}</td></tr>'
         )
     parts.append("</table>")
@@ -998,6 +1062,20 @@ def generate_leaderboard_report(
         "non-dominated — no other competitor is at least as good on quality while "
         "also cheaper/faster. Size is shown in the table; it is categorical, so it "
         "is not used as a numeric Pareto axis.</p>"
+    )
+
+    # Tokens (+ latency) per case — exposes the order-of-magnitude usage spread.
+    parts.append("<h2>Tokens &amp; time per case</h2>")
+    parts.append(_token_bars_svg(entries))
+    parts.append(
+        '<p class="muted">Mean total tokens (prompt + completion, with the '
+        "ReAct loop's resent context counted each turn) per audited case; the "
+        "trailing number is mean latency/case. Bars are linear, so brute-force "
+        "models dwarf frugal ones. <strong>Data-quality caveat:</strong> these are "
+        "the tokens the provider's API <em>reported</em> — some OpenAI-compatible "
+        "endpoints under-report usage (a near-zero bar with input ≈ output is the "
+        "tell), so a suspiciously short bar may mean broken metering rather than a "
+        "frugal model, and that competitor's cost/case is then an underestimate.</p>"
     )
 
     # Per-case drilldown matrix.

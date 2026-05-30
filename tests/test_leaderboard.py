@@ -52,6 +52,8 @@ def _scores() -> list[RunScore]:
             fp_cost=0.03,
             competitor_cost=0.20,
             wall_clock_s=100.0,
+            tokens_in=1000,
+            tokens_out=200,
             size_class="large",
         ),
         RunScore(
@@ -63,6 +65,8 @@ def _scores() -> list[RunScore]:
             findings=[],
             competitor_cost=0.10,
             wall_clock_s=50.0,
+            tokens_in=500,
+            tokens_out=100,
             size_class="large",
         ),
         RunScore(
@@ -99,6 +103,7 @@ def test_leaderboard_aggregates_detection_precision_and_economics():
     assert alpha.fp_per_case == 0.5  # 1 FP over 2 cases
     assert alpha.cost_per_case == pytest.approx(0.15)  # (0.20 + 0.10) / 2
     assert alpha.latency_per_case == 75.0  # (100 + 50) / 2
+    assert alpha.tokens_per_case == 900.0  # (1000+200 + 500+100) / 2
     assert alpha.size_class == "large"
 
     beta = entries["beta"]
@@ -305,6 +310,9 @@ def test_generate_leaderboard_report_renders_table_pareto_and_matrix():
     assert "scatter-pt-frontier" in html  # beta is on the cost frontier
     assert "Other real" in html  # off-target real-bug column is shown
     assert "Judge $" not in html  # judge spend dropped from the model table
+    assert "Tokens/case" in html  # token usage column
+    assert "Tokens &amp; time per case" in html  # token chart section
+    assert "token-bar" in html  # at least one bar rendered
 
 
 def test_generate_leaderboard_report_handles_no_runs():
