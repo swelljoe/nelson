@@ -496,8 +496,10 @@ def main() -> None:
 
     # Prefer the provider's own charge (cache-aware, matches billing); fall back
     # to per-token pricing only when the provider returns no cost.
-    cost = provider_cost if provider_cost is not None else compute_cost(
-        tin, tout, in_price, out_price
+    cost = (
+        provider_cost
+        if provider_cost is not None
+        else compute_cost(tin, tout, in_price, out_price)
     )
 
     # JSONL transcript of the turns, then the single claude-shaped result object
