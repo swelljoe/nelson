@@ -115,6 +115,7 @@
   tool_profile: read-grep
   auth_profile: mimo-anthropic
   cost_model: '{"anthropic_base_url": "https://token-plan-sgp.xiaomimimo.com/anthropic", "env": {"ANTHROPIC_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_SONNET_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_OPUS_MODEL": "mimo-v2.5-pro", "ANTHROPIC_DEFAULT_HAIKU_MODEL": "mimo-v2.5-pro"}, "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4, "claude_bin": "/home/joe/.local/share/claude/versions/2.1.153"}'
+  size_class: large
   knowledge_cutoff: 2025-06
 
 - name: raw-api-loop/mimo
@@ -123,6 +124,7 @@
   tool_profile: read-grep
   auth_profile: mimo-api-key      # value from $MIMO_API_KEY on the host
   cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1", "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4}'
+  size_class: large
   knowledge_cutoff: 2025-06
 
 # NOTE: the `agy/antigravity` competitor (the Antigravity / Gemini CLI, native
@@ -166,6 +168,7 @@
   tool_profile: read-grep
   auth_profile: gemini-openai
   cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "input_usd_per_mtok": 2.0, "output_usd_per_mtok": 12.0}'
+  size_class: large
   knowledge_cutoff: 2025-01
 
 - name: raw-api-loop/gemini-3.5-flash
@@ -174,6 +177,7 @@
   tool_profile: read-grep
   auth_profile: gemini-openai
   cost_model: '{"base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "input_usd_per_mtok": 1.5, "output_usd_per_mtok": 9.0}'
+  size_class: medium
   knowledge_cutoff: 2026-01
 
 # Mistral Medium via Mistral's OpenAI-compatible endpoint (api.mistral.ai/v1), on the
