@@ -1008,8 +1008,8 @@ def generate_leaderboard_report(
             else ""
         )
         partial = (
-            f'<sup style="color:var(--yellow)" title="Partial coverage: '
-            f'detection is over {e.cases} of {full_n} cases — see note below">*</sup>'
+            f'<sup style="color: var(--yellow)" title="Partial coverage: audited '
+            f'{e.cases} of {full_n} cases — see note below">*</sup>'
             if full_n and e.cases < full_n
             else ""
         )
