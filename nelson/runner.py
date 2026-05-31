@@ -758,6 +758,10 @@ class BenchRunner:
         path instead of racing two threads into the same ``shutil.rmtree`` +
         re-fetch of one checkout dir.
         """
+        if not case.repo_url or not case.vuln_commit:
+            raise RunnerError(
+                f"case {case.ext_id} lacks repo_url/vuln_commit; not derived yet"
+            )
         safe_ext = "".join(
             ch if (ch.isalnum() or ch in ("-", "_", ".")) else "_" for ch in case.ext_id
         )
