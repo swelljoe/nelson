@@ -75,7 +75,7 @@ def test_loop_executes_tool_call_then_emits_final(tmp_path):
         _tool_call("read_file", {"path": "a.c"}),
         _final(answer),
     )
-    final_text, tin, tout, steps = run_loop(
+    final_text, tin, tout, steps, cost = run_loop(
         "audit a.c",
         base_url="https://x/v1",
         model="m",
@@ -86,12 +86,13 @@ def test_loop_executes_tool_call_then_emits_final(tmp_path):
     assert final_text == answer
     assert (tin, tout) == (10 + 8, 5 + 3)  # summed across both turns
     assert len(steps) == 2
+    assert cost is None  # no provider cost field on a non-OpenRouter endpoint
 
 
 def test_loop_max_steps_terminates(tmp_path):
     # A model that never stops calling tools must still terminate and return.
     post = _post_returning(*[_tool_call("list_dir", {"path": "."}) for _ in range(5)])
-    final_text, _tin, _tout, steps = run_loop(
+    final_text, _tin, _tout, steps, _cost = run_loop(
         "audit",
         base_url="https://x/v1",
         model="m",
@@ -106,7 +107,7 @@ def test_loop_max_steps_terminates(tmp_path):
 
 def test_loop_no_final_array_falls_back_to_last_text(tmp_path):
     post = _post_returning(_final("I could not find anything exploitable."))
-    final_text, _tin, _tout, _steps = run_loop(
+    final_text, _tin, _tout, _steps, _cost = run_loop(
         "audit",
         base_url="https://x/v1",
         model="m",
@@ -115,6 +116,52 @@ def test_loop_no_final_array_falls_back_to_last_text(tmp_path):
         src_root=str(tmp_path),
     )
     assert final_text == "I could not find anything exploitable."
+
+
+def test_loop_sums_provider_cost_and_requests_it_on_openrouter(tmp_path):
+    # On an OpenRouter endpoint the loop must send usage.include and sum the
+    # real per-call cost (cache-aware), which main() prefers over compute_cost.
+    (tmp_path / "a.c").write_text("int x;\n")
+    seen_payloads = []
+
+    def post(url, payload, api_key):
+        seen_payloads.append(payload)
+        if len(seen_payloads) == 1:
+            r = _tool_call("read_file", {"path": "a.c"})
+            r["usage"]["cost"] = 0.004  # provider's real charge for this call
+            return r
+        r = _final("[]")
+        r["usage"]["cost"] = 0.001
+        return r
+
+    _text, _tin, _tout, _steps, cost = run_loop(
+        "audit a.c",
+        base_url="https://openrouter.ai/api/v1",
+        model="m",
+        api_key="k",
+        post=post,
+        src_root=str(tmp_path),
+    )
+    assert cost == pytest.approx(0.005)  # summed across both turns
+    assert all(p.get("usage") == {"include": True} for p in seen_payloads)
+
+
+def test_loop_does_not_request_usage_on_non_openrouter(tmp_path):
+    seen = []
+
+    def post(url, payload, api_key):
+        seen.append(payload)
+        return _final("[]")
+
+    run_loop(
+        "audit",
+        base_url="https://api.self-hosted.invalid/v1",  # not OpenRouter
+        model="m",
+        api_key="k",
+        post=post,
+        src_root=str(tmp_path),
+    )
+    assert all("usage" not in p for p in seen)  # no unknown field to strict servers
 
 
 # -- Sandbox (security-critical) --------------------------------------------

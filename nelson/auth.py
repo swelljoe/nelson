@@ -216,4 +216,12 @@ STANDARD_AUTH_PROFILES: dict[str, AuthProfile] = {
         name="lmstudio-api-key",
         env={"NELSON_API_KEY": "LMSTUDIO_API_KEY"},
     ),
+    # OpenRouter: one key fronting many providers' OpenAI-compatible endpoints
+    # (base_url https://openrouter.ai/api/v1). raw-api-loop reads it from the
+    # single container var NELSON_API_KEY; the same profile serves every
+    # openrouter/* competitor since OpenRouter multiplexes on the model id.
+    "openrouter-api-key": AuthProfile(
+        name="openrouter-api-key",
+        env={"NELSON_API_KEY": "OPENROUTER_API_KEY"},
+    ),
 }

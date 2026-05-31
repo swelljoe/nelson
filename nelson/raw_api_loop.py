@@ -336,22 +336,36 @@ def run_loop(
     token_budget: int = 500_000,
     post: Callable[[str, dict[str, Any], str], dict[str, Any]] = _post_chat,
     src_root: str | None = None,
-) -> tuple[str, int, int, list[dict[str, Any]]]:
-    """Drive the tool-use loop; return (final_text, tokens_in, tokens_out, steps).
+) -> tuple[str, int, int, list[dict[str, Any]], float | None]:
+    """Drive the tool-use loop; return (final_text, in, out, steps, provider_cost).
 
     Terminates when the model answers without tool calls, at ``max_steps``, or
     once cumulative tokens reach ``token_budget`` — on a cap the final turn is sent
     with tools withheld so the model must produce its answer. If it still emits no
     parseable array, the last assistant text is returned (the runner's parser then
     yields ``[]`` — a legitimate "found nothing", not an error).
+
+    ``provider_cost`` is the summed real charge the provider reports per call
+    (OpenRouter's ``usage.cost`` when we request ``usage: {include: true}``), or
+    None if the provider returns no cost. It is authoritative — it already nets
+    out prompt-cache discounts that our per-token ``compute_cost`` cannot see
+    (the ReAct loop resends the whole context each turn; most of those input
+    tokens are cache reads billed at a fraction). main() prefers it over
+    ``compute_cost`` so the recorded cost matches billing.
     """
     url = base_url.rstrip("/") + "/chat/completions"
+    # usage.include is an OpenRouter request param; guard on the host so a strict
+    # OpenAI-compat server (self-hosted llama-server, a vendor API) never sees an
+    # unknown field. Providers that don't return ``cost`` just leave it None and
+    # main() falls back to compute_cost.
+    want_cost = "openrouter.ai" in base_url
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
     ]
     total_in = 0
     total_out = 0
+    total_cost: float | None = None
     steps: list[dict[str, Any]] = []
     final_text = ""
 
@@ -377,14 +391,20 @@ def run_loop(
             "messages": messages,
             "temperature": 0.1,
         }
+        if want_cost:
+            payload["usage"] = {"include": True}
         if not force_final:
             payload["tools"] = TOOLS
             payload["tool_choice"] = "auto"
 
         resp = post(url, payload, api_key)
-        step_in, step_out = usage_delta(resp.get("usage") or {})
+        usage = resp.get("usage") or {}
+        step_in, step_out = usage_delta(usage)
         total_in += step_in
         total_out += step_out
+        step_cost = usage.get("cost")
+        if isinstance(step_cost, (int, float)):
+            total_cost = (total_cost or 0.0) + float(step_cost)
         choices = resp.get("choices") or [{}]
         msg = (choices[0].get("message") or {}) if choices else {}
         tool_calls = msg.get("tool_calls") or []
@@ -424,7 +444,7 @@ def run_loop(
         final_text = msg.get("content") or ""
         break
 
-    return final_text, total_in, total_out, steps
+    return final_text, total_in, total_out, steps, total_cost
 
 
 def _float_env(name: str) -> float | None:
@@ -456,7 +476,7 @@ def main() -> None:
     in_price = _float_env("NELSON_INPUT_USD_PER_MTOK")
     out_price = _float_env("NELSON_OUTPUT_USD_PER_MTOK")
     try:
-        final_text, tin, tout, steps = run_loop(
+        final_text, tin, tout, steps, provider_cost = run_loop(
             prompt,
             base_url=base_url,
             model=model,
@@ -474,6 +494,14 @@ def main() -> None:
         print(f"connection error: {e.reason}", file=sys.stderr)
         sys.exit(1)
 
+    # Prefer the provider's own charge (cache-aware, matches billing); fall back
+    # to per-token pricing only when the provider returns no cost.
+    cost = (
+        provider_cost
+        if provider_cost is not None
+        else compute_cost(tin, tout, in_price, out_price)
+    )
+
     # JSONL transcript of the turns, then the single claude-shaped result object
     # the runner ingests via extract_result.
     for ev in steps:
@@ -484,7 +512,7 @@ def main() -> None:
                 "type": "result",
                 "result": final_text,
                 "usage": {"input_tokens": tin, "output_tokens": tout},
-                "total_cost_usd": compute_cost(tin, tout, in_price, out_price),
+                "total_cost_usd": cost,
             }
         )
     )

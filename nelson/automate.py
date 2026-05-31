@@ -297,6 +297,7 @@ def run_once(
     max_runs: int | None = None,
     max_spend_usd: float | None = None,
     auth_fail_abort: int = 3,
+    concurrency: int = 1,
     report_html_path: str | Path | None = None,
     on_event: Callable[[str], None] | None = None,
 ) -> LoopReport:
@@ -371,6 +372,7 @@ def run_once(
             max_spend_usd=max_spend_usd,
             auth_fail_abort=auth_fail_abort,
             emit=emit,
+            concurrency=concurrency,
         )
 
     # 5. Score new completions (truth + optional FP judge; bounded by what ran).
@@ -406,8 +408,49 @@ def _execute_runs(
     max_spend_usd: float | None,
     auth_fail_abort: int,
     emit: Callable[[str], None],
+    concurrency: int = 1,
 ) -> None:
     """Run planned cells under unattended-safety rails, mutating ``report``.
+
+    ``concurrency == 1`` (default) runs cells strictly sequentially. ``> 1``
+    fans out across worker threads (see :func:`_execute_runs_concurrent`); the
+    runs are I/O-bound on the model API, so threads — not processes — recover
+    the idle wait.
+    """
+    if concurrency <= 1:
+        _execute_runs_sequential(
+            plan,
+            runner,
+            report,
+            max_runs=max_runs,
+            max_spend_usd=max_spend_usd,
+            auth_fail_abort=auth_fail_abort,
+            emit=emit,
+        )
+    else:
+        _execute_runs_concurrent(
+            plan,
+            runner,
+            report,
+            max_runs=max_runs,
+            max_spend_usd=max_spend_usd,
+            auth_fail_abort=auth_fail_abort,
+            emit=emit,
+            concurrency=concurrency,
+        )
+
+
+def _execute_runs_sequential(
+    plan: Sequence[MatrixCell],
+    runner: Runner,
+    report: LoopReport,
+    *,
+    max_runs: int | None,
+    max_spend_usd: float | None,
+    auth_fail_abort: int,
+    emit: Callable[[str], None],
+) -> None:
+    """Run planned cells one at a time.
 
     Stops launching new runs once a run cap or spend cap is hit, or once
     ``auth_fail_abort`` *consecutive* auth failures trip the circuit breaker —
@@ -447,6 +490,116 @@ def _execute_runs(
         else:  # infra_error (or any other non-complete status)
             report.infra_error += 1
             consecutive_auth = 0
+
+
+def _execute_runs_concurrent(
+    plan: Sequence[MatrixCell],
+    runner: Runner,
+    report: LoopReport,
+    *,
+    max_runs: int | None,
+    max_spend_usd: float | None,
+    auth_fail_abort: int,
+    emit: Callable[[str], None],
+    concurrency: int,
+) -> None:
+    """Run planned cells across ``concurrency`` worker threads.
+
+    One worker owns one competitor at a time and runs that competitor's cells
+    sequentially, so **no model ever has two runs in flight at once** — this is
+    the rate-limit guard (a free OpenRouter endpoint would 429 under parallel
+    same-model load). With more competitors than workers, ``concurrency`` of
+    them run concurrently; load naturally spreads across distinct models.
+
+    Checkouts are pre-warmed once per case before the pool starts, so workers
+    only read the shared ``:ro`` source tree (``prepare_checkout`` would
+    otherwise race two threads into the same rmtree+refetch).
+
+    Safety rails are shared state under one lock. The auth breaker uses the
+    concurrency-safe rule **total auth-failures ≥ K while nothing has completed**
+    — "consecutive" is undefined when runs overlap, and this still catches the
+    dead-host-login case (everything failing from the start) without tripping
+    once any run has succeeded.
+    """
+    import contextlib
+    import queue as _queue
+    import threading
+
+    # Pre-warm each distinct case's checkout sequentially (idempotent fast-path
+    # afterwards). A case that can't be checked out is left to fail per-run as
+    # infra_error inside run_case, exactly as in the sequential path.
+    prewarm = getattr(runner, "prewarm_checkout", None)
+    if callable(prewarm):
+        seen: set[str] = set()
+        for cell in plan:
+            if cell.case.ext_id in seen:
+                continue
+            seen.add(cell.case.ext_id)
+            # A case that can't be checked out is left to fail per-run as
+            # infra_error inside run_case, exactly as in the sequential path.
+            with contextlib.suppress(Exception):
+                prewarm(cell.case)
+
+    # Group cells by competitor (order-preserving): one queue entry per model.
+    groups: dict[str, list[MatrixCell]] = {}
+    for cell in plan:
+        groups.setdefault(cell.competitor.name, []).append(cell)
+    work: _queue.Queue[list[MatrixCell]] = _queue.Queue()
+    for cells in groups.values():
+        work.put(cells)
+
+    lock = threading.Lock()
+    stop = threading.Event()
+
+    def worker() -> None:
+        while not stop.is_set():
+            try:
+                cells = work.get_nowait()
+            except _queue.Empty:
+                return
+            for cell in cells:
+                with lock:
+                    if stop.is_set():
+                        break
+                    if max_runs is not None and report.ran >= max_runs:
+                        stop.set()
+                        break
+                    if max_spend_usd is not None and report.spend_usd >= max_spend_usd:
+                        stop.set()
+                        break
+                    # Reserve the slot under the lock so max_runs holds under overlap.
+                    report.ran += 1
+                result = runner.run_case(cell.case, cell.competitor, cell.target_file)
+                with lock:
+                    if result.cost_usd:
+                        report.spend_usd += result.cost_usd
+                    if result.status == "complete":
+                        report.completed += 1
+                    elif result.status == "auth_failed":
+                        report.auth_failed += 1
+                        if (
+                            auth_fail_abort > 0
+                            and report.completed == 0
+                            and report.auth_failed >= auth_fail_abort
+                        ):
+                            report.circuit_broken = True
+                            stop.set()
+                            emit(
+                                f"auth circuit breaker: {report.auth_failed} auth "
+                                "failures with no completions — aborting remaining "
+                                "runs (check host login)"
+                            )
+                    else:  # infra_error (or any other non-complete status)
+                        report.infra_error += 1
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(concurrency)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # Cells never attempted (caps/breaker stopped the pool) count as skipped.
+    report.skipped_caps += max(0, len(plan) - report.ran)
 
 
 def _write_leaderboard(db: Database, scorer: Scorer, html_path: str | Path) -> None:
