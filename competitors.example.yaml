@@ -100,7 +100,11 @@
   runtime: raw-api-loop
   tool_profile: read-grep
   auth_profile: deepseek-api-key  # value from $DEEPSEEK_API_KEY on the host
-  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.14, "output_usd_per_mtok": 0.28}'
+  # DeepSeek pro PROMOTIONAL pricing (2026-05-31, use until the promo ends):
+  # cache-MISS input 0.435 / cache-HIT 0.003625 / output 0.87. input rate is the
+  # MISS/list rate; compute_cost is cache-blind so recorded cost OVERCOUNTS the
+  # real bill. input_cache_hit_usd_per_mtok stashed for cache-aware costing.
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.435, "input_cache_hit_usd_per_mtok": 0.003625, "output_usd_per_mtok": 0.87}'
   size_class: large
   knowledge_cutoff: 2025-06
 
