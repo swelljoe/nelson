@@ -1041,8 +1041,8 @@ def generate_leaderboard_report(
     if any(full_n and e.cases < full_n for e in entries):
         parts.append(
             '<p class="muted">* Partial coverage: this competitor completed fewer '
-            f"than the full {full_n} cases (see the Cases column), so its detection "
-            "rate is over a smaller, self-selected denominator and is not directly "
+            f"than the full {full_n} cases (see the Cases column). Its detection "
+            "rate is therefore based on fewer audited cases and is not directly "
             "rank-comparable with full-corpus competitors — read it alongside the "
             "Cases count, not the rank.</p>"
         )
