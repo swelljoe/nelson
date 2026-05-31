@@ -1,7 +1,9 @@
 """SQLite database for scan state tracking."""
 
+import contextlib
 import json
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -256,11 +258,35 @@ def _encode_case_fields(fields: dict[str, Any]) -> dict[str, Any]:
 class Database:
     def __init__(self, path: str | Path = "nelson.db"):
         self.path = Path(path)
-        self.conn = sqlite3.connect(str(self.path))
-        self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(SCHEMA)
+        # Connections are per-thread: a SQLite connection object may only be used
+        # by the thread that created it, and the concurrent run executor
+        # (`bench loop --concurrency N`) drives the same Database from N worker
+        # threads. WAL (set once in SCHEMA, a persistent DB property) lets those
+        # connections write concurrently; ``busy_timeout`` (per-connection, set
+        # in `_open`) makes a writer wait for the lock instead of erroring. The
+        # ``conn`` property hands each thread its own lazily-opened connection.
+        self._local = threading.local()
+        self._conns: list[sqlite3.Connection] = []
+        conn = self._open()  # main thread: create schema + migrate once
+        conn.executescript(SCHEMA)
         self._apply_migrations()
-        self.conn.commit()
+        conn.commit()
+
+    def _open(self) -> sqlite3.Connection:
+        """Open (and remember, for this thread) a connection to the DB file."""
+        conn = sqlite3.connect(str(self.path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000;")  # wait ≤30s for a write lock
+        self._local.conn = conn
+        self._conns.append(conn)
+        return conn
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._open()
+        return conn
 
     def _apply_migrations(self) -> None:
         """Walk the DB from its stored schema version up to SCHEMA_VERSION.
@@ -294,7 +320,12 @@ class Database:
         )
 
     def close(self):
-        self.conn.close()
+        # Close every per-thread connection opened over this Database's life.
+        for conn in self._conns:
+            with contextlib.suppress(sqlite3.Error):
+                conn.close()
+        self._conns.clear()
+        self._local = threading.local()
 
     def __enter__(self):
         return self

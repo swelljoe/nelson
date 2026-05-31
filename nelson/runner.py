@@ -749,6 +749,24 @@ class BenchRunner:
         self.max_budget_usd = max_budget_usd
         self.preflight = preflight
 
+    def prewarm_checkout(self, case: Case) -> Path:
+        """Materialize ``case``'s pristine source tree, returning the mount path.
+
+        Idempotent (a ``.commit`` sentinel skips the fetch on repeat calls), so
+        the concurrent executor can call this once per case *before* the worker
+        pool starts: every in-pool ``run_case`` then hits the read-only fast
+        path instead of racing two threads into the same ``shutil.rmtree`` +
+        re-fetch of one checkout dir.
+        """
+        safe_ext = "".join(
+            ch if (ch.isalnum() or ch in ("-", "_", ".")) else "_" for ch in case.ext_id
+        )
+        checkout_root = self.cache_dir.resolve()
+        checkout_dir = (checkout_root / safe_ext).resolve()
+        if checkout_root != checkout_dir and checkout_root not in checkout_dir.parents:
+            raise RunnerError(f"unsafe case ext_id for cache dir: {case.ext_id!r}")
+        return prepare_checkout(case.repo_url, case.vuln_commit, checkout_dir)
+
     def run_case(
         self, case: Case, competitor: Competitor, target_file: str
     ) -> RunResult:
@@ -770,22 +788,7 @@ class BenchRunner:
             # look, so it is infra_error (handled alongside checkout/build), never
             # a miss.
             runtime = get_runtime(competitor.runtime)
-            safe_ext = "".join(
-                ch if (ch.isalnum() or ch in ("-", "_", ".")) else "_"
-                for ch in case.ext_id
-            )
-            checkout_root = self.cache_dir.resolve()
-            checkout_dir = (checkout_root / safe_ext).resolve()
-            if (
-                checkout_root != checkout_dir
-                and checkout_root not in checkout_dir.parents
-            ):
-                raise RunnerError(f"unsafe case ext_id for cache dir: {case.ext_id!r}")
-            checkout = prepare_checkout(
-                case.repo_url,
-                case.vuln_commit,
-                checkout_dir,
-            )
+            checkout = self.prewarm_checkout(case)
             self.backend.ensure_image()
         except (RunnerError, subprocess.TimeoutExpired) as e:
             self.db.mark_run_infra_error(run_id, str(e))

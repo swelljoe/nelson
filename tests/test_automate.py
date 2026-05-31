@@ -7,6 +7,8 @@ budget rails, the auth circuit breaker, age-out, and the scoring/report stages
 are all exercised without podman, a network, or a real judge.
 """
 
+import threading
+import time
 from datetime import date
 
 import pytest
@@ -398,6 +400,150 @@ def test_run_once_auth_circuit_breaker_aborts_remaining(tmp_path):
     assert report.circuit_broken is True
     assert report.skipped_caps == 3  # remaining cells aborted
     assert report.needs_attention is True
+
+
+# -- Concurrency (bench loop --concurrency N) --------------------------------
+
+
+class _ProbeRunner:
+    """Records in-flight competitors per call to prove the executor runs ≤1 cell
+    per model at once while genuinely overlapping *distinct* models. Writes a
+    coherent complete-run row from each worker thread (exercises the thread-local
+    DB connections)."""
+
+    def __init__(self, db, *, hold=0.03):
+        self.db = db
+        self.hold = hold
+        self._lock = threading.Lock()
+        self._inflight: dict[str, int] = {}
+        self.max_inflight = 0
+        self.same_model_overlap = False
+        self.calls: list[tuple[str, str]] = []
+
+    def run_case(self, case, competitor, target_file) -> RunResult:
+        with self._lock:
+            self.calls.append((competitor.name, case.ext_id))
+            self._inflight[competitor.name] = self._inflight.get(competitor.name, 0) + 1
+            if self._inflight[competitor.name] > 1:
+                self.same_model_overlap = True
+            self.max_inflight = max(self.max_inflight, sum(self._inflight.values()))
+        time.sleep(self.hold)  # widen the overlap window so parallelism is observable
+        with self._lock:
+            self._inflight[competitor.name] -= 1
+        comp_id = self.db.upsert_competitor(competitor.to_db_fields())
+        row = self.db.get_case(case.ext_id)
+        case_id = row["id"] if row else self.db.upsert_case(case.to_db_fields())
+        run_id = self.db.create_run(case_id, comp_id, target_file)
+        self.db.start_run(run_id)
+        self.db.complete_run(
+            run_id, cost_usd=0.0, wall_clock_s=1.0, tokens_in=1, tokens_out=1
+        )
+        return RunResult(status="complete", cost_usd=0.0)
+
+
+def _four_comps():
+    return [_comp(n) for n in ("alpha", "beta", "gamma", "delta")]
+
+
+def test_run_once_concurrency_runs_every_cell_exactly_once(tmp_path):
+    db = _seed_db(
+        tmp_path, cases=[_case("A"), _case("B"), _case("C")], competitors=_four_comps()
+    )
+    runner = _ProbeRunner(db)
+    report = run_once(
+        db, runner=runner, age_out=False, recency_filter=False, concurrency=4
+    )
+    assert (report.planned, report.ran, report.completed) == (12, 12, 12)
+    assert sorted(runner.calls) == sorted(
+        (c, k) for c in ("alpha", "beta", "gamma", "delta") for k in ("A", "B", "C")
+    )
+
+
+def test_run_once_concurrency_never_overlaps_one_model_but_overlaps_distinct(tmp_path):
+    db = _seed_db(
+        tmp_path, cases=[_case("A"), _case("B"), _case("C")], competitors=_four_comps()
+    )
+    runner = _ProbeRunner(db, hold=0.04)
+    run_once(db, runner=runner, age_out=False, recency_filter=False, concurrency=4)
+    assert runner.same_model_overlap is False  # rate-limit guard: ≤1 run per model
+    assert runner.max_inflight > 1  # but distinct models did run in parallel
+
+
+def test_run_once_concurrency_is_idempotent(tmp_path):
+    db = _seed_db(
+        tmp_path, cases=[_case("A"), _case("B")], competitors=[_comp("a"), _comp("b")]
+    )
+    run_once(
+        db, runner=_ProbeRunner(db), age_out=False, recency_filter=False, concurrency=3
+    )
+    runner2 = _ProbeRunner(db)
+    report2 = run_once(
+        db, runner=runner2, age_out=False, recency_filter=False, concurrency=3
+    )
+    assert report2.planned == 0 and report2.ran == 0 and runner2.calls == []
+
+
+def test_run_once_concurrency_auth_breaker_trips_with_zero_completes(tmp_path):
+    db = _seed_db(tmp_path, cases=[_case("A"), _case("B")], competitors=_four_comps())
+    runner = FakeRunner(db, statuses=["auth_failed"])  # every run auth-fails
+    report = run_once(
+        db,
+        runner=runner,
+        age_out=False,
+        recency_filter=False,
+        concurrency=4,
+        auth_fail_abort=2,
+    )
+    assert report.circuit_broken is True
+    assert report.completed == 0
+    assert report.auth_failed >= 2  # exact count is nondeterministic under overlap
+    assert report.ran + report.skipped_caps == report.planned == 8
+
+
+class _CoordinatedRunner:
+    """alpha completes and signals an event; the others block on that event
+    before auth-failing — so a completion is *guaranteed* to land first. This
+    pins down the breaker's concurrency-safe rule: once anything completes, the
+    'total auth-fails with zero completes' trip can never fire."""
+
+    def __init__(self, db):
+        self.db = db
+        self._completed = threading.Event()
+
+    def run_case(self, case, competitor, target_file) -> RunResult:
+        comp_id = self.db.upsert_competitor(competitor.to_db_fields())
+        row = self.db.get_case(case.ext_id)
+        case_id = row["id"] if row else self.db.upsert_case(case.to_db_fields())
+        run_id = self.db.create_run(case_id, comp_id, target_file)
+        self.db.start_run(run_id)
+        if competitor.name == "alpha":
+            self.db.complete_run(
+                run_id, cost_usd=0.0, wall_clock_s=1.0, tokens_in=1, tokens_out=1
+            )
+            self._completed.set()
+            return RunResult(status="complete", cost_usd=0.0)
+        self._completed.wait(timeout=5.0)  # never fail before the completion lands
+        self.db.mark_run_auth_failed(run_id, "fake auth")
+        return RunResult(status="auth_failed", error="fake auth")
+
+
+def test_run_once_concurrency_breaker_silent_once_something_completes(tmp_path):
+    db = _seed_db(
+        tmp_path,
+        cases=[_case("A"), _case("B")],
+        competitors=[_comp("alpha"), _comp("beta")],
+    )
+    report = run_once(
+        db,
+        runner=_CoordinatedRunner(db),
+        age_out=False,
+        recency_filter=False,
+        concurrency=2,
+        auth_fail_abort=1,  # would trip instantly on the first fail if not gated
+    )
+    assert report.circuit_broken is False  # a completion landed → never trips
+    assert report.completed == 2  # alpha's two cells both completed
+    assert report.auth_failed == 2  # beta's two cells failed, but never tripped
 
 
 def test_run_once_ages_out_stale_case_and_excludes_it(tmp_path):

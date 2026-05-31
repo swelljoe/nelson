@@ -259,3 +259,102 @@
   auth_profile: mimo-api-key
   cost_model: '{"input_usd_per_mtok": 0.08, "output_usd_per_mtok": 0.16}'
   knowledge_cutoff: 2025-06
+
+# ── OpenRouter cohort ────────────────────────────────────────────────────────
+# One key (auth_profile openrouter-api-key <- $OPENROUTER_API_KEY, secret file
+# /home/joe/secrets/openrouter) fronts every provider via the OpenAI-compatible
+# endpoint https://openrouter.ai/api/v1. All seven verified live 2026-05-30:
+# present in the catalogue, accessible on this account, and advertising the
+# `tools` param the raw-api-loop ReAct harness requires (native tool-calling).
+# Prices below are OpenRouter's verified per-MTok catalogue rates as of that date.
+#
+# knowledge_cutoff 2025-06 matches the cohort and keeps all 9 (May-2026) corpus
+# cases in the gate. CAVEAT: these are all 2026-era preview models; their true
+# training cutoffs are unpublished. If any postdates a case's disclosure, raise
+# this so memorized cases gate out (same open item as the Gemini placeholders).
+# size_class values are best-effort (several are previews of undisclosed size).
+#
+# OpenRouter `:free` endpoints are heavily rate-limited (per-min + daily caps);
+# the _post_chat backoff (commit 11a24ba) absorbs the 429s, but a hard daily cap
+# can still surface as infra_error (never a miss) — re-run with --retry-failed.
+
+- name: raw-api-loop/hy3-preview
+  model: tencent/hy3-preview
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1", "input_usd_per_mtok": 0.063, "output_usd_per_mtok": 0.21}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/kimi-k2.6
+  model: moonshotai/kimi-k2.6
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1", "input_usd_per_mtok": 0.684, "output_usd_per_mtok": 3.42}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/gpt-5.5
+  model: openai/gpt-5.5
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1", "input_usd_per_mtok": 5.0, "output_usd_per_mtok": 30.0}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/glm-5.1
+  model: z-ai/glm-5.1
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1", "input_usd_per_mtok": 0.98, "output_usd_per_mtok": 3.08}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+# Alibaba's hosted flagship — the "big brother" to the self-hosted qwen3.6-27b,
+# included to see what the same family buys at frontier scale/price (1M ctx).
+- name: raw-api-loop/qwen3.7-max
+  model: qwen/qwen3.7-max
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1", "input_usd_per_mtok": 1.25, "output_usd_per_mtok": 3.75}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+# Run on the free `:free` endpoint (zero actual spend) but billed at the paid
+# sibling `nvidia/nemotron-3-super-120b-a12b`'s real list price (0.090/0.450) so
+# the leaderboard cost is meaningful and stable when the promo ends.
+- name: raw-api-loop/nemotron-3-super-120b
+  model: nvidia/nemotron-3-super-120b-a12b:free
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1", "input_usd_per_mtok": 0.09, "output_usd_per_mtok": 0.45}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+# Cloaked / alpha preview models with NO posted price anywhere (owl-alpha is an
+# anonymous stealth model; laguna's only sibling is also free). No real list
+# price exists, so cost stays null — the honest "unpriced preview, not directly
+# $-comparable" treatment (same as self-hosted qwen), with tokens still metered.
+- name: raw-api-loop/owl-alpha
+  model: openrouter/owl-alpha
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1"}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/laguna-m.1
+  model: poolside/laguna-m.1:free
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1"}'
+  size_class: medium
+  knowledge_cutoff: 2025-06

@@ -1597,6 +1597,13 @@ def _emit_loop_report(report) -> None:
 )
 @click.option("--max-runs", default=0, type=int, help="Cap runs launched per pass.")
 @click.option(
+    "--concurrency",
+    default=1,
+    type=int,
+    help="Worker threads for the run matrix (1 = sequential). One model runs at "
+    "a time per worker, so distinct models run in parallel without 429s.",
+)
+@click.option(
     "--max-spend-usd",
     default=0.0,
     type=float,
@@ -1646,6 +1653,7 @@ def bench_loop(
     recency_filter: bool,
     retry_failed: bool,
     max_runs: int,
+    concurrency: int,
     max_spend_usd: float,
     auth_fail_abort: int,
     do_score: bool,
@@ -1746,6 +1754,7 @@ def bench_loop(
             max_runs=max_runs or None,
             max_spend_usd=max_spend_usd or None,
             auth_fail_abort=auth_fail_abort,
+            concurrency=concurrency,
             report_html_path=html_path,
             on_event=lambda m: click.echo(f"  · {m}", err=True),
         )
