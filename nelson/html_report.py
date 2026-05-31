@@ -954,7 +954,7 @@ def _display_name(name: str) -> str:
 # threshold is a fraction of the fullest run's case count, so a model that is
 # only a case or two short (e.g. one uncompletable case) is still plotted; a
 # deliberately partial probe like a 4/9 cost-capped run is dropped. Excluded
-# competitors keep their asterisked row in the leaderboard table above.
+# competitors keep their dagger-marked row in the leaderboard table above.
 _FRONTIER_MIN_COVERAGE = 0.75
 
 
@@ -1058,7 +1058,7 @@ def generate_leaderboard_report(
         )
         partial = (
             f'<sup style="color: var(--yellow)" title="Partial coverage: audited '
-            f'{e.cases} of {full_n} cases — see note below">*</sup>'
+            f'{e.cases} of {full_n} cases — see note below">&dagger;</sup>'
             if full_n and e.cases < full_n
             else ""
         )
@@ -1089,7 +1089,7 @@ def generate_leaderboard_report(
     )
     if any(full_n and e.cases < full_n for e in entries):
         parts.append(
-            '<p class="muted">* Partial coverage: this competitor completed fewer '
+            '<p class="muted">&dagger; Partial coverage: this competitor completed fewer '
             f"than the full {full_n} cases (see the Cases column). Its detection "
             "rate is therefore based on fewer audited cases and is not directly "
             "rank-comparable with full-corpus competitors — read it alongside the "
@@ -1144,7 +1144,7 @@ def generate_leaderboard_report(
             "axis that every other competitor collapses into one indistinguishable "
             "cluster, making the trade-off unreadable. Its position would also "
             "<em>imply</em> a quality ranking the partial run does not establish. "
-            "It remains in the leaderboard table above (asterisked).</p>"
+            "It remains in the leaderboard table above (marked &dagger;).</p>"
         )
 
     # Tokens (+ latency) per case — exposes the order-of-magnitude usage spread.
