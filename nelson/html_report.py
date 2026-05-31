@@ -946,6 +946,18 @@ def _display_name(name: str) -> str:
     return name.split("/", 1)[1] if "/" in name else name
 
 
+# Competitors that audited far fewer than the full corpus are omitted from the
+# Pareto charts (frontier + scatter): their quality is measured over a smaller,
+# self-selected case subset (so it is not commensurable with full-corpus rows),
+# and a cost-capped probe would otherwise stretch the cost axis until every
+# full-corpus competitor collapses into one indistinguishable cluster. The
+# threshold is a fraction of the fullest run's case count, so a model that is
+# only a case or two short (e.g. one uncompletable case) is still plotted; a
+# deliberately partial probe like a 4/9 cost-capped run is dropped. Excluded
+# competitors keep their asterisked row in the leaderboard table above.
+_FRONTIER_MIN_COVERAGE = 0.75
+
+
 def generate_leaderboard_report(
     entries: list[LeaderboardEntry],
     case_scores: list[CaseScore],
@@ -962,16 +974,25 @@ def generate_leaderboard_report(
     """
     from .score import pareto_frontier
 
+    # The Pareto frontier and scatter plots compare only competitors audited on
+    # enough of the corpus to be commensurable — substantially-partial probes are
+    # excluded so they neither claim a frontier ★ nor distort the chart axes.
+    full_n = max((e.cases for e in entries), default=0)
+    plotted = [
+        e for e in entries if not full_n or e.cases >= full_n * _FRONTIER_MIN_COVERAGE
+    ]
+    excluded_from_plots = [e for e in entries if e not in plotted]
+
     cost_front = {
         e.competitor_name
         for e in pareto_frontier(
-            entries, x=lambda e: e.cost_per_case, y=lambda e: e.quality
+            plotted, x=lambda e: e.cost_per_case, y=lambda e: e.quality
         )
     }
     lat_front = {
         e.competitor_name
         for e in pareto_frontier(
-            entries, x=lambda e: e.latency_per_case, y=lambda e: e.quality
+            plotted, x=lambda e: e.latency_per_case, y=lambda e: e.quality
         )
     }
 
@@ -1028,7 +1049,7 @@ def generate_leaderboard_report(
     # A competitor that completed fewer than the fullest run's case count has a
     # detection rate over a partial denominator — flag it so its rate is not read
     # as rank-comparable with full-corpus competitors (see the footnote below).
-    full_n = max((e.cases for e in entries), default=0)
+    # (full_n is computed once near the top of this function.)
     for i, e in enumerate(entries, 1):
         star = (
             ' <span class="frontier-star" title="On a Pareto frontier">★</span>'
@@ -1081,7 +1102,7 @@ def generate_leaderboard_report(
     parts.append('<div class="pareto-card"><h3>Quality vs cost / case</h3>')
     parts.append(
         _scatter_svg(
-            entries,
+            plotted,
             x_fn=lambda e: e.cost_per_case,
             y_fn=lambda e: e.quality,
             x_label="cost / case",
@@ -1093,7 +1114,7 @@ def generate_leaderboard_report(
     parts.append('<div class="pareto-card"><h3>Quality vs latency / case</h3>')
     parts.append(
         _scatter_svg(
-            entries,
+            plotted,
             x_fn=lambda e: e.latency_per_case,
             y_fn=lambda e: e.quality,
             x_label="latency / case",
@@ -1109,6 +1130,22 @@ def generate_leaderboard_report(
         "also cheaper/faster. Size is shown in the table; it is categorical, so it "
         "is not used as a numeric Pareto axis.</p>"
     )
+    if excluded_from_plots:
+        names = ", ".join(
+            f"{escape(_display_name(e.competitor_name))} ({e.cases}/{full_n})"
+            for e in excluded_from_plots
+        )
+        parts.append(
+            f'<p class="muted">These charts omit {names}: a competitor that '
+            f"audited fewer than {round(_FRONTIER_MIN_COVERAGE * 100)}% of the "
+            f"{full_n} cases measures its quality over a smaller, self-selected "
+            "subset, so the point is not comparable with the full-corpus "
+            "competitors — and a cost-capped probe sits so far out on the cost "
+            "axis that every other competitor collapses into one indistinguishable "
+            "cluster, making the trade-off unreadable. Its position would also "
+            "<em>imply</em> a quality ranking the partial run does not establish. "
+            "It remains in the leaderboard table above (asterisked).</p>"
+        )
 
     # Tokens (+ latency) per case — exposes the order-of-magnitude usage spread.
     parts.append("<h2>Tokens &amp; time per case</h2>")
