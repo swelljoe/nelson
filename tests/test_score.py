@@ -369,6 +369,61 @@ def test_case_scores_undetermined_beats_miss():
     assert case_scores(runs)[0].outcome == "judge_error"
 
 
+def test_noise_report_per_trial_detection_and_flaky_cases():
+    from nelson.score import RunScore, noise_report
+
+    # alpha over 3 trials: case A always hit; case B hit only in trial 0 (flaky).
+    runs = []
+    rid = 0
+    for t in range(3):
+        rid += 1
+        runs.append(RunScore(rid, "A", "alpha", "complete", "hit", trial=t))
+        rid += 1
+        b = "hit" if t == 0 else "miss"
+        runs.append(RunScore(rid, "B", "alpha", "complete", b, trial=t))
+
+    r = noise_report(runs)[0]
+    assert r.competitor_name == "alpha"
+    assert r.n_trials == 3
+    # trial 0: A,B both hit = 2/2; trials 1,2: A hit, B miss = 1/2
+    assert r.per_trial == {0: (2, 2), 1: (1, 2), 2: (1, 2)}
+    assert r.mean_rate == pytest.approx((1.0 + 0.5 + 0.5) / 3)
+    assert (r.min_rate, r.max_rate) == (0.5, 1.0)
+    assert r.spread == pytest.approx(0.5)
+    assert r.per_case == {"A": (3, 3), "B": (1, 3)}
+    assert r.flaky_cases == ["B"]  # A all-hit; B hit-some/miss-some
+
+
+def test_noise_report_rolls_files_up_within_a_trial():
+    from nelson.score import RunScore, noise_report
+
+    # Case A is multi-file: trial 0 has a hit on one file (=> case hit); trial 1
+    # all-miss (=> case miss). Rollup must happen per trial before counting.
+    runs = [
+        RunScore(1, "A", "alpha", "complete", "miss", trial=0),
+        RunScore(2, "A", "alpha", "complete", "hit", trial=0),
+        RunScore(3, "A", "alpha", "complete", "miss", trial=1),
+        RunScore(4, "A", "alpha", "complete", "miss", trial=1),
+    ]
+    r = noise_report(runs)[0]
+    assert r.per_trial == {0: (1, 1), 1: (0, 1)}
+    assert r.per_case["A"] == (1, 2)
+    assert r.flaky_cases == ["A"]
+
+
+def test_noise_report_single_trial_has_zero_spread():
+    from nelson.score import RunScore, noise_report
+
+    runs = [
+        RunScore(1, "A", "alpha", "complete", "hit"),
+        RunScore(2, "B", "alpha", "complete", "miss"),
+    ]
+    r = noise_report(runs)[0]
+    assert r.n_trials == 1
+    assert r.spread == 0.0
+    assert r.flaky_cases == []  # a case seen in only one trial can't be flaky
+
+
 def test_detection_report_counts_cases_not_runs():
     from nelson.score import RunScore
 

@@ -50,7 +50,7 @@ class Runner(Protocol):
     """
 
     def run_case(
-        self, case: Case, competitor: Competitor, target_file: str
+        self, case: Case, competitor: Competitor, target_file: str, trial: int = 0
     ) -> RunResult: ...
 
 
@@ -110,21 +110,30 @@ def case_is_fresh_for(case: Case, competitor: Competitor) -> bool:
 
 @dataclass(frozen=True)
 class MatrixCell:
-    """One unit of work: point ``competitor`` at ``target_file`` of ``case``."""
+    """One unit of work: point ``competitor`` at ``target_file`` of ``case``.
+
+    ``trial`` is the 0-based repeat index — distinct trials of the same
+    (competitor, case, file) are independent runs used to measure variance.
+    """
 
     competitor: Competitor
     case: Case
     target_file: str
+    trial: int = 0
 
 
-RunStatusMap = dict[tuple[str, str, str | None], set[str]]
+RunStatusMap = dict[tuple[str, str, str | None, int], set[str]]
 
 
 def existing_run_status_map(runs: Iterable[Any]) -> RunStatusMap:
-    """Index ``db.list_runs()`` rows by (competitor, case, file) -> {statuses}."""
+    """Index ``db.list_runs()`` rows by (competitor, case, file, trial) -> statuses."""
     out: RunStatusMap = {}
     for r in runs:
-        key = (r["competitor_name"], r["case_ext_id"], r["target_file"])
+        try:  # legacy rows / fakes may predate the trial column
+            trial = r["trial"]
+        except (KeyError, IndexError):
+            trial = 0
+        key = (r["competitor_name"], r["case_ext_id"], r["target_file"], trial)
         out.setdefault(key, set()).add(r["status"])
     return out
 
@@ -136,15 +145,20 @@ def plan_matrix(
     *,
     recency_filter: bool = True,
     retry_failed: bool = False,
+    repeat: int = 1,
 ) -> list[MatrixCell]:
-    """The (competitor x case x file) cells that still need a run.
+    """The (competitor x case x file x trial) cells that still need a run.
 
     Idempotent by construction: a cell with a complete/pending/running run is
     skipped, so re-running the loop only fills gaps. A cell whose only runs were
     auth_failed / infra_error is skipped too unless ``retry_failed`` (those never
     got a fair look). With ``recency_filter`` on, a cell is dropped when the case
-    is provably not 0-day to that competitor. Output is sorted (competitor name,
-    case ext_id, file order) for a deterministic, resumable pass.
+    is provably not 0-day to that competitor.
+
+    ``repeat`` plans that many independent trials per (competitor, case, file);
+    each trial is tracked separately, so a partial pass resumes to fill exactly
+    the missing trials. Output is sorted (competitor, case, file, trial) for a
+    deterministic, resumable pass.
     """
     cells: list[MatrixCell] = []
     for comp in sorted(competitors, key=lambda c: c.name):
@@ -152,12 +166,19 @@ def plan_matrix(
             if recency_filter and not case_is_fresh_for(case, comp):
                 continue
             for target in vulnerable_files(case):
-                statuses = existing.get((comp.name, case.ext_id, target), set())
-                if statuses & _SETTLED_STATUSES:
-                    continue
-                if statuses and statuses <= _RETRYABLE_STATUSES and not retry_failed:
-                    continue
-                cells.append(MatrixCell(comp, case, target))
+                for trial in range(max(1, repeat)):
+                    statuses = existing.get(
+                        (comp.name, case.ext_id, target, trial), set()
+                    )
+                    if statuses & _SETTLED_STATUSES:
+                        continue
+                    if (
+                        statuses
+                        and statuses <= _RETRYABLE_STATUSES
+                        and not retry_failed
+                    ):
+                        continue
+                    cells.append(MatrixCell(comp, case, target, trial))
     return cells
 
 
@@ -294,6 +315,7 @@ def run_once(
     age_out: bool = True,
     recency_filter: bool = True,
     retry_failed: bool = False,
+    repeat: int = 1,
     max_runs: int | None = None,
     max_spend_usd: float | None = None,
     auth_fail_abort: int = 3,
@@ -361,6 +383,7 @@ def run_once(
             existing,
             recency_filter=recency_filter,
             retry_failed=retry_failed,
+            repeat=repeat,
         )
         report.planned = len(plan)
         emit(f"planned {len(plan)} run(s)")
@@ -470,7 +493,9 @@ def _execute_runs_sequential(
             report.skipped_caps += 1
             continue
 
-        result = runner.run_case(cell.case, cell.competitor, cell.target_file)
+        result = runner.run_case(
+            cell.case, cell.competitor, cell.target_file, cell.trial
+        )
         report.ran += 1
         if result.cost_usd:
             report.spend_usd += result.cost_usd
@@ -569,7 +594,9 @@ def _execute_runs_concurrent(
                         break
                     # Reserve the slot under the lock so max_runs holds under overlap.
                     report.ran += 1
-                result = runner.run_case(cell.case, cell.competitor, cell.target_file)
+                result = runner.run_case(
+                    cell.case, cell.competitor, cell.target_file, cell.trial
+                )
                 with lock:
                     if result.cost_usd:
                         report.spend_usd += result.cost_usd

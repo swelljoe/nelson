@@ -93,11 +93,12 @@ def test_plan_matrix_one_cell_per_competitor_case_file():
     ]
 
 
-def _run_row(status, *, name="alpha", ext_id="A", target="Foo.java"):
+def _run_row(status, *, name="alpha", ext_id="A", target="Foo.java", trial=0):
     return {
         "competitor_name": name,
         "case_ext_id": ext_id,
         "target_file": target,
+        "trial": trial,
         "status": status,
     }
 
@@ -135,6 +136,32 @@ def test_plan_matrix_applies_recency_filter():
     assert len(plan_matrix(comps, cases, {}, recency_filter=False)) == 2
 
 
+def test_plan_matrix_repeat_plans_n_trials_per_cell():
+    comps = [_comp("alpha")]
+    cases = [_case("A", files=("Foo.java", "Bar.java"))]
+    cells = plan_matrix(comps, cases, {}, recency_filter=False, repeat=3)
+    # 1 competitor x 1 case x 2 files x 3 trials
+    assert len(cells) == 6
+    assert sorted((c.target_file, c.trial) for c in cells) == [
+        ("Bar.java", 0),
+        ("Bar.java", 1),
+        ("Bar.java", 2),
+        ("Foo.java", 0),
+        ("Foo.java", 1),
+        ("Foo.java", 2),
+    ]
+
+
+def test_plan_matrix_repeat_resumes_only_missing_trials():
+    comps = [_comp("alpha")]
+    cases = [_case("A")]  # single file Foo.java
+    existing = existing_run_status_map(
+        [_run_row("complete", trial=0), _run_row("complete", trial=1)]
+    )
+    cells = plan_matrix(comps, cases, existing, recency_filter=False, repeat=3)
+    assert [c.trial for c in cells] == [2]  # only the un-run trial is planned
+
+
 def test_existing_run_status_map_groups_by_cell():
     rows = [
         _run_row("complete", name="a", target="F"),
@@ -142,8 +169,8 @@ def test_existing_run_status_map_groups_by_cell():
         _run_row("running", name="b", target="F"),
     ]
     m = existing_run_status_map(rows)
-    assert m[("a", "A", "F")] == {"complete", "auth_failed"}
-    assert m[("b", "A", "F")] == {"running"}
+    assert m[("a", "A", "F", 0)] == {"complete", "auth_failed"}
+    assert m[("b", "A", "F", 0)] == {"running"}
 
 
 # -- Age-out -----------------------------------------------------------------
@@ -255,13 +282,13 @@ class FakeRunner:
         self._i += 1
         return status
 
-    def run_case(self, case, competitor, target_file) -> RunResult:
+    def run_case(self, case, competitor, target_file, trial=0) -> RunResult:
         self.calls.append((competitor.name, case.ext_id, target_file))
         status = self._next_status()
         comp_id = self.db.upsert_competitor(competitor.to_db_fields())
         row = self.db.get_case(case.ext_id)
         case_id = row["id"] if row else self.db.upsert_case(case.to_db_fields())
-        run_id = self.db.create_run(case_id, comp_id, target_file)
+        run_id = self.db.create_run(case_id, comp_id, target_file, trial)
         self.db.start_run(run_id)
         if status == "complete":
             self.db.complete_run(
@@ -420,7 +447,7 @@ class _ProbeRunner:
         self.same_model_overlap = False
         self.calls: list[tuple[str, str]] = []
 
-    def run_case(self, case, competitor, target_file) -> RunResult:
+    def run_case(self, case, competitor, target_file, trial=0) -> RunResult:
         with self._lock:
             self.calls.append((competitor.name, case.ext_id))
             self._inflight[competitor.name] = self._inflight.get(competitor.name, 0) + 1
@@ -433,7 +460,7 @@ class _ProbeRunner:
         comp_id = self.db.upsert_competitor(competitor.to_db_fields())
         row = self.db.get_case(case.ext_id)
         case_id = row["id"] if row else self.db.upsert_case(case.to_db_fields())
-        run_id = self.db.create_run(case_id, comp_id, target_file)
+        run_id = self.db.create_run(case_id, comp_id, target_file, trial)
         self.db.start_run(run_id)
         self.db.complete_run(
             run_id, cost_usd=0.0, wall_clock_s=1.0, tokens_in=1, tokens_out=1
@@ -510,11 +537,11 @@ class _CoordinatedRunner:
         self.db = db
         self._completed = threading.Event()
 
-    def run_case(self, case, competitor, target_file) -> RunResult:
+    def run_case(self, case, competitor, target_file, trial=0) -> RunResult:
         comp_id = self.db.upsert_competitor(competitor.to_db_fields())
         row = self.db.get_case(case.ext_id)
         case_id = row["id"] if row else self.db.upsert_case(case.to_db_fields())
-        run_id = self.db.create_run(case_id, comp_id, target_file)
+        run_id = self.db.create_run(case_id, comp_id, target_file, trial)
         self.db.start_run(run_id)
         if competitor.name == "alpha":
             self.db.complete_run(
