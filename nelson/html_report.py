@@ -997,17 +997,27 @@ def generate_leaderboard_report(
         '<th class="num">Cases</th>'
         "</tr>"
     )
+    # A competitor that completed fewer than the fullest run's case count has a
+    # detection rate over a partial denominator — flag it so its rate is not read
+    # as rank-comparable with full-corpus competitors (see the footnote below).
+    full_n = max((e.cases for e in entries), default=0)
     for i, e in enumerate(entries, 1):
         star = (
             ' <span class="frontier-star" title="On a Pareto frontier">★</span>'
             if e.competitor_name in cost_front or e.competitor_name in lat_front
             else ""
         )
+        partial = (
+            f'<sup style="color:var(--yellow)" title="Partial coverage: '
+            f'detection is over {e.cases} of {full_n} cases — see note below">*</sup>'
+            if full_n and e.cases < full_n
+            else ""
+        )
         parts.append(
             f'<tr><td class="lead-rank">{i}</td>'
-            f"<td>{escape(e.competitor_name)}{star}</td>"
+            f"<td>{escape(e.competitor_name)}{partial}{star}</td>"
             f"<td>{escape(e.size_class or '—')}</td>"
-            f'<td class="num">{_pct(e.detection_rate) if e.eligible else "—"}</td>'
+            f'<td class="num">{_pct(e.detection_rate) if e.eligible else "—"}{partial}</td>'
             f'<td class="num">{e.hits}/{e.eligible}</td>'
             f'<td class="num">{_pct(e.precision)}</td>'
             f'<td class="num">{f"{e.fp_per_case:.2f}" if e.fp_per_case is not None else "—"}</td>'
@@ -1028,6 +1038,14 @@ def generate_leaderboard_report(
         "the competitor's own spend per audited case. ★ = on a Pareto "
         "frontier below.</p>"
     )
+    if any(full_n and e.cases < full_n for e in entries):
+        parts.append(
+            '<p class="muted">* Partial coverage: this competitor completed fewer '
+            f"than the full {full_n} cases (see the Cases column), so its detection "
+            "rate is over a smaller, self-selected denominator and is not directly "
+            "rank-comparable with full-corpus competitors — read it alongside the "
+            "Cases count, not the rank.</p>"
+        )
 
     # Pareto scatter plots.
     parts.append("<h2>Pareto frontier</h2>")
