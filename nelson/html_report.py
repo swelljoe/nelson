@@ -1037,7 +1037,7 @@ def generate_leaderboard_report(
         '<th class="num">Detect</th><th class="num">Hits/Elig</th>'
         '<th class="num">Precision</th><th class="num">FP/case</th>'
         '<th class="num" title="Confirmed real bugs the model found that are not '
-        "the planted target CVE — credited capability, but does not count toward "
+        "the known target CVE — credited capability, but does not count toward "
         'detection">Other real</th>'
         '<th class="num">Cost/case</th><th class="num">Latency</th>'
         '<th class="num" title="Mean total tokens (prompt + completion) reported '

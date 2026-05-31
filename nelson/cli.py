@@ -1433,7 +1433,7 @@ def _emit_leaderboard(entries) -> None:
         )
     click.echo(
         "\nRanked by detection, then precision, then cost/case. OTHER = confirmed "
-        "real bugs found that are not the planted target CVE. COST/C, LAT and TOK/C "
+        "real bugs found that are not the known target CVE. COST/C, LAT and TOK/C "
         "are the competitor's own spend/time/tokens per audited case (judge spend "
         "excluded). TOK/C reflects provider-reported usage — under-reporting compat "
         "endpoints understate it."
