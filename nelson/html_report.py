@@ -762,7 +762,7 @@ def _token_bars_svg(entries: list[LeaderboardEntry]) -> str:
     expose the order-of-magnitude spread. Pure string building, no JS/assets.
     """
     pts = [
-        (e.competitor_name, e.tokens_per_case, e.latency_per_case)
+        (_display_name(e.competitor_name), e.tokens_per_case, e.latency_per_case)
         for e in entries
         if e.tokens_per_case is not None
     ]
@@ -824,7 +824,12 @@ def _scatter_svg(
         if xv is None or yv is None:
             continue
         pts.append(
-            (e.competitor_name, float(xv), float(yv), e.competitor_name in frontier)
+            (
+                _display_name(e.competitor_name),
+                float(xv),
+                float(yv),
+                e.competitor_name in frontier,
+            )
         )
     if not pts:
         return (
@@ -916,6 +921,29 @@ _OUTCOME_CELL = {
     "refused": ("cell-refu", "refu"),
     "excluded": ("cell-excl", "excl"),
 }
+
+
+# Friendly leaderboard labels. The runtime prefix (raw-api-loop/, claude-code/) is
+# noise in the report — every non-Claude model runs in the API loop, so its prefix
+# carries no information — so we drop it. A few competitors are registered under a
+# bare model nickname; map those to their versioned product name so every row reads
+# at the same level of detail. Display-only: the stored competitor_name (and every
+# DB/frontier/matrix lookup keyed on it) is unchanged.
+_DISPLAY_OVERRIDES = {
+    "claude-code/haiku": "haiku-4.5",
+    "claude-code/sonnet": "sonnet-4.6",
+    "claude-code/opus": "opus-4.8",
+    "raw-api-loop/deepseek": "deepseek-v4-pro",
+    "raw-api-loop/mimo": "mimo-v2.5-pro",
+}
+
+
+def _display_name(name: str) -> str:
+    """Render a competitor's leaderboard label: explicit override if one exists,
+    otherwise drop the leading ``runtime/`` prefix."""
+    if name in _DISPLAY_OVERRIDES:
+        return _DISPLAY_OVERRIDES[name]
+    return name.split("/", 1)[1] if "/" in name else name
 
 
 def generate_leaderboard_report(
@@ -1015,7 +1043,7 @@ def generate_leaderboard_report(
         )
         parts.append(
             f'<tr><td class="lead-rank">{i}</td>'
-            f"<td>{escape(e.competitor_name)}{partial}{star}</td>"
+            f"<td>{escape(_display_name(e.competitor_name))}{partial}{star}</td>"
             f"<td>{escape(e.size_class or '—')}</td>"
             f'<td class="num">{_pct(e.detection_rate) if e.eligible else "—"}{partial}</td>'
             f'<td class="num">{e.hits}/{e.eligible}</td>'
@@ -1116,7 +1144,7 @@ def generate_leaderboard_report(
             parts.append(f"<th>{escape(c)}</th>")
         parts.append("</tr>")
         for comp in ordered_comps:
-            parts.append(f'<tr><td class="comp">{escape(comp)}</td>')
+            parts.append(f'<tr><td class="comp">{escape(_display_name(comp))}</td>')
             for c in ordered_cases:
                 outcome = by_cell.get((comp, c))
                 if outcome is None:
