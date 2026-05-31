@@ -567,9 +567,10 @@ def _execute_runs_concurrent(
                     if max_spend_usd is not None and report.spend_usd >= max_spend_usd:
                         stop.set()
                         break
+                    # Reserve the slot under the lock so max_runs is enforced under overlap.
+                    report.ran += 1
                 result = runner.run_case(cell.case, cell.competitor, cell.target_file)
                 with lock:
-                    report.ran += 1
                     if result.cost_usd:
                         report.spend_usd += result.cost_usd
                     if result.status == "complete":
