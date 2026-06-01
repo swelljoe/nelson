@@ -321,6 +321,18 @@ class Database:
                         version in (5, 6)
                         and "duplicate column name" in str(exc).lower()
                     ):
+                        # Re-run the migration statement-by-statement so that any
+                        # statements after the duplicate ADD COLUMN (e.g. the
+                        # idx_runs_trial index in v6) are still applied.
+                        for stmt in script.split(";"):
+                            stripped = stmt.strip()
+                            if not stripped:
+                                continue
+                            try:
+                                self.conn.execute(stripped)
+                            except sqlite3.OperationalError as stmt_exc:
+                                if "duplicate column name" not in str(stmt_exc).lower():
+                                    raise
                         continue
                     raise
         self.conn.execute(
