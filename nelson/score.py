@@ -1578,17 +1578,25 @@ class LeaderboardEntry:
         return self.hits + self.misses
 
     @property
+    @property
     def detection_rate(self) -> float:
-        """Detection rate. For repeated runs this is the **mean across trials**
-        (each trial scored on its own, then averaged) — a typical single run,
-        not best-of-N. Single-shot runs collapse to the one trial's rate."""
+        """Detection rate.
+
+        For repeated runs this is the **mean across trials** (each trial scored on
+        its own, then averaged) — a typical single run, not best-of-N. Trials with
+        zero eligible cases count as 0.0 so the mean is truly across trials.
+        """
         if self.trial_rates:
-            return sum(self.trial_rates) / len(self.trial_rates)
+            denom = max(self.n_trials, len(self.trial_rates))
+            return sum(self.trial_rates) / denom if denom else 0.0
         return self.hits / self.eligible if self.eligible else 0.0
 
     @property
     def trial_min_rate(self) -> float:
-        return min(self.trial_rates) if self.trial_rates else self.detection_rate
+        if not self.trial_rates:
+            return self.detection_rate
+        rates = self.trial_rates + [0.0] * (self.n_trials - len(self.trial_rates))
+        return min(rates)
 
     @property
     def trial_max_rate(self) -> float:
@@ -1599,7 +1607,8 @@ class LeaderboardEntry:
         """max - min detection across trials; 0 for single-shot runs."""
         if not self.trial_rates:
             return 0.0
-        return max(self.trial_rates) - min(self.trial_rates)
+        rates = self.trial_rates + [0.0] * (self.n_trials - len(self.trial_rates))
+        return max(self.trial_rates) - min(rates)
 
     @property
     def true_findings(self) -> int:
