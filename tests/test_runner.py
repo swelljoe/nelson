@@ -389,6 +389,38 @@ def test_build_competitor_prompt_names_file_and_hides_advisory():
         assert leak not in prompt
 
 
+def test_build_competitor_prompt_oracle_cwe_leaks_only_the_class():
+    from nelson.runner import build_competitor_prompt
+
+    case = Case(
+        source="cvd",
+        ext_id="GHSA-f26g",
+        cwe="CWE-349, CWE-77",
+        bug_class="source-confusion",
+        description="trusts extraneous data",
+    )
+    # Oracle ON: the ground-truth CWE(s) + their names appear, as a focus hint.
+    on = build_competitor_prompt(case, "src/access.rs", oracle_cwe=True)
+    assert "CWE-349" in on and "CWE-77" in on
+    assert "Acceptance of Extraneous Untrusted Data" in on  # rendered name
+    assert "concentrate your review" in on.lower()
+    # Still no *location/fix* leak — only the weakness class is revealed.
+    for leak in ("bug_class", "source-confusion", "trusts extraneous", "the fix"):
+        assert leak not in on
+    # The integrity guard survives: still told to output [] if nothing real.
+    assert "output []" in on
+
+    # Oracle OFF (default) is byte-for-byte the neutral prompt — no CWE leak.
+    off = build_competitor_prompt(case, "src/access.rs")
+    assert "CWE-349" not in off and "concentrate" not in off.lower()
+
+    # A case with no recorded CWE degrades to the neutral prompt even when asked.
+    nocwe = Case(source="cvd", ext_id="X", cwe=None)
+    assert build_competitor_prompt(
+        nocwe, "F.c", oracle_cwe=True
+    ) == build_competitor_prompt(nocwe, "F.c")
+
+
 # -- Orchestrated run (fake backend + fake auth) -----------------------------
 
 

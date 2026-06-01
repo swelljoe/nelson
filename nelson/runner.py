@@ -86,6 +86,37 @@ around it. Each element must be:
 
 If you find no vulnerabilities in the file, output []."""
 
+# Oracle-CWE hint (the "shape of the needle" experiment): when enabled, the
+# otherwise-neutral prompt is told the ground-truth weakness class(es) of the
+# file under review. This deliberately LEAKS the bug class — it is cheating, used
+# only to test the hypothesis that a model finds more when told what to look for,
+# at the cost of one open-mode run (not a 25-CWE focused sweep). It names the
+# class but never the location or fix, and keeps the "output [] if you can't
+# substantiate it" integrity rule so the truth/FP judges still do their job.
+_ORACLE_HINT = """\
+Prior analysis indicates {target} is most likely to contain a vulnerability of \
+the following weakness class — concentrate your review on finding it:
+
+{cwes}
+
+Do not invent an issue to fit the category: report it only if it is genuinely \
+present and exploitable in {target}; otherwise still output []."""
+
+
+def _format_oracle_cwes(cwe: str) -> str:
+    """Render a case's ``cwe`` field (one id or a comma-separated list) as a
+    bulleted hint, attaching the human-readable name when we know it."""
+    from .cwe import cwe_name
+
+    lines = []
+    for raw in cwe.split(","):
+        cid = raw.strip()
+        if not cid:
+            continue
+        name = cwe_name(cid)
+        lines.append(f"  - {cid} ({name})" if name else f"  - {cid}")
+    return "\n".join(lines)
+
 
 class RunnerError(RuntimeError):
     """A setup failure (checkout, image build) that prevents a run from starting."""
@@ -513,13 +544,26 @@ def vulnerable_files(case: Case) -> list[str]:
     return [f for f in case.gt_files if _audit_target(f)] or list(case.gt_files)
 
 
-def build_competitor_prompt(case: Case, target_file: str) -> str:
+def build_competitor_prompt(
+    case: Case, target_file: str, *, oracle_cwe: bool = False
+) -> str:
     """The neutral, file-scoped audit prompt for ``target_file``.
 
-    Takes ``case`` for parity with other builders, but deliberately reveals
-    nothing about the planted vulnerability — only which file to review."""
+    Takes ``case`` for parity with other builders, and by default reveals
+    nothing about the planted vulnerability — only which file to review.
+
+    When ``oracle_cwe`` is set and the case carries a ground-truth ``cwe``, the
+    prompt is augmented with that weakness class (the "shape of the needle"
+    experiment). This intentionally leaks the bug class and must only be used on
+    an experimental dataset, never the baseline."""
     safe_target = target_file.replace("{", "{{").replace("}", "}}")
-    return f"{_AUDIT_INTRO.format(target=safe_target)}\n\n{_OUTPUT_SPEC}"
+    intro = _AUDIT_INTRO.format(target=safe_target)
+    hint = ""
+    if oracle_cwe and case.cwe:
+        cwes = _format_oracle_cwes(case.cwe)
+        if cwes:
+            hint = "\n\n" + _ORACLE_HINT.format(target=safe_target, cwes=cwes)
+    return f"{intro}{hint}\n\n{_OUTPUT_SPEC}"
 
 
 def claude_code_spec(
@@ -729,6 +773,7 @@ class BenchRunner:
         run_timeout: float = 1800.0,
         max_budget_usd: float | None = 0.50,
         preflight: bool = False,
+        oracle_cwe: bool = False,
     ):
         self.db = db
         self.backend = backend or PodmanBackend()
@@ -748,6 +793,9 @@ class BenchRunner:
         self.run_timeout = run_timeout
         self.max_budget_usd = max_budget_usd
         self.preflight = preflight
+        # Oracle-CWE experiment: leak the case's ground-truth weakness class into
+        # the audit prompt. Off by default; only an experimental DB should set it.
+        self.oracle_cwe = oracle_cwe
 
     def prewarm_checkout(self, case: Case) -> Path:
         """Materialize ``case``'s pristine source tree, returning the mount path.
@@ -831,7 +879,9 @@ class BenchRunner:
             try:
                 ctx = RuntimeContext(
                     competitor=competitor,
-                    prompt=build_competitor_prompt(case, target_file),
+                    prompt=build_competitor_prompt(
+                        case, target_file, oracle_cwe=self.oracle_cwe
+                    ),
                     src_dir=checkout,
                     auth=material,
                     name=name,

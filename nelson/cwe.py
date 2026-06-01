@@ -395,6 +395,51 @@ CWE_TOP_25: list[CWEEntry] = [
 ]
 
 
+# Rust is a general-purpose backend/CLI language subject to the same web/logic
+# weakness classes as Go/Java/Python (auth, authz, injection, SSRF, deserialization,
+# SSRF, missing-authn, ...), even though *safe* Rust rules out most memory-safety
+# classes (those stay c/cpp). The corpus's Rust authorization case (GHSA-f26g, a
+# source-confusion authz bug) made the omission concrete. Augment the relevant
+# entries here rather than hand-editing each literal `languages` set.
+_RUST_WEB_LOGIC_CWES = {
+    "CWE-79",   # XSS — server-side templating (askama, maud)
+    "CWE-89",   # SQL injection — raw queries via sqlx/diesel
+    "CWE-352",  # CSRF
+    "CWE-434",  # unrestricted file upload
+    "CWE-862",  # missing authorization
+    "CWE-863",  # incorrect authorization (the GHSA-f26g class)
+    "CWE-287",  # improper authentication
+    "CWE-502",  # unsafe deserialization (serde + untrusted formats)
+    "CWE-918",  # SSRF
+    "CWE-306",  # missing authentication for a critical function
+}
+for _entry in CWE_TOP_25:
+    if _entry.id in _RUST_WEB_LOGIC_CWES:
+        _entry.languages.add("rust")
+del _entry
+
+# Names for weakness classes present in the benchmark corpus but outside the Top
+# 25, so the oracle-CWE hint can render a human-readable name for them too.
+_SUPPLEMENTAL_CWE_NAMES = {
+    "CWE-639": "Authorization Bypass Through User-Controlled Key",
+    "CWE-349": "Acceptance of Extraneous Untrusted Data With Trusted Data",
+    "CWE-122": "Heap-based Buffer Overflow",
+    "CWE-183": "Permissive List of Allowed Inputs",
+    "CWE-501": "Trust Boundary Violation",
+}
+
+
+def cwe_name(cwe_id: str) -> str | None:
+    """Human-readable name for a CWE id, or None if unknown.
+
+    Resolves against the Top-25 set first, then a small supplemental map of
+    weakness classes that appear in the benchmark corpus but not the Top 25."""
+    for entry in CWE_TOP_25:
+        if entry.id == cwe_id:
+            return entry.name
+    return _SUPPLEMENTAL_CWE_NAMES.get(cwe_id)
+
+
 def applicable_cwes(language: str) -> list[CWEEntry]:
     """Return CWEs that apply to the given language."""
     return [cwe for cwe in CWE_TOP_25 if not cwe.languages or language in cwe.languages]
