@@ -1476,6 +1476,7 @@ def bench_leaderboard(db_path: str, html_path: str | None, tolerance: int):
         case_scores,
         drop_competitors,
         leaderboard,
+        noise_report,
     )
 
     db = Database(db_path)
@@ -1510,7 +1511,9 @@ def bench_leaderboard(db_path: str, html_path: str | None, tolerance: int):
     if html_path:
         from .html_report import generate_leaderboard_report
 
-        html = generate_leaderboard_report(entries, case_scores(run_scores))
+        html = generate_leaderboard_report(
+            entries, case_scores(run_scores), noise=noise_report(run_scores)
+        )
         Path(html_path).write_text(html)
         click.echo(f"\nWrote leaderboard report to {html_path}")
 
@@ -1691,6 +1694,13 @@ def _emit_loop_report(report) -> None:
     "--fp-cache-dir", default=None, help="Where the FP judge checks out source."
 )
 @click.option("--no-network", is_flag=True, help="Run containers with no network.")
+@click.option(
+    "--oracle-cwe",
+    is_flag=True,
+    help="EXPERIMENT: leak each case's ground-truth CWE(s) into the audit prompt "
+    "('shape of the needle'). Cheats detection on purpose; use only on an "
+    "experimental DB, never the baseline.",
+)
 @click.option("--timeout", default=1800.0, type=float, help="Per-run wall-clock cap.")
 @click.option(
     "--max-budget-usd", default=0.50, type=float, help="Per-run cost backstop."
@@ -1726,6 +1736,7 @@ def bench_loop(
     runs_dir: str,
     fp_cache_dir: str | None,
     no_network: bool,
+    oracle_cwe: bool,
     timeout: float,
     max_budget_usd: float,
     html_path: str | None,
@@ -1767,6 +1778,7 @@ def bench_loop(
         network=not no_network,
         run_timeout=timeout,
         max_budget_usd=max_budget_usd or None,
+        oracle_cwe=oracle_cwe,
     )
 
     scorer = None

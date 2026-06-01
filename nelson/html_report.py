@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from .db import Database
 
 if TYPE_CHECKING:
-    from .score import CaseScore, LeaderboardEntry
+    from .score import CaseScore, CompetitorNoise, LeaderboardEntry
 
 # Shared CSS used by both report types
 _CSS = """\
@@ -703,6 +703,7 @@ _LEADERBOARD_EXTRA_CSS = """\
 .lead-rank { color: var(--text-muted); text-align: right; width: 2rem; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 .frontier-star { color: var(--green); font-weight: 700; }
+.trials-note { color: var(--text-muted); font-size: 0.72em; font-weight: 400; }
 .muted { color: var(--text-muted); }
 .pareto-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
@@ -969,6 +970,7 @@ def generate_leaderboard_report(
     case_scores: list[CaseScore],
     *,
     title: str = "Nelson Benchmark Leaderboard",
+    noise: list[CompetitorNoise] | None = None,
 ) -> str:
     """Render the benchmark leaderboard: ranked table, Pareto scatter plots, and a
     per-case competitor x case drilldown matrix.
@@ -977,6 +979,10 @@ def generate_leaderboard_report(
     ``case_scores`` is :func:`nelson.score.case_scores` output (for the matrix).
     Cost/latency reflect competitor spend only — judge spend is shown apart so it
     never colors the Pareto trade-off.
+
+    ``noise`` is :func:`nelson.score.noise_report` output; when a ``--repeat`` run
+    has more than one trial it drives the per-case *n/N* flaky annotations in the
+    matrix. ``None`` (the single-shot default) renders exactly as before.
     """
     from .score import pareto_frontier
 
@@ -1040,7 +1046,10 @@ def generate_leaderboard_report(
     parts.append(
         "<table><tr>"
         '<th class="lead-rank">#</th><th>Competitor</th><th>Size</th>'
-        '<th class="num">Detect</th><th class="num">Hits/Elig</th>'
+        '<th class="num">Detect</th>'
+        '<th class="num" title="Single run: case hits / eligible (hits + genuine '
+        "misses). Repeated runs (--repeat): per-trial detection range (min-max); "
+        'hover a cell for the best-of-N pooled count and the spread.">Hits/Elig</th>'
         '<th class="num">Precision</th><th class="num">FP/case</th>'
         '<th class="num" title="Confirmed real bugs the model found that are not '
         "the known target CVE — credited capability, but does not count toward "
@@ -1068,12 +1077,31 @@ def generate_leaderboard_report(
             if full_n and e.cases < full_n
             else ""
         )
+        # With repeated trials the headline is the mean across trials and the
+        # Hits/Elig cell becomes a per-trial range (best-of-N kept in the tooltip).
+        if e.n_trials > 1:
+            detect = (
+                (
+                    f"{_pct(e.detection_rate)}"
+                    f'<div class="trials-note">mean of {e.n_trials} trials</div>'
+                )
+                if e.eligible
+                else "—"
+            )
+            hits_elig = (
+                f'<span title="best-of-{e.n_trials} pooled = {e.hits}/{e.eligible}; '
+                f'spread {_pct(e.trial_spread)}">'
+                f"{_pct(e.trial_min_rate)}&ndash;{_pct(e.trial_max_rate)}</span>"
+            )
+        else:
+            detect = _pct(e.detection_rate) if e.eligible else "—"
+            hits_elig = f"{e.hits}/{e.eligible}"
         parts.append(
             f'<tr><td class="lead-rank">{i}</td>'
             f"<td>{escape(_display_name(e.competitor_name))}{partial}{star}</td>"
             f"<td>{escape(e.size_class or '—')}</td>"
-            f'<td class="num">{_pct(e.detection_rate) if e.eligible else "—"}{partial}</td>'
-            f'<td class="num">{e.hits}/{e.eligible}</td>'
+            f'<td class="num">{detect}{partial}</td>'
+            f'<td class="num">{hits_elig}</td>'
             f'<td class="num">{_pct(e.precision)}</td>'
             f'<td class="num">{f"{e.fp_per_case:.2f}" if e.fp_per_case is not None else "—"}</td>'
             f'<td class="num">{e.real_others if e.real_others else "—"}</td>'
@@ -1093,6 +1121,18 @@ def generate_leaderboard_report(
         "the competitor's own spend per audited case. ★ = on a Pareto "
         "frontier below.</p>"
     )
+    if any(e.n_trials > 1 for e in entries):
+        parts.append(
+            '<p class="muted">This run used repeated trials '
+            "(<code>--repeat</code>). <strong>Detect is the mean detection rate "
+            "across trials</strong> — each trial is scored on its own and the "
+            "rates averaged, so it reflects a typical single run, <em>not</em> "
+            "best-of-N. The ranking is by that mean. Hits/Elig shows the per-trial "
+            "detection <strong>range</strong> (min to max); hover it for the "
+            "best-of-N pooled count and the spread. In the per-case matrix, a HIT "
+            "marked <code>n/N</code> was found in only n of N trials (flaky). See "
+            "<code>bench noise</code> for the full per-trial breakdown.</p>"
+        )
     if any(full_n and e.cases < full_n for e in entries):
         parts.append(
             '<p class="muted">&dagger; Partial coverage: this competitor completed fewer '
@@ -1173,6 +1213,13 @@ def generate_leaderboard_report(
     for cs in case_scores:
         by_cell[(cs.competitor_name, cs.case_ext_id)] = cs.outcome
         cases.add(cs.case_ext_id)
+    # Per-(competitor, case) hit frequency across trials, so a pooled HIT that was
+    # actually flaky (hit in only some trials) can be marked n/N in the matrix.
+    case_freq: dict[tuple[str, str], tuple[int, int]] = {}
+    for n in noise or []:
+        for case_id, (hits, trials) in n.per_case.items():
+            case_freq[(n.competitor_name, case_id)] = (hits, trials)
+    any_flaky = any(h < t for h, t in case_freq.values())
     if by_cell:
         ordered_comps = [e.competitor_name for e in entries]
         # include any competitor present only in case_scores (defensive)
@@ -1194,14 +1241,26 @@ def generate_leaderboard_report(
                     parts.append('<td class="cell-none">·</td>')
                 else:
                     cls, txt = _OUTCOME_CELL.get(outcome, ("cell-none", outcome))
-                    parts.append(f'<td class="{cls}">{escape(txt)}</td>')
+                    freq = case_freq.get((comp, c))
+                    title = ""
+                    if outcome == "hit" and freq and freq[0] < freq[1]:
+                        # Flaky: pooled to HIT but missed in some trials.
+                        txt = f"{txt} {freq[0]}/{freq[1]}"
+                        title = f' title="hit in {freq[0]} of {freq[1]} trials (flaky)"'
+                    parts.append(f'<td class="{cls}"{title}>{escape(txt)}</td>')
             parts.append("</tr>")
         parts.append("</table></div>")
+        flaky_note = (
+            " A HIT marked <code>n/N</code> was found in only n of N trials "
+            "(flaky); a bare HIT was found in every trial."
+            if any_flaky
+            else ""
+        )
         parts.append(
             '<p class="muted">HIT = detected; miss = looked, found nothing; '
             "jerr = judge undetermined (out of denominator); refu = model refused "
             "the task (out of denominator, never a miss); excl = auth/infra "
-            "failure (never a miss); · = not run.</p>"
+            f"failure (never a miss); · = not run.{flaky_note}</p>"
         )
 
     parts.append(
