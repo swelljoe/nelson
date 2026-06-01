@@ -1656,8 +1656,6 @@ def _emit_loop_report(report) -> None:
     help="Run each cell this many independent trials (for noise measurement). "
     "Resumes per-trial; see `bench noise` for the variance report.",
 )
-    "Resumes per-trial; see `bench noise` for the variance report.",
-)
 @click.option("--max-runs", default=0, type=int, help="Cap runs launched per pass.")
 @click.option(
     "--concurrency",
