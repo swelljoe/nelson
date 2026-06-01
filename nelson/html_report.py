@@ -1081,9 +1081,13 @@ def generate_leaderboard_report(
         # Hits/Elig cell becomes a per-trial range (best-of-N kept in the tooltip).
         if e.n_trials > 1:
             detect = (
-                f'{_pct(e.detection_rate)}'
-                f'<div class="trials-note">mean of {e.n_trials} trials</div>'
-            ) if e.eligible else "—"
+                (
+                    f"{_pct(e.detection_rate)}"
+                    f'<div class="trials-note">mean of {e.n_trials} trials</div>'
+                )
+                if e.eligible
+                else "—"
+            )
             hits_elig = (
                 f'<span title="best-of-{e.n_trials} pooled = {e.hits}/{e.eligible}; '
                 f'spread {_pct(e.trial_spread)}">'
@@ -1242,9 +1246,7 @@ def generate_leaderboard_report(
                     if outcome == "hit" and freq and freq[0] < freq[1]:
                         # Flaky: pooled to HIT but missed in some trials.
                         txt = f"{txt} {freq[0]}/{freq[1]}"
-                        title = (
-                            f' title="hit in {freq[0]} of {freq[1]} trials (flaky)"'
-                        )
+                        title = f' title="hit in {freq[0]} of {freq[1]} trials (flaky)"'
                     parts.append(f'<td class="{cls}"{title}>{escape(txt)}</td>')
             parts.append("</tr>")
         parts.append("</table></div>")

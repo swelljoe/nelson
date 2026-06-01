@@ -427,8 +427,8 @@ CWE_TOP_25: list[CWEEntry] = [
 # source-confusion authz bug) made the omission concrete. Augment the relevant
 # entries here rather than hand-editing each literal `languages` set.
 _RUST_WEB_LOGIC_CWES = {
-    "CWE-79",   # XSS — server-side templating (askama, maud)
-    "CWE-89",   # SQL injection — raw queries via sqlx/diesel
+    "CWE-79",  # XSS — server-side templating (askama, maud)
+    "CWE-89",  # SQL injection — raw queries via sqlx/diesel
     "CWE-352",  # CSRF
     "CWE-434",  # unrestricted file upload
     "CWE-862",  # missing authorization
