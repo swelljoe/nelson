@@ -1578,7 +1578,6 @@ class LeaderboardEntry:
         return self.hits + self.misses
 
     @property
-    @property
     def detection_rate(self) -> float:
         """Detection rate.
 
