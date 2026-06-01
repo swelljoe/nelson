@@ -424,6 +424,45 @@ def test_noise_report_single_trial_has_zero_spread():
     assert r.flaky_cases == []  # a case seen in only one trial can't be flaky
 
 
+def test_leaderboard_detection_rate_is_mean_across_trials_not_best_of_n():
+    from nelson.score import RunScore, leaderboard
+
+    # alpha over 3 trials, 2 cases. Case A hit every trial; case B hit only in
+    # trial 0. Best-of-N would pool to A,B both hit = 2/2 = 100%. The honest
+    # figure is the mean of per-trial rates: t0=2/2, t1=1/2, t2=1/2 -> 66.7%.
+    runs = []
+    rid = 0
+    for t in range(3):
+        rid += 1
+        runs.append(RunScore(rid, "A", "alpha", "complete", "hit", trial=t))
+        rid += 1
+        b = "hit" if t == 0 else "miss"
+        runs.append(RunScore(rid, "B", "alpha", "complete", b, trial=t))
+
+    e = leaderboard(runs)[0]
+    assert e.n_trials == 3
+    assert e.detection_rate == pytest.approx((1.0 + 0.5 + 0.5) / 3)  # mean, not 1.0
+    assert (e.trial_min_rate, e.trial_max_rate) == (0.5, 1.0)
+    assert e.trial_spread == pytest.approx(0.5)
+    # pooled best-of-N counts remain available (for the hover tooltip).
+    assert (e.hits, e.eligible) == (2, 2)
+
+
+def test_leaderboard_single_trial_rate_unchanged():
+    from nelson.score import RunScore, leaderboard
+
+    # Without --repeat (all trial 0), detection_rate is the plain hits/eligible.
+    runs = [
+        RunScore(1, "A", "alpha", "complete", "hit"),
+        RunScore(2, "B", "alpha", "complete", "miss"),
+        RunScore(3, "C", "alpha", "complete", "hit"),
+    ]
+    e = leaderboard(runs)[0]
+    assert e.n_trials == 1
+    assert e.detection_rate == pytest.approx(2 / 3)
+    assert e.trial_spread == 0.0
+
+
 def test_detection_report_counts_cases_not_runs():
     from nelson.score import RunScore
 

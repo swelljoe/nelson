@@ -632,12 +632,14 @@ def _execute_runs_concurrent(
 def _write_leaderboard(db: Database, scorer: Scorer, html_path: str | Path) -> None:
     """Render the leaderboard HTML from already-persisted scores (no judge spend)."""
     from .html_report import generate_leaderboard_report
-    from .score import case_scores, drop_competitors, leaderboard
+    from .score import case_scores, drop_competitors, leaderboard, noise_report
 
     retired = {c["name"] for c in db.list_competitors() if c["status"] == "retired"}
     run_scores = drop_competitors(
         [scorer.load_run_score(r["id"]) for r in db.list_runs()], retired
     )
     entries = leaderboard(run_scores)
-    html = generate_leaderboard_report(entries, case_scores(run_scores))
+    html = generate_leaderboard_report(
+        entries, case_scores(run_scores), noise=noise_report(run_scores)
+    )
     Path(html_path).write_text(html)

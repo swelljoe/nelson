@@ -1565,15 +1565,41 @@ class LeaderboardEntry:
     wall_clock_s: float = 0.0  # total wall over complete runs
     tokens_in: int = 0  # total prompt tokens over complete runs (resends included)
     tokens_out: int = 0  # total completion (+reasoning) tokens over complete runs
+    # Repeated-trial variance (``--repeat``). ``trial_rates`` is the per-trial
+    # detection rate (each trial scored independently); ``n_trials`` is how many
+    # trials ran. For single-shot runs (the default) n_trials is 1 and
+    # trial_rates holds the one rate, so the mean below equals the plain rate.
+    n_trials: int = 1
+    trial_rates: list[float] = field(default_factory=list)
 
     @property
     def eligible(self) -> int:
-        """Cases that counted toward detection: hits + genuine misses."""
+        """Cases that counted toward detection: hits + genuine misses (pooled)."""
         return self.hits + self.misses
 
     @property
     def detection_rate(self) -> float:
+        """Detection rate. For repeated runs this is the **mean across trials**
+        (each trial scored on its own, then averaged) — a typical single run,
+        not best-of-N. Single-shot runs collapse to the one trial's rate."""
+        if self.trial_rates:
+            return sum(self.trial_rates) / len(self.trial_rates)
         return self.hits / self.eligible if self.eligible else 0.0
+
+    @property
+    def trial_min_rate(self) -> float:
+        return min(self.trial_rates) if self.trial_rates else self.detection_rate
+
+    @property
+    def trial_max_rate(self) -> float:
+        return max(self.trial_rates) if self.trial_rates else self.detection_rate
+
+    @property
+    def trial_spread(self) -> float:
+        """max - min detection across trials; 0 for single-shot runs."""
+        if not self.trial_rates:
+            return 0.0
+        return max(self.trial_rates) - min(self.trial_rates)
 
     @property
     def true_findings(self) -> int:
@@ -1646,6 +1672,8 @@ def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
     """
     det = {d.competitor_name: d for d in detection_report(run_scores)}
     prec = {p.competitor_name: p for p in precision_report(run_scores)}
+    # Per-trial variance, so the rate is the mean over trials (not best-of-N).
+    noise = {n.competitor_name: n for n in noise_report(run_scores)}
 
     cost: dict[str, float] = {}
     wall: dict[str, float] = {}
@@ -1697,6 +1725,8 @@ def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
                 wall_clock_s=wall.get(name, 0.0),
                 tokens_in=tok_in.get(name, 0),
                 tokens_out=tok_out.get(name, 0),
+                n_trials=noise[name].n_trials if name in noise else 1,
+                trial_rates=noise[name].trial_rates if name in noise else [],
             )
         )
 

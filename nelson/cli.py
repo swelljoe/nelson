@@ -1476,6 +1476,7 @@ def bench_leaderboard(db_path: str, html_path: str | None, tolerance: int):
         case_scores,
         drop_competitors,
         leaderboard,
+        noise_report,
     )
 
     db = Database(db_path)
@@ -1510,7 +1511,9 @@ def bench_leaderboard(db_path: str, html_path: str | None, tolerance: int):
     if html_path:
         from .html_report import generate_leaderboard_report
 
-        html = generate_leaderboard_report(entries, case_scores(run_scores))
+        html = generate_leaderboard_report(
+            entries, case_scores(run_scores), noise=noise_report(run_scores)
+        )
         Path(html_path).write_text(html)
         click.echo(f"\nWrote leaderboard report to {html_path}")
 
