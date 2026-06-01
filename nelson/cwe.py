@@ -13,8 +13,9 @@ class CWEEntry:
     example_safe: dict[str, str]  # language -> code example
 
 
-# CWE Top 25 (2024) with language applicability
-# Languages left empty means applicable to all
+# CWE Top 25 (2025) with language applicability.
+# Source: https://cwe.mitre.org/top25/archive/2025/2025_cwe_top25.html
+# Languages left empty means applicable to all. Not stored in rank order.
 CWE_TOP_25: list[CWEEntry] = [
     CWEEntry(
         id="CWE-787",
@@ -200,39 +201,6 @@ CWE_TOP_25: list[CWEEntry] = [
         },
     ),
     CWEEntry(
-        id="CWE-287",
-        name="Improper Authentication",
-        description="The product does not prove or insufficiently proves that an actor's claimed identity is correct.",
-        languages={
-            "python",
-            "typescript",
-            "javascript",
-            "ruby",
-            "php",
-            "go",
-            "java",
-            "perl",
-        },
-        example_vulnerable={
-            "python": 'if request.headers.get("X-User") == "admin":\n    grant_access()  # trusting client header'
-        },
-        example_safe={
-            "python": 'token = request.headers.get("Authorization")\nuser = verify_jwt(token)\nif user.is_admin:\n    grant_access()'
-        },
-    ),
-    CWEEntry(
-        id="CWE-190",
-        name="Integer Overflow or Wraparound",
-        description="The product performs a calculation that can produce an integer overflow or wraparound.",
-        languages={"c", "cpp", "java"},
-        example_vulnerable={
-            "c": "size_t len = a + b;  // could overflow\nmalloc(len);"
-        },
-        example_safe={
-            "c": "if (a > SIZE_MAX - b) { abort(); }\nsize_t len = a + b;\nmalloc(len);"
-        },
-    ),
-    CWEEntry(
         id="CWE-502",
         name="Deserialization of Untrusted Data",
         description="The product deserializes untrusted data without sufficiently verifying that the resulting data will be valid.",
@@ -264,30 +232,6 @@ CWE_TOP_25: list[CWEEntry] = [
             "python": 'subprocess.run(f"convert {user_file} output.png", shell=True)'
         },
         example_safe={"python": 'subprocess.run(["convert", user_file, "output.png"])'},
-    ),
-    CWEEntry(
-        id="CWE-119",
-        name="Improper Restriction of Operations within the Bounds of a Memory Buffer",
-        description="The product performs operations on a memory buffer but can read from or write to a memory location outside the intended boundary.",
-        languages={"c", "cpp"},
-        example_vulnerable={
-            "c": "memcpy(dst, src, len);  // len not validated against dst size"
-        },
-        example_safe={
-            "c": "if (len > sizeof(dst)) len = sizeof(dst);\nmemcpy(dst, src, len);"
-        },
-    ),
-    CWEEntry(
-        id="CWE-798",
-        name="Use of Hard-coded Credentials",
-        description="The product contains hard-coded credentials such as passwords or cryptographic keys.",
-        languages=set(),
-        example_vulnerable={
-            "python": 'DB_PASSWORD = "supersecret123"\nconnect(password=DB_PASSWORD)'
-        },
-        example_safe={
-            "python": 'DB_PASSWORD = os.environ["DB_PASSWORD"]\nconnect(password=DB_PASSWORD)'
-        },
     ),
     CWEEntry(
         id="CWE-918",
@@ -332,26 +276,6 @@ CWE_TOP_25: list[CWEEntry] = [
         },
     ),
     CWEEntry(
-        id="CWE-362",
-        name="Race Condition",
-        description="The product contains a code sequence that can run concurrently with other code, and the code sequence requires temporary, exclusive access to a shared resource, but a timing window exists in which the shared resource can be modified by another code sequence.",
-        languages=set(),
-        example_vulnerable={
-            "python": "if os.path.exists(path):  # TOCTOU\n    os.remove(path)"
-        },
-        example_safe={
-            "python": "try:\n    os.remove(path)\nexcept FileNotFoundError:\n    pass"
-        },
-    ),
-    CWEEntry(
-        id="CWE-269",
-        name="Improper Privilege Management",
-        description="The product does not properly assign, modify, track, or check privileges for an actor, creating an unintended sphere of control.",
-        languages=set(),
-        example_vulnerable={"python": "os.setuid(0)  # running as root unnecessarily"},
-        example_safe={"python": "os.setuid(service_uid)  # drop to least privilege"},
-    ),
-    CWEEntry(
         id="CWE-94",
         name="Code Injection",
         description="The product constructs all or part of a code segment using externally-influenced input but does not neutralize or incorrectly neutralizes special elements that could modify the intended code segment.",
@@ -384,13 +308,114 @@ CWE_TOP_25: list[CWEEntry] = [
         },
         example_safe={"python": 'if user.role == "admin":\n    grant_admin_access()'},
     ),
+    # ── New in the 2025 edition (replacing 2023's 190/119/798/287/362/269/276) ──
     CWEEntry(
-        id="CWE-276",
-        name="Incorrect Default Permissions",
-        description="The product sets incorrect permissions during installation or resource creation, allowing unintended actors to access or modify the resource.",
+        id="CWE-120",
+        name="Buffer Copy without Checking Size of Input (Classic Buffer Overflow)",
+        description="The product copies an input buffer to an output buffer without verifying that the size of the input buffer is less than the size of the output buffer.",
+        languages={"c", "cpp"},
+        example_vulnerable={
+            "c": "char dst[64];\nstrcpy(dst, src);  // src may exceed 64 bytes"
+        },
+        example_safe={"c": 'char dst[64];\nsnprintf(dst, sizeof(dst), "%s", src);'},
+    ),
+    CWEEntry(
+        id="CWE-121",
+        name="Stack-based Buffer Overflow",
+        description="A buffer overflow where the buffer that can be overwritten is allocated on the stack (a local variable or a function parameter).",
+        languages={"c", "cpp"},
+        example_vulnerable={
+            "c": "char buf[16];\ngets(buf);  // unbounded write to a stack buffer"
+        },
+        example_safe={
+            "c": "char buf[16];\nif (fgets(buf, sizeof(buf), stdin) == NULL) return;"
+        },
+    ),
+    CWEEntry(
+        id="CWE-122",
+        name="Heap-based Buffer Overflow",
+        description="A buffer overflow where the buffer that can be overwritten is allocated in the heap (e.g., memory from malloc()).",
+        languages={"c", "cpp"},
+        example_vulnerable={
+            "c": "char *b = malloc(8);\nmemcpy(b, src, len);  // len may exceed 8"
+        },
+        example_safe={"c": "char *b = malloc(len);\nif (b) memcpy(b, src, len);"},
+    ),
+    CWEEntry(
+        id="CWE-284",
+        name="Improper Access Control",
+        description="The product does not restrict or incorrectly restricts access to a resource from an unauthorized actor.",
+        languages={
+            "python",
+            "typescript",
+            "javascript",
+            "ruby",
+            "php",
+            "go",
+            "java",
+            "perl",
+            "rust",
+        },
+        example_vulnerable={
+            "python": '@app.route("/admin")\ndef admin():\n    return render_admin()  # no access check'
+        },
+        example_safe={
+            "python": '@app.route("/admin")\ndef admin():\n    if not current_user.is_admin:\n        abort(403)\n    return render_admin()'
+        },
+    ),
+    CWEEntry(
+        id="CWE-200",
+        name="Exposure of Sensitive Information to an Unauthorized Actor",
+        description="The product exposes sensitive information to an actor that is not explicitly authorized to have access to that information.",
+        languages={
+            "python",
+            "typescript",
+            "javascript",
+            "ruby",
+            "php",
+            "go",
+            "java",
+            "perl",
+            "rust",
+        },
+        example_vulnerable={
+            "python": "return jsonify(user.__dict__)  # leaks password_hash, tokens"
+        },
+        example_safe={"python": 'return jsonify({"id": user.id, "name": user.name})'},
+    ),
+    CWEEntry(
+        id="CWE-639",
+        name="Authorization Bypass Through User-Controlled Key",
+        description="The authorization functionality does not prevent one user from accessing another user's data by modifying the key value identifying that data.",
+        languages={
+            "python",
+            "typescript",
+            "javascript",
+            "ruby",
+            "php",
+            "go",
+            "java",
+            "perl",
+            "rust",
+        },
+        example_vulnerable={
+            "python": 'doc = Document.get(request.args["id"])\nreturn doc.body  # no owner check on id'
+        },
+        example_safe={
+            "python": 'doc = Document.get(request.args["id"])\nif doc.owner_id != current_user.id:\n    abort(403)\nreturn doc.body'
+        },
+    ),
+    CWEEntry(
+        id="CWE-770",
+        name="Allocation of Resources Without Limits or Throttling",
+        description="The product allocates a reusable resource or group of resources on behalf of an actor without imposing any restrictions on the size or number that can be allocated.",
         languages=set(),
-        example_vulnerable={"python": "os.chmod(config_file, 0o777)  # world-writable"},
-        example_safe={"python": "os.chmod(config_file, 0o600)  # owner-only"},
+        example_vulnerable={
+            "python": "data = request.stream.read()  # unbounded read into memory"
+        },
+        example_safe={
+            "python": "data = request.stream.read(MAX_BYTES)  # bounded read"
+        },
     ),
 ]
 
@@ -408,11 +433,11 @@ _RUST_WEB_LOGIC_CWES = {
     "CWE-434",  # unrestricted file upload
     "CWE-862",  # missing authorization
     "CWE-863",  # incorrect authorization (the GHSA-f26g class)
-    "CWE-287",  # improper authentication
     "CWE-502",  # unsafe deserialization (serde + untrusted formats)
     "CWE-918",  # SSRF
     "CWE-306",  # missing authentication for a critical function
 }
+# (CWE-284/200/639, new in the 2025 edition, already list "rust" inline.)
 for _entry in CWE_TOP_25:
     if _entry.id in _RUST_WEB_LOGIC_CWES:
         _entry.languages.add("rust")
@@ -420,10 +445,10 @@ del _entry
 
 # Names for weakness classes present in the benchmark corpus but outside the Top
 # 25, so the oracle-CWE hint can render a human-readable name for them too.
+# (CWE-639 and CWE-122 graduated into the 2025 Top 25, so they resolve from
+# CWE_TOP_25 directly and no longer need a supplemental entry.)
 _SUPPLEMENTAL_CWE_NAMES = {
-    "CWE-639": "Authorization Bypass Through User-Controlled Key",
     "CWE-349": "Acceptance of Extraneous Untrusted Data With Trusted Data",
-    "CWE-122": "Heap-based Buffer Overflow",
     "CWE-183": "Permissive List of Allowed Inputs",
     "CWE-501": "Trust Boundary Violation",
 }

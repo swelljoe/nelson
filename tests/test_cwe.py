@@ -10,11 +10,12 @@ def test_cwe_top_25_has_25_entries():
 def test_rust_gets_web_logic_cwes_but_not_pure_memory_safety():
     rust = {c.id for c in applicable_cwes("rust")}
     # Web/logic classes a Rust backend is genuinely subject to (the GHSA-f26g
-    # authorization case is why this was fixed).
-    for cid in ("CWE-862", "CWE-863", "CWE-287", "CWE-918", "CWE-502", "CWE-306"):
+    # authorization case is why this was fixed); includes 2025-edition authz
+    # additions 284/639 that list rust inline.
+    for cid in ("CWE-862", "CWE-863", "CWE-639", "CWE-284", "CWE-918", "CWE-306"):
         assert cid in rust
     # Safe Rust rules out the memory-safety classes; they stay c/cpp only.
-    for cid in ("CWE-787", "CWE-416", "CWE-125", "CWE-119"):
+    for cid in ("CWE-787", "CWE-416", "CWE-125", "CWE-122"):
         assert cid not in rust
 
 
