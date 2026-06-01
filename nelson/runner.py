@@ -772,16 +772,19 @@ class BenchRunner:
         return prepare_checkout(case.repo_url, case.vuln_commit, checkout_dir)
 
     def run_case(
-        self, case: Case, competitor: Competitor, target_file: str
+        self, case: Case, competitor: Competitor, target_file: str, trial: int = 0
     ) -> RunResult:
-        """Point ``competitor`` at ``target_file`` of ``case`` in a container."""
+        """Point ``competitor`` at ``target_file`` of ``case`` in a container.
+
+        ``trial`` is the 0-based repeat index, recorded on the run so repeated
+        runs of the same cell stay distinguishable for variance reporting."""
         if not case.repo_url or not case.vuln_commit:
             raise RunnerError(
                 f"case {case.ext_id} lacks repo_url/vuln_commit; not derived yet"
             )
         comp_id = self.db.upsert_competitor(competitor.to_db_fields())
         case_id = case.id if case.id is not None else self._case_id(case)
-        run_id = self.db.create_run(case_id, comp_id, target_file)
+        run_id = self.db.create_run(case_id, comp_id, target_file, trial)
 
         # Function-body imports keep runtimes.py's module-level dependency on this
         # module one-directional (no import cycle), matching the codebase idiom.

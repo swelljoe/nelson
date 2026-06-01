@@ -884,6 +884,8 @@ class RunScore:
     # pure function of RunScores with no extra DB round-trip.
     size_class: str | None = None
     knowledge_cutoff: str | None = None
+    # 0-based repeat index; >0 only when this cell was run under ``--repeat``.
+    trial: int = 0
 
     @property
     def eligible(self) -> bool:
@@ -972,6 +974,7 @@ class Scorer:
             "tokens_out": run["tokens_out"],
             "size_class": size_class,
             "knowledge_cutoff": cutoff,
+            "trial": run["trial"],
         }
 
     def score_run(self, run_id: int) -> RunScore:
@@ -1307,6 +1310,94 @@ def case_scores(run_scores: list[RunScore]) -> list[CaseScore]:
                 fp_cost=sum(r.fp_cost for r in runs),
             )
         )
+    return out
+
+
+# -- Noise / repeat-trial report ---------------------------------------------
+
+
+@dataclass
+class CompetitorNoise:
+    """Run-to-run variance for one competitor across repeated trials.
+
+    Each (case, trial) is rolled up from its file-runs to a single case outcome
+    (same precedence as :func:`case_scores`), then trials are compared. This is
+    the ``--repeat`` payload: it answers "how much does a single run's detection
+    number move?" rather than collapsing trials to a best-of-N headline.
+    """
+
+    competitor_name: str
+    # trial index -> (hits, eligible cases) within that trial
+    per_trial: dict[int, tuple[int, int]] = field(default_factory=dict)
+    # case ext_id -> (hits, eligible trials) across all trials
+    per_case: dict[str, tuple[int, int]] = field(default_factory=dict)
+
+    @property
+    def n_trials(self) -> int:
+        return len(self.per_trial)
+
+    @property
+    def trial_rates(self) -> list[float]:
+        """Detection rate (hits/eligible) for each trial that had an eligible case."""
+        return [h / e for h, e in self.per_trial.values() if e]
+
+    @property
+    def mean_rate(self) -> float:
+        rates = self.trial_rates
+        return sum(rates) / len(rates) if rates else 0.0
+
+    @property
+    def min_rate(self) -> float:
+        return min(self.trial_rates, default=0.0)
+
+    @property
+    def max_rate(self) -> float:
+        return max(self.trial_rates, default=0.0)
+
+    @property
+    def spread(self) -> float:
+        """max - min detection across trials — the headline noise figure."""
+        rates = self.trial_rates
+        return (max(rates) - min(rates)) if rates else 0.0
+
+    @property
+    def flaky_cases(self) -> list[str]:
+        """Cases hit in some trials but missed in others (0 < hits < eligible)."""
+        return sorted(c for c, (h, e) in self.per_case.items() if e > 1 and 0 < h < e)
+
+
+def noise_report(run_scores: list[RunScore]) -> list[CompetitorNoise]:
+    """Per-competitor run-to-run variance from repeated (``--repeat``) trials.
+
+    Rolls file-runs up to a (competitor, case, trial) case outcome, then reports
+    each trial's detection rate and each case's hit-frequency across trials.
+    Single-trial data (the default) yields a spread of 0 — degrades cleanly.
+    """
+    cell: dict[tuple[str, str, int], list[str]] = {}
+    for rs in run_scores:
+        cell.setdefault((rs.competitor_name, rs.case_ext_id, rs.trial), []).append(
+            rs.outcome
+        )
+    rolled = {k: _rollup_case_outcome(v) for k, v in cell.items()}
+
+    out: list[CompetitorNoise] = []
+    for comp in sorted({k[0] for k in rolled}):
+        items = [
+            (case, trial, o) for (c, case, trial), o in rolled.items() if c == comp
+        ]
+        per_trial: dict[int, tuple[int, int]] = {}
+        for trial in sorted({t for _, t, _ in items}):
+            outs = [o for _, t, o in items if t == trial]
+            hits = sum(1 for o in outs if o == "hit")
+            elig = sum(1 for o in outs if o in ELIGIBLE_OUTCOMES)
+            per_trial[trial] = (hits, elig)
+        per_case: dict[str, tuple[int, int]] = {}
+        for case in sorted({c for c, _, _ in items}):
+            outs = [o for c, _, o in items if c == case]
+            hits = sum(1 for o in outs if o == "hit")
+            elig = sum(1 for o in outs if o in ELIGIBLE_OUTCOMES)
+            per_case[case] = (hits, elig)
+        out.append(CompetitorNoise(comp, per_trial, per_case))
     return out
 
 

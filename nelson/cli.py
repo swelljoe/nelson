@@ -1515,6 +1515,60 @@ def bench_leaderboard(db_path: str, html_path: str | None, tolerance: int):
         click.echo(f"\nWrote leaderboard report to {html_path}")
 
 
+@bench.command(name="noise")
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+@click.option("--tolerance", default=10, type=int, help="Localization tolerance.")
+def bench_noise(db_path: str, tolerance: int):
+    """Run-to-run variance across repeated (--repeat) trials.
+
+    Read-only — reloads persisted scores (no judge spend). For each competitor it
+    shows per-trial detection (so you can see how much one run's number moves) and
+    each case's hit-frequency across trials, flagging *flaky* cases (hit in some
+    trials, missed in others) — the noise the repeat is there to expose.
+    """
+    from .score import (
+        ClaudeTruthJudge,
+        Scorer,
+        drop_competitors,
+        noise_report,
+    )
+
+    db = Database(db_path)
+    rows = db.list_runs()
+    if not rows:
+        click.echo("No runs. Run `nelson bench loop --repeat N` first.")
+        return
+    scorer = Scorer(db, ClaudeTruthJudge(), tolerance=tolerance)
+    retired = {c["name"] for c in db.list_competitors() if c["status"] == "retired"}
+    run_scores = drop_competitors(
+        [scorer.load_run_score(r["id"]) for r in rows], retired
+    )
+    reports = noise_report(run_scores)
+    max_trials = max((r.n_trials for r in reports), default=0)
+    if max_trials <= 1:
+        click.echo(
+            "Only one trial present — no variance to report. Re-run with "
+            "`bench loop --repeat N` (N>1)."
+        )
+        return
+
+    for r in sorted(reports, key=lambda x: -x.mean_rate):
+        rates = ", ".join(f"t{t}={h}/{e}" for t, (h, e) in sorted(r.per_trial.items()))
+        click.echo(
+            f"\n{r.competitor_name}  "
+            f"mean={r.mean_rate:.0%}  range={r.min_rate:.0%}-{r.max_rate:.0%}  "
+            f"spread={r.spread:.0%}  ({r.n_trials} trials)"
+        )
+        click.echo(f"  per-trial detection: {rates}")
+        if r.flaky_cases:
+            flaky = ", ".join(
+                f"{c} ({r.per_case[c][0]}/{r.per_case[c][1]})" for c in r.flaky_cases
+            )
+            click.echo(f"  flaky (hit some / missed some): {flaky}")
+        else:
+            click.echo("  flaky cases: none — every case was all-hit or all-miss")
+
+
 # -- Automation loop ---------------------------------------------------------
 
 
@@ -1595,6 +1649,13 @@ def _emit_loop_report(report) -> None:
     is_flag=True,
     help="Re-run cells whose only runs were auth_failed / infra_error.",
 )
+@click.option(
+    "--repeat",
+    default=1,
+    type=click.IntRange(min=1),
+    help="Run each cell this many independent trials (for noise measurement). "
+    "Resumes per-trial; see `bench noise` for the variance report.",
+)
 @click.option("--max-runs", default=0, type=int, help="Cap runs launched per pass.")
 @click.option(
     "--concurrency",
@@ -1652,6 +1713,7 @@ def bench_loop(
     age_out: bool,
     recency_filter: bool,
     retry_failed: bool,
+    repeat: int,
     max_runs: int,
     concurrency: int,
     max_spend_usd: float,
@@ -1751,6 +1813,7 @@ def bench_loop(
             age_out=age_out,
             recency_filter=recency_filter,
             retry_failed=retry_failed,
+            repeat=repeat,
             max_runs=max_runs or None,
             max_spend_usd=max_spend_usd or None,
             auth_fail_abort=auth_fail_abort,

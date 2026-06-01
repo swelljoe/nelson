@@ -14,7 +14,7 @@ from typing import Any
 # file-scoped harness), so the unit is (competitor, case, file). New tables/columns
 # go in MIGRATIONS keyed by their target version; _apply_migrations walks a stored
 # DB up to SCHEMA_VERSION, so old databases upgrade in place.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -189,6 +189,14 @@ MIGRATIONS: dict[int, str] = {
     -- is pointed at the file, not the whole repo). NULL = a legacy whole-repo run.
     ALTER TABLE runs ADD COLUMN target_file TEXT;
     """,
+    6: """
+    -- Repeated runs: a single (competitor, case, file) cell can be run more than
+    -- once to measure run-to-run variance. `trial` is the 0-based repeat index;
+    -- legacy single-shot runs are trial 0.
+    ALTER TABLE runs ADD COLUMN trial INTEGER NOT NULL DEFAULT 0;
+    CREATE INDEX IF NOT EXISTS idx_runs_trial
+        ON runs(case_id, competitor_id, target_file, trial);
+    """,
 }
 
 # Columns a caller may set on a competitor (natural key = name). Mirrors the
@@ -306,12 +314,25 @@ class Database:
                 try:
                     self.conn.executescript(script)
                 except sqlite3.OperationalError as exc:
-                    # Migration 5 may be partially applied if ALTER TABLE succeeds
-                    # but writing schema_version does not; tolerate reruns.
+                    # An ALTER-TABLE migration (5, 6) may be partially applied if
+                    # the ADD COLUMN succeeds but writing schema_version does not;
+                    # the column already existing on rerun is benign, so tolerate it.
                     if (
-                        version == 5
-                        and "duplicate column name: target_file" in str(exc).lower()
+                        version in (5, 6)
+                        and "duplicate column name" in str(exc).lower()
                     ):
+                        # Re-run the migration statement-by-statement so that any
+                        # statements after the duplicate ADD COLUMN (e.g. the
+                        # idx_runs_trial index in v6) are still applied.
+                        for stmt in script.split(";"):
+                            stripped = stmt.strip()
+                            if not stripped:
+                                continue
+                            try:
+                                self.conn.execute(stripped)
+                            except sqlite3.OperationalError as stmt_exc:
+                                if "duplicate column name" not in str(stmt_exc).lower():
+                                    raise
                         continue
                     raise
         self.conn.execute(
@@ -712,16 +733,21 @@ class Database:
     # -- Runs --
 
     def create_run(
-        self, case_id: int, competitor_id: int, target_file: str | None = None
+        self,
+        case_id: int,
+        competitor_id: int,
+        target_file: str | None = None,
+        trial: int = 0,
     ) -> int:
         """Open a pending run for (case, competitor, file); returns its id.
 
         ``target_file`` is the one file the competitor is pointed at (None for a
-        legacy whole-repo run)."""
+        legacy whole-repo run). ``trial`` is the 0-based repeat index when a cell
+        is run more than once (``--repeat``)."""
         cur = self.conn.execute(
-            "INSERT INTO runs(case_id, competitor_id, target_file, status) "
-            "VALUES(?, ?, ?, 'pending')",
-            (case_id, competitor_id, target_file),
+            "INSERT INTO runs(case_id, competitor_id, target_file, trial, status) "
+            "VALUES(?, ?, ?, ?, 'pending')",
+            (case_id, competitor_id, target_file, trial),
         )
         self.conn.commit()
         assert cur.lastrowid is not None

@@ -933,7 +933,13 @@ _DISPLAY_OVERRIDES = {
     "claude-code/haiku": "haiku-4.5",
     "claude-code/sonnet": "sonnet-4.6",
     "claude-code/opus": "opus-4.8",
-    "raw-api-loop/deepseek": "deepseek-v4-pro",
+    # Pinned tiers (use these going forward).
+    "raw-api-loop/deepseek-pro": "deepseek-v4-pro",
+    "raw-api-loop/deepseek-flash": "deepseek-v4-flash",
+    # Legacy unpinned alias (`deepseek-chat`): DeepSeek routed it to v4-pro OR
+    # v4-flash at its discretion, so historical rows under this name are a tier
+    # mix — labelled to flag that, not as a clean "pro".
+    "raw-api-loop/deepseek": "deepseek-v4 (alias)",
     "raw-api-loop/mimo": "mimo-v2.5-pro",
 }
 

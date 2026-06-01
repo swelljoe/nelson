@@ -89,13 +89,39 @@
 
 # The same DeepSeek model through the OpenAI-compatible basic harness, for an
 # agent-vs-agent comparison on the identical model. cost_model is a JSON string.
-- name: raw-api-loop/deepseek
-  model: deepseek-chat            # VERIFY-AT-WIRING: real OpenAI-compat model id
+# DeepSeek pinned to explicit model ids. DO NOT use the `deepseek-chat` alias:
+# DeepSeek routes it to v4-pro OR v4-flash server-side at its own discretion
+# (observed pro 2026-05-30, flash 2026-05-31 — Nelson the only key user), which
+# silently swaps the model under a fixed label and confounds results. /models
+# lists exactly two real ids: deepseek-v4-pro, deepseek-v4-flash. Pin both as
+# separate competitors. PRICING IS VERIFY-AT-WIRING against the DeepSeek portal.
+- name: raw-api-loop/deepseek-pro
+  model: deepseek-v4-pro
   runtime: raw-api-loop
   tool_profile: read-grep
   auth_profile: deepseek-api-key  # value from $DEEPSEEK_API_KEY on the host
-  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.14, "output_usd_per_mtok": 0.28}'
+  # DeepSeek pro PROMOTIONAL pricing (2026-05-31, use until the promo ends):
+  # cache-MISS input 0.435 / cache-HIT 0.003625 / output 0.87. input rate is the
+  # MISS/list rate; compute_cost is cache-blind so recorded cost OVERCOUNTS the
+  # real bill. input_cache_hit_usd_per_mtok stashed for cache-aware costing.
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.435, "input_cache_hit_usd_per_mtok": 0.003625, "output_usd_per_mtok": 0.87}'
   size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/deepseek-flash
+  model: deepseek-v4-flash
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: deepseek-api-key
+  # DeepSeek flash (verified 2026-05-31): cache-MISS input 0.14 / cache-HIT 0.0028
+  # (50x) / output 0.28. input rate is MISS/list; DeepSeek caches aggressively and
+  # compute_cost is cache-blind, so recorded cost OVERCOUNTS the real bill heavily
+  # (most ReAct input is cache reads). input_cache_hit_usd_per_mtok stashed for the
+  # cache-aware costing fix (capture prompt_cache_hit_tokens, bill split — like the
+  # OpenRouter usage.cost path but for DeepSeek's usage fields). PRO pricing still
+  # VERIFY-AT-WIRING (this is flash only).
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.14, "input_cache_hit_usd_per_mtok": 0.0028, "output_usd_per_mtok": 0.28}'
+  size_class: medium
   knowledge_cutoff: 2025-06
 
 # MiMo (Xiaomi) on both shared harnesses, like DeepSeek (platform.xiaomimimo.com).

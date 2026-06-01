@@ -3,6 +3,10 @@ nelson.db
 nelson.db-wal
 nelson.db-shm
 nelson.db.bak*
+# Experimental datasets (one DB per experimental condition; not the baseline)
+nelson-*.db
+nelson-*.db-wal
+nelson-*.db-shm
 # Benchmark run artifacts (regenerated each run)
 bench-runs/
 bench-cache/
@@ -10,6 +14,7 @@ corpus-cache/
 .nelson_cache/
 bench-report.html
 bench-report-*.html
+bench-exp*.html
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
