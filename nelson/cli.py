@@ -1553,9 +1553,7 @@ def bench_noise(db_path: str, tolerance: int):
         return
 
     for r in sorted(reports, key=lambda x: -x.mean_rate):
-        rates = ", ".join(
-            f"t{t}={h}/{e}" for t, (h, e) in sorted(r.per_trial.items())
-        )
+        rates = ", ".join(f"t{t}={h}/{e}" for t, (h, e) in sorted(r.per_trial.items()))
         click.echo(
             f"\n{r.competitor_name}  "
             f"mean={r.mean_rate:.0%}  range={r.min_rate:.0%}-{r.max_rate:.0%}  "

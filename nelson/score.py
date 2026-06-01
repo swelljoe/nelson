@@ -1363,9 +1363,7 @@ class CompetitorNoise:
     @property
     def flaky_cases(self) -> list[str]:
         """Cases hit in some trials but missed in others (0 < hits < eligible)."""
-        return sorted(
-            c for c, (h, e) in self.per_case.items() if e > 1 and 0 < h < e
-        )
+        return sorted(c for c, (h, e) in self.per_case.items() if e > 1 and 0 < h < e)
 
 
 def noise_report(run_scores: list[RunScore]) -> list[CompetitorNoise]:
@@ -1377,9 +1375,9 @@ def noise_report(run_scores: list[RunScore]) -> list[CompetitorNoise]:
     """
     cell: dict[tuple[str, str, int], list[str]] = {}
     for rs in run_scores:
-        cell.setdefault(
-            (rs.competitor_name, rs.case_ext_id, rs.trial), []
-        ).append(rs.outcome)
+        cell.setdefault((rs.competitor_name, rs.case_ext_id, rs.trial), []).append(
+            rs.outcome
+        )
     rolled = {k: _rollup_case_outcome(v) for k, v in cell.items()}
 
     out: list[CompetitorNoise] = []
