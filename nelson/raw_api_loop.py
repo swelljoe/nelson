@@ -334,6 +334,7 @@ def run_loop(
     api_key: str,
     max_steps: int = 40,
     token_budget: int = 500_000,
+    temperature: float = 0.1,
     post: Callable[[str, dict[str, Any], str], dict[str, Any]] = _post_chat,
     src_root: str | None = None,
 ) -> tuple[str, int, int, list[dict[str, Any]], float | None]:
@@ -389,7 +390,7 @@ def run_loop(
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "temperature": 0.1,
+            "temperature": temperature,
         }
         if want_cost:
             payload["usage"] = {"include": True}
@@ -475,6 +476,8 @@ def main() -> None:
 
     in_price = _float_env("NELSON_INPUT_USD_PER_MTOK")
     out_price = _float_env("NELSON_OUTPUT_USD_PER_MTOK")
+    # 0.0 is a legitimate (greedy) temperature, so test for None rather than falsiness.
+    temperature = _float_env("NELSON_TEMPERATURE")
     try:
         final_text, tin, tout, steps, provider_cost = run_loop(
             prompt,
@@ -483,6 +486,7 @@ def main() -> None:
             api_key=api_key,
             max_steps=_int_env("NELSON_MAX_STEPS", 40),
             token_budget=_int_env("NELSON_TOKEN_BUDGET", 500_000),
+            temperature=0.1 if temperature is None else temperature,
         )
     except urllib.error.HTTPError as e:
         body = ""

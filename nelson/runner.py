@@ -103,6 +103,58 @@ Do not invent an issue to fit the category: report it only if it is genuinely \
 present and exploitable in {target}; otherwise still output []."""
 
 
+# Plan-first arm: a neutral threat-modelling scaffold prepended to the audit.
+# It leaks NOTHING about the planted bug — it lists every weakness *category*
+# generically (inputs→sink, resource lifetime, authorization) so no single class
+# is favoured; it only asks the model to reason structurally before answering.
+_PLAN_PREAMBLE = """\
+Before deciding what to report, analyse {target} methodically — think this
+through internally, then give only the final JSON:
+
+1. Map the entry points and every attacker-controlled or external input.
+2. Trace each input to where it is used. Enumerate, concretely:
+   - every allocation and free, and the lifetime of each pointer/resource (is
+     anything used after free, freed twice, or left uninitialised?);
+   - every place input reaches a query, command, path, format string, or
+     fixed-size buffer (is it validated and bounded?);
+   - every authorization, ownership, or identity check — and any operation that
+     is missing one it should have.
+3. Only then, for each concrete hazard you found, judge whether it is actually
+   reachable and exploitable in {target}."""
+
+# Checklist arm: the non-leaky cousin of the many-CWE sweep. The full list of
+# language-applicable weakness classes is folded into ONE prompt as a breadth
+# checklist (the true class is in the list but never highlighted), so coverage
+# matches the sweep at a fraction of the wall-clock and with one output to dedup.
+_CHECKLIST_PREAMBLE = """\
+Review {target} in a single pass, systematically considering each of these
+weakness classes. Report any that are genuinely present and exploitable; if a
+class does not apply, simply skip it — do not force a finding to fit a class.
+
+{checklist}
+
+The list is to ensure breadth of review, not a claim that any are present."""
+
+
+def _format_cwe_checklist(target_file: str) -> str:
+    """Bulleted ``CWE-id (name)`` list of the classes applicable to the target's
+    language, for the checklist arm. Empty when the language is unknown (the
+    caller then falls back to the plain open prompt)."""
+    from pathlib import Path
+
+    from .cwe import applicable_cwes, cwe_name
+    from .inventory import LANGUAGE_MAP
+
+    lang = LANGUAGE_MAP.get(Path(target_file).suffix.lower())
+    if not lang:
+        return ""
+    lines = []
+    for c in applicable_cwes(lang):
+        name = cwe_name(c.id)
+        lines.append(f"- {c.id}" + (f" ({name})" if name else ""))
+    return "\n".join(lines)
+
+
 def _format_oracle_cwes(cwe: str) -> str:
     """Render a case's ``cwe`` field (one id or a comma-separated list) as a
     bulleted hint, attaching the human-readable name when we know it."""
@@ -545,7 +597,11 @@ def vulnerable_files(case: Case) -> list[str]:
 
 
 def build_competitor_prompt(
-    case: Case, target_file: str, *, oracle_cwe: bool = False
+    case: Case,
+    target_file: str,
+    *,
+    oracle_cwe: bool = False,
+    prompt_mode: str = "open",
 ) -> str:
     """The neutral, file-scoped audit prompt for ``target_file``.
 
@@ -555,15 +611,29 @@ def build_competitor_prompt(
     When ``oracle_cwe`` is set and the case carries a ground-truth ``cwe``, the
     prompt is augmented with that weakness class (the "shape of the needle"
     experiment). This intentionally leaks the bug class and must only be used on
-    an experimental dataset, never the baseline."""
+    an experimental dataset, never the baseline.
+
+    ``prompt_mode`` selects a *non-leaking* prompting strategy (ignored when
+    ``oracle_cwe`` wins): ``"open"`` is the plain audit; ``"plan"`` prepends a
+    threat-modelling scaffold; ``"checklist"`` folds the language's applicable
+    weakness classes into one breadth pass. None of these name the planted bug,
+    so they are honest open-prompt variants."""
     safe_target = target_file.replace("{", "{{").replace("}", "}}")
     intro = _AUDIT_INTRO.format(target=safe_target)
-    hint = ""
+    extra = ""
     if oracle_cwe and case.cwe:
         cwes = _format_oracle_cwes(case.cwe)
         if cwes:
-            hint = "\n\n" + _ORACLE_HINT.format(target=safe_target, cwes=cwes)
-    return f"{intro}{hint}\n\n{_OUTPUT_SPEC}"
+            extra = "\n\n" + _ORACLE_HINT.format(target=safe_target, cwes=cwes)
+    elif prompt_mode == "plan":
+        extra = "\n\n" + _PLAN_PREAMBLE.format(target=safe_target)
+    elif prompt_mode == "checklist":
+        checklist = _format_cwe_checklist(target_file)
+        if checklist:
+            extra = "\n\n" + _CHECKLIST_PREAMBLE.format(
+                target=safe_target, checklist=checklist
+            )
+    return f"{intro}{extra}\n\n{_OUTPUT_SPEC}"
 
 
 def claude_code_spec(
@@ -774,6 +844,7 @@ class BenchRunner:
         max_budget_usd: float | None = 0.50,
         preflight: bool = False,
         oracle_cwe: bool = False,
+        prompt_mode: str = "open",
     ):
         self.db = db
         self.backend = backend or PodmanBackend()
@@ -796,6 +867,9 @@ class BenchRunner:
         # Oracle-CWE experiment: leak the case's ground-truth weakness class into
         # the audit prompt. Off by default; only an experimental DB should set it.
         self.oracle_cwe = oracle_cwe
+        # Prompt-strategy arm for the open-prompt experiment ("open" | "plan" |
+        # "checklist"). Non-leaking; ignored when oracle_cwe is set.
+        self.prompt_mode = prompt_mode
 
     def prewarm_checkout(self, case: Case) -> Path:
         """Materialize ``case``'s pristine source tree, returning the mount path.
@@ -880,7 +954,10 @@ class BenchRunner:
                 ctx = RuntimeContext(
                     competitor=competitor,
                     prompt=build_competitor_prompt(
-                        case, target_file, oracle_cwe=self.oracle_cwe
+                        case,
+                        target_file,
+                        oracle_cwe=self.oracle_cwe,
+                        prompt_mode=self.prompt_mode,
                     ),
                     src_dir=checkout,
                     auth=material,
