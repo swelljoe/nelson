@@ -421,6 +421,47 @@ def test_build_competitor_prompt_oracle_cwe_leaks_only_the_class():
     ) == build_competitor_prompt(nocwe, "F.c")
 
 
+def test_build_competitor_prompt_plan_mode_is_nonleaking_scaffold():
+    from nelson.runner import build_competitor_prompt
+
+    case = Case(source="cvd", ext_id="GHSA-9f49", cwe="CWE-416", bug_class="uaf")
+    plan = build_competitor_prompt(case, "src/parser_common.c", prompt_mode="plan")
+    open_ = build_competitor_prompt(case, "src/parser_common.c")
+    # Plan adds the threat-modelling scaffold but never names the planted class.
+    assert "analyse" in plan.lower() and "lifetime" in plan
+    assert "CWE-416" not in plan and "uaf" not in plan
+    assert len(plan) > len(open_)
+    assert "output []" in plan  # integrity guard preserved
+
+
+def test_build_competitor_prompt_checklist_lists_language_classes_not_the_answer():
+    from nelson.runner import build_competitor_prompt
+
+    case = Case(source="cvd", ext_id="GHSA-9f49", cwe="CWE-416", bug_class="uaf")
+    chk = build_competitor_prompt(case, "src/parser_common.c", prompt_mode="checklist")
+    # The planted class is present but only as one of many C weakness classes —
+    # breadth, not a hint (contrast the oracle prompt's "concentrate" framing).
+    assert "CWE-416" in chk and "CWE-787" in chk and "CWE-125" in chk
+    assert "concentrate" not in chk.lower()
+    assert "single pass" in chk
+    # Unknown language degrades to the plain open prompt (no checklist to add).
+    assert build_competitor_prompt(
+        case, "F.unknownext", prompt_mode="checklist"
+    ) == build_competitor_prompt(case, "F.unknownext")
+
+
+def test_build_competitor_prompt_oracle_wins_over_prompt_mode():
+    from nelson.runner import build_competitor_prompt
+
+    case = Case(source="cvd", ext_id="GHSA-9f49", cwe="CWE-416", bug_class="uaf")
+    # oracle_cwe takes precedence: the leak path runs, the plan scaffold does not.
+    p = build_competitor_prompt(
+        case, "src/parser_common.c", oracle_cwe=True, prompt_mode="plan"
+    )
+    assert "concentrate your review" in p.lower()
+    assert "Trace each input" not in p  # plan scaffold suppressed
+
+
 # -- Orchestrated run (fake backend + fake auth) -----------------------------
 
 

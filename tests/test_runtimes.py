@@ -243,6 +243,27 @@ def test_raw_api_loop_build_spec_mounts_and_env(tmp_path):
     assert spec.env["NELSON_API_KEY"] == "sk-1"
     assert spec.env["NELSON_INPUT_USD_PER_MTOK"] == "0.14"
     assert spec.env["NELSON_OUTPUT_USD_PER_MTOK"] == "0.28"
+    # No temperature in the cost_model -> the env var is left unset (loop default).
+    assert "NELSON_TEMPERATURE" not in spec.env
+
+
+def test_raw_api_loop_build_spec_passes_temperature(tmp_path):
+    comp = Competitor(
+        name="raw/qwen",
+        model="qwen",
+        runtime="raw-api-loop",
+        cost_model='{"base_url": "http://10.20.30.1:8080/v1", "temperature": 0.5}',
+    )
+    ctx = RuntimeContext(
+        competitor=comp,
+        prompt="audit a.c",
+        src_dir=tmp_path / "src",
+        auth=AuthMaterial(env={"NELSON_API_KEY": "x"}, mounts=[]),
+        name="r1",
+        network=True,
+    )
+    spec = RawApiLoopRuntime().build_spec(ctx)
+    assert spec.env["NELSON_TEMPERATURE"] == "0.5"
 
 
 def test_raw_api_loop_default_auth_requires_profile(tmp_path):

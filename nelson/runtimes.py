@@ -384,6 +384,10 @@ class RawApiLoopRuntime:
             # Slow self-hosted endpoints raise the per-API-call read timeout so a single
             # big-context turn isn't cut off as an infra_error (see _http_timeout).
             env["NELSON_HTTP_TIMEOUT"] = str(cfg["http_timeout"])
+        if cfg.get("temperature") is not None:
+            # Sampling temperature for the audit (default 0.1). Raised for repeat-trial
+            # experiments where run-to-run diversity is the point, not determinism.
+            env["NELSON_TEMPERATURE"] = str(cfg["temperature"])
         mounts = [
             (str(_RAW_API_SCRIPT_HOST), _RAW_API_SCRIPT_CONTAINER, "ro"),
             (str(ctx.src_dir), "/src", "ro"),

@@ -164,6 +164,30 @@ def test_loop_does_not_request_usage_on_non_openrouter(tmp_path):
     assert all("usage" not in p for p in seen)  # no unknown field to strict servers
 
 
+def test_loop_defaults_to_low_temperature(tmp_path):
+    seen = []
+
+    def post(url, payload, api_key):
+        seen.append(payload)
+        return _final("[]")
+
+    run_loop("audit", base_url="x", model="m", api_key="k", post=post,
+             src_root=str(tmp_path))
+    assert all(p["temperature"] == 0.1 for p in seen)  # deterministic default
+
+
+def test_loop_honours_explicit_temperature(tmp_path):
+    seen = []
+
+    def post(url, payload, api_key):
+        seen.append(payload)
+        return _final("[]")
+
+    run_loop("audit", base_url="x", model="m", api_key="k", temperature=0.6,
+             post=post, src_root=str(tmp_path))
+    assert all(p["temperature"] == 0.6 for p in seen)  # repeat-trial diversity
+
+
 # -- Sandbox (security-critical) --------------------------------------------
 
 
