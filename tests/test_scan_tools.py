@@ -61,6 +61,7 @@ def test_create_adapter_enables_tools_for_openai():
 
 def test_create_adapter_single_shot_by_default():
     a = create_adapter("lmstudio:m")
+    assert isinstance(a, OpenAIAPIAdapter)
     assert not a.use_tools
     assert a.tool_profile == "single-shot"
 
@@ -79,6 +80,7 @@ def test_bearer_token_reads_openai_api_key_env(monkeypatch):
     # comes from OPENAI_API_KEY in the environment (DeepSeek/OpenRouter/etc.).
     monkeypatch.setenv("OPENAI_API_KEY", "sk-hosted-123")
     a = create_adapter("openai:deepseek-chat@https://api.deepseek.com/v1")
+    assert isinstance(a, OpenAIAPIAdapter)
     assert a._bearer_token() == "sk-hosted-123"
 
 
@@ -86,6 +88,7 @@ def test_bearer_token_none_without_env_key(monkeypatch):
     # Unset -> no Authorization header, which is correct for localhost servers.
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     a = create_adapter("lmstudio:m")
+    assert isinstance(a, OpenAIAPIAdapter)
     assert a._bearer_token() is None
 
 
@@ -116,6 +119,7 @@ def test_tool_loop_single_shot_when_tools_disabled(monkeypatch):
 
     monkeypatch.setattr(ral, "_post_chat", boom)
     a = create_adapter("openai:m@http://h:1/v1")  # tools off
+    assert isinstance(a, OpenAIAPIAdapter)
     # No network call is made because httpx.post would be needed; we only assert
     # the loop branch is not taken (boom would fire if it were).
     assert a.use_tools is False
@@ -190,6 +194,7 @@ def test_run_review_with_tools_reads_other_files(tmp_path, monkeypatch):
     scan_id = db.create_scan(str(tmp_path))
     db.create_jobs_batch(scan_id, [("app.py", "OPEN", "h/m")])
     job = db.next_pending_job(scan_id, model_id="h/m")
+    assert job is not None
     finding_id = db.add_finding(
         job["id"],
         line_number=2,
