@@ -71,6 +71,24 @@ def test_create_adapter_tools_ignored_for_cli_runtime():
     assert not hasattr(a, "use_tools")
 
 
+# -- API key from the environment (hosted endpoints, no benchmark profile) ---
+
+
+def test_bearer_token_reads_openai_api_key_env(monkeypatch):
+    # An ad-hoc CLI scan against a hosted endpoint has no AuthProfile; the key
+    # comes from OPENAI_API_KEY in the environment (DeepSeek/OpenRouter/etc.).
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-hosted-123")
+    a = create_adapter("openai:deepseek-chat@https://api.deepseek.com/v1")
+    assert a._bearer_token() == "sk-hosted-123"
+
+
+def test_bearer_token_none_without_env_key(monkeypatch):
+    # Unset -> no Authorization header, which is correct for localhost servers.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    a = create_adapter("lmstudio:m")
+    assert a._bearer_token() is None
+
+
 # -- The tool loop -----------------------------------------------------------
 
 

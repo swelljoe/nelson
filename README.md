@@ -299,7 +299,11 @@ Models are specified with a `type:model` syntax:
 | `gemini:` | Gemini CLI with default model |
 | `lmstudio:google/gemma-4-26b-a4b` | LM Studio on localhost:1234 |
 | `ollama:llama3` | Ollama on localhost:11434 |
-| `openai:model@http://host:port/v1` | Any OpenAI-compatible API endpoint |
+| `openai:model@http://host:port/v1` | Any OpenAI-compatible API endpoint (local or hosted) |
+| `openai:deepseek-v4-pro@https://api.deepseek.com/v1` | DeepSeek (hosted) |
+| `openai:nvidia/nemotron-3-super-120b-a12b@https://openrouter.ai/api/v1` | OpenRouter (hosted) |
+
+The `openai:` type talks to anything that speaks the OpenAI chat-completions API — a local server *or* a hosted provider. For local servers (`lmstudio:`, `ollama:`, or an `openai:...@http://localhost...` spec) no key is needed. For hosted providers, see [Hosted API models](#hosted-api-models-deepseek-mimo-openrouter) below.
 
 Multiple models can be used in a single scan to compare effectiveness. By default they run in parallel — one worker per model, since rate limits are per-provider:
 
@@ -316,6 +320,90 @@ CLI-based agents (Claude Code, Gemini CLI) are paced with a configurable delay b
 
 ```bash
 nelson scan /path/to/project -m claude:haiku --delay 5
+```
+
+### Hosted API models (DeepSeek, MiMo, OpenRouter)
+
+You don't need a local GPU to run a cheap model. Any hosted provider with an
+OpenAI-compatible endpoint works through the `openai:` spec, in the form
+`openai:MODEL@BASE_URL` where `BASE_URL` ends in `/v1`. In my benchmarking these
+hosted "cheap" models — DeepSeek and Xiaomi's MiMo in particular — have been the
+value/performance leaders: they find most of what the frontier models find at a
+small fraction of the cost, which makes them a good fit for Nelson's brute-force,
+every-file approach.
+
+**Authentication.** Nelson reads the key from the `OPENAI_API_KEY` environment
+variable (the universal OpenAI-compatible convention). Export your provider's key
+under that name before scanning — whichever provider the `@BASE_URL` points at:
+
+```bash
+export OPENAI_API_KEY="sk-your-provider-key"
+```
+
+Keeping the key in the environment (or an untracked `.env` you `source`) keeps it
+out of your shell history and out of any file Nelson writes. A missing or rejected
+key surfaces as an auth failure, never as a silent "scanned and found nothing."
+
+**DeepSeek** — `deepseek-v4-pro` is the stronger/pricier model, `deepseek-v4-flash`
+the cheaper one:
+
+```bash
+export OPENAI_API_KEY="sk-..."   # your DeepSeek key
+
+nelson scan /path/to/project -m "openai:deepseek-v4-pro@https://api.deepseek.com/v1"
+
+# Cheaper, still surprisingly capable
+nelson scan /path/to/project -m "openai:deepseek-v4-flash@https://api.deepseek.com/v1"
+```
+
+**MiMo (Xiaomi)** — point at MiMo's OpenAI-compatible endpoint:
+
+```bash
+export OPENAI_API_KEY="..."      # your MiMo key
+
+nelson scan /path/to/project \
+    -m "openai:mimo-v2.5-pro@https://token-plan-sgp.xiaomimimo.com/v1"
+```
+
+**OpenRouter** — one key and one base URL reach most major models behind a single
+account; the model id is the provider-prefixed slug from OpenRouter's catalog
+(e.g. `nvidia/nemotron-3-super-120b-a12b`, append `:free` for a free-tier route).
+This is a convenient way to try many models without signing up with each provider:
+
+```bash
+export OPENAI_API_KEY="sk-or-..."   # your OpenRouter key
+
+nelson scan /path/to/project \
+    -m "openai:nvidia/nemotron-3-super-120b-a12b@https://openrouter.ai/api/v1"
+```
+
+By default a hosted `openai:` model is **single-shot** — it only sees the one file
+pasted into each prompt. Add `--tools` (see [Scanning](#scanning)) to give it a
+read-only `read_file`/`grep`/`list_dir` loop over the project so it can follow
+imports and call sites into other files before deciding a finding is real. That
+costs more tokens but tends to cut false positives:
+
+```bash
+nelson scan --tools /path/to/project \
+    -m "openai:deepseek-v4-pro@https://api.deepseek.com/v1"
+```
+
+The same spec and `OPENAI_API_KEY` work for `nelson review` — a cheap hosted model
+can scan and a stronger one can review, or vice versa:
+
+```bash
+nelson review -m "openai:deepseek-v4-pro@https://api.deepseek.com/v1" --tools
+```
+
+Because rate limits are per-provider, you can mix a hosted model with a local one
+(or Claude/Gemini) in a single scan and Nelson runs one worker per model in
+parallel:
+
+```bash
+nelson scan /path/to/project \
+    -m "openai:deepseek-v4-flash@https://api.deepseek.com/v1" \
+    -m "lmstudio:Qwen/Qwen3-27B" \
+    -m claude:haiku
 ```
 
 ## Prompts
