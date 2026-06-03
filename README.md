@@ -93,23 +93,27 @@ This runs a focused CWE scan (Haiku), an open scan (Sonnet), reviews everything 
 
 Nelson has two scan modes:
 
-**Focused mode** (default) checks each file against specific CWE types from the MITRE Top 25 Most Dangerous Software Weaknesses, filtered by language applicability. A Python file won't be checked for buffer overflows, a C file won't be checked for XSS, etc. This mode produces more jobs but gives smaller models a better chance of finding issues.
+**Open mode** (default) sends each file once with a broad "find any vulnerability" prompt, similar to the Carlini approach. One job per file.
 
 ```bash
-# Focused scan with default model (claude:haiku)
+# Open scan with default model (claude:haiku)
 nelson scan /path/to/project
 
-# Limit to specific CWE types
-nelson scan /path/to/project --cwe CWE-89 --cwe CWE-78
+# A more capable model produces better results in open mode
+nelson scan -m claude:sonnet /path/to/project
 
 # Use a local model via LM Studio
 nelson scan /path/to/project -m "lmstudio:google/gemma-4-26b-a4b"
 ```
 
-**Open mode** sends each file once with a broad "find any vulnerability" prompt, similar to the Carlini approach. Fewer jobs, but requires a more capable model to produce useful results.
+**Focused mode** checks each file against specific CWE types from the MITRE Top 25 Most Dangerous Software Weaknesses, filtered by language applicability. A Python file won't be checked for buffer overflows, a C file won't be checked for XSS, etc. This mode produces many more jobs.
 
 ```bash
-nelson scan --mode open -m claude:sonnet /path/to/project
+# Per-CWE scan across all applicable CWE types
+nelson scan --mode focused /path/to/project
+
+# Limit to specific CWE types
+nelson scan --mode focused /path/to/project --cwe CWE-89 --cwe CWE-78
 ```
 
 You can also point `nelson scan` at one or more individual files instead of a whole directory. This is useful for spot-checking a single file, or for scanning whatever a shell glob expands to. When you name files explicitly, the usual path-based filters (test/doc patterns, generated-file detection) are skipped — Nelson trusts you to know what you want. The same applies to `nelson inventory` and `nelson haha`.
