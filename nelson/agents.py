@@ -11,11 +11,13 @@ via :class:`FailureKind` and must never be scored as "the model looked and found
 nothing." See :func:`classify_failure`.
 """
 
+import contextlib
 import json
 import logging
 import os
 import subprocess
 import threading
+import urllib.error
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import StrEnum
@@ -23,6 +25,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from . import raw_api_loop
 from .auth import AuthProfile, MissingSecretError
 
 log = logging.getLogger(__name__)
@@ -515,8 +518,97 @@ class GeminiCLIAdapter(AgentAdapter):
         )
 
 
+# -- Tool-using (ReAct) loop for OpenAI-compatible APIs -----------------------
+#
+# CLI runtimes (Claude Code, Gemini CLI) are already agents that read files on
+# their own. A bare OpenAI-compatible endpoint is not — single-shot, it only ever
+# sees the one file pasted into the prompt. With tools enabled, the adapter drives
+# the same ReAct loop the benchmark's raw-api-loop runtime uses (read_file / grep
+# / list_dir), but rooted at a host directory so the model can follow imports,
+# callers, and helpers into sibling files before answering. Used by both the scan
+# pass (audit a file) and the review pass (verify a reported finding) — the user's
+# prompt sets the role and the exact JSON contract, so this framing stays neutral
+# on both. Same tool *names* the benchmark uses (dispatch_tool resolves them);
+# only the framing differs (project root rather than the container's /src mount).
+
+_TOOL_LOOP_SYSTEM = (
+    "You have read-only access to a project's source tree through tools: "
+    "read_file, grep, and list_dir, all taking paths relative to the project "
+    "root. The file in question is included in the user's message. Use the tools "
+    "to read related code in other files (imports, call sites, helper and type "
+    "definitions) whenever that helps you answer accurately. When finished, "
+    "output EXACTLY the JSON specified in the user's instructions, with no prose "
+    "around it."
+)
+
+# OpenAI function-calling schema, root-neutral wording (the benchmark's TOOLS say
+# "/src"; we keep that instrument untouched and describe a generic project root).
+_TOOL_LOOP_SCHEMA: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": (
+                "Read a source file by path relative to the project root. "
+                "Optionally restrict to a line range."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {"type": "integer"},
+                    "end_line": {"type": "integer"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep",
+            "description": (
+                "Search the project for a regex (ripgrep). Optional path relative "
+                "to the project root narrows the search."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string"},
+                    "path": {"type": "string"},
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dir",
+            "description": "List a directory by path relative to the project root.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+            },
+        },
+    },
+]
+
+# Bounds for the host tool loop. Smaller than the benchmark's (40 / 500k): one
+# file with optional excursions into neighbors, not a whole-repo hunt, and we want
+# per-file cost bounded for interactive use.
+_TOOL_LOOP_MAX_STEPS = 15
+_TOOL_LOOP_TOKEN_BUDGET = 256_000
+
+
 class OpenAIAPIAdapter(AgentAdapter):
-    """Invoke a local model via OpenAI-compatible API (e.g., llama.cpp server)."""
+    """Invoke a local model via OpenAI-compatible API (e.g., llama.cpp server).
+
+    Single-shot by default (the file is pasted into the prompt). With
+    ``tools=True`` and a ``tools_root``, ``run`` instead drives a ReAct tool loop
+    rooted at that directory so the model can read sibling files — the same loop
+    the benchmark's raw-api-loop runtime uses, confined to ``tools_root``.
+    """
 
     def __init__(
         self,
@@ -524,6 +616,10 @@ class OpenAIAPIAdapter(AgentAdapter):
         base_url: str = "http://localhost:8080/v1",
         timeout: int = 300,
         auth_profile: AuthProfile | None = None,
+        tools: bool = False,
+        tools_root: str | None = None,
+        max_tool_steps: int = _TOOL_LOOP_MAX_STEPS,
+        tool_token_budget: int = _TOOL_LOOP_TOKEN_BUDGET,
     ):
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -533,6 +629,11 @@ class OpenAIAPIAdapter(AgentAdapter):
         self.model_id = model
         self.auth_profile = auth_profile
         self.timeout = timeout
+        self.use_tools = tools
+        self.tools_root = tools_root
+        self.tool_profile = "react" if tools else "single-shot"
+        self.max_tool_steps = max_tool_steps
+        self.tool_token_budget = tool_token_budget
 
     def _bearer_token(self) -> str | None:
         """Resolve the profile to a bearer token, or ``None`` if no profile.
@@ -553,6 +654,9 @@ class OpenAIAPIAdapter(AgentAdapter):
     def run(
         self, prompt: str, cancel_event: threading.Event | None = None
     ) -> AgentResult:
+        if self.use_tools and self.tools_root:
+            return self._run_with_tools(prompt, cancel_event)
+
         url = f"{self.base_url}/chat/completions"
         payload = {
             "model": self.model,
@@ -625,6 +729,80 @@ class OpenAIAPIAdapter(AgentAdapter):
             tokens_out=usage.get("completion_tokens"),
         )
 
+    def _run_with_tools(
+        self, prompt: str, cancel_event: threading.Event | None
+    ) -> AgentResult:
+        """Drive the ReAct tool loop rooted at ``self.tools_root``.
+
+        Reuses the benchmark loop (``raw_api_loop.run_loop``) for its retry,
+        budget, and usage accounting, supplying scan-mode framing + a root-neutral
+        tool schema. The tools resolve every path under ``tools_root`` (realpath
+        check), so the model cannot read outside the scanned tree. Integrity holds:
+        a persistent auth/transport failure is surfaced as a FailureKind, never as
+        a model that looked and found nothing.
+        """
+        if cancel_event is not None and cancel_event.is_set():
+            raise KeyboardInterrupt
+        try:
+            token = self._bearer_token()
+        except MissingSecretError as e:
+            return AgentResult(
+                findings=[], raw_output="", failure_kind=FailureKind.AUTH, error=str(e)
+            )
+
+        def _post(url: str, payload: dict, api_key: str) -> dict:
+            # Checked between API calls (mirrors single-shot's pre-call cancel
+            # check); an in-flight request still blocks until it returns/times out.
+            if cancel_event is not None and cancel_event.is_set():
+                raise KeyboardInterrupt
+            return raw_api_loop._post_chat(url, payload, api_key)
+
+        try:
+            final_text, tin, tout, _steps, cost = raw_api_loop.run_loop(
+                prompt,
+                base_url=self.base_url,
+                model=self.model,
+                api_key=token or "",
+                max_steps=self.max_tool_steps,
+                token_budget=self.tool_token_budget,
+                temperature=0.1,
+                post=_post,
+                src_root=self.tools_root,
+                system_prompt=_TOOL_LOOP_SYSTEM,
+                tools=_TOOL_LOOP_SCHEMA,
+            )
+        except urllib.error.HTTPError as e:
+            body = ""
+            with contextlib.suppress(OSError, AttributeError):
+                body = e.read().decode("utf-8", errors="replace")
+            if e.code in (401, 403):
+                kind = FailureKind.AUTH
+            elif e.code == 429:
+                kind = FailureKind.RATE_LIMIT
+            else:
+                kind = classify_failure(body, failed=True)
+            return AgentResult(
+                findings=[],
+                raw_output=body,
+                failure_kind=kind,
+                error=f"HTTP {e.code}: {body[:500]}",
+            )
+        except urllib.error.URLError as e:
+            return AgentResult(
+                findings=[],
+                raw_output="",
+                failure_kind=FailureKind.INFRA,
+                error=f"connection error: {e.reason}",
+            )
+
+        return AgentResult(
+            findings=parse_findings(final_text),
+            raw_output=final_text,
+            tokens_in=tin or None,
+            tokens_out=tout or None,
+            cost_usd=cost,
+        )
+
 
 # Registry of known adapters
 ADAPTERS: dict[str, type[AgentAdapter]] = {
@@ -634,13 +812,24 @@ ADAPTERS: dict[str, type[AgentAdapter]] = {
 }
 
 
-def create_adapter(spec: str, auth_profile: AuthProfile | None = None) -> AgentAdapter:
+def create_adapter(
+    spec: str,
+    auth_profile: AuthProfile | None = None,
+    *,
+    tools: bool = False,
+    tools_root: str | None = None,
+) -> AgentAdapter:
     """Create an adapter from a spec string.
 
     ``auth_profile`` is optional and defaults to ``None``: with no profile the
     runtime inherits this process's environment unchanged (the existing
     behavior). A competitor in the benchmark attaches a profile so its secrets
     are injected into the run; ad-hoc CLI scans leave it unset.
+
+    ``tools`` / ``tools_root`` enable the ReAct tool loop for OpenAI-compatible
+    endpoints, rooted at ``tools_root`` (the scan's target directory). They are
+    ignored for the CLI runtimes (Claude Code, Gemini CLI), which already read
+    files on their own.
 
     Examples:
         "claude:haiku"              -> Claude CLI with Haiku
@@ -669,20 +858,33 @@ def create_adapter(spec: str, auth_profile: AuthProfile | None = None) -> AgentA
         if "@" in model_spec:
             model, url = model_spec.split("@", 1)
             return OpenAIAPIAdapter(
-                model=model, base_url=url, auth_profile=auth_profile
+                model=model,
+                base_url=url,
+                auth_profile=auth_profile,
+                tools=tools,
+                tools_root=tools_root,
             )
-        return OpenAIAPIAdapter(model=model_spec, auth_profile=auth_profile)
+        return OpenAIAPIAdapter(
+            model=model_spec,
+            auth_profile=auth_profile,
+            tools=tools,
+            tools_root=tools_root,
+        )
     elif adapter_type == "lmstudio":
         return OpenAIAPIAdapter(
             model=model_spec,
             base_url="http://localhost:1234/v1",
             auth_profile=auth_profile,
+            tools=tools,
+            tools_root=tools_root,
         )
     elif adapter_type == "ollama":
         return OpenAIAPIAdapter(
             model=model_spec,
             base_url="http://localhost:11434/v1",
             auth_profile=auth_profile,
+            tools=tools,
+            tools_root=tools_root,
         )
     else:
         raise ValueError(

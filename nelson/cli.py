@@ -142,6 +142,16 @@ def inventory(paths: tuple[str, ...]):
     ),
 )
 @click.option(
+    "--tools",
+    is_flag=True,
+    help=(
+        "Let OpenAI-compatible API models (openai:/lmstudio:/ollama:) use "
+        "read_file/grep/list_dir tools to follow code into other files, rooted "
+        "at the scanned tree. No-op for claude:/gemini: (already agentic). Uses "
+        "more tokens per file."
+    ),
+)
+@click.option(
     "--db",
     "db_path",
     default="nelson.db",
@@ -155,6 +165,7 @@ def scan(
     resume: int | None,
     mode: str,
     parallel: bool,
+    tools: bool,
     db_path: str,
 ):
     """Scan PATHS for vulnerabilities.
@@ -230,6 +241,7 @@ def scan(
         on_progress=on_progress,
         parallel=parallel,
         db_path=db_path,
+        tools=tools,
     )
 
     counts = db.job_counts(scan_id)
@@ -261,8 +273,19 @@ def scan(
     type=float,
     help="Seconds between reviews (for CLI pacing). Default: 2.0",
 )
+@click.option(
+    "--tools",
+    is_flag=True,
+    help=(
+        "Let an OpenAI-compatible reviewer (openai:/lmstudio:/ollama:) use "
+        "read_file/grep/list_dir over the scanned tree to trace reachability "
+        "into other files. No-op for claude:/gemini: (already agentic)."
+    ),
+)
 @click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
-def review(scan_id: int | None, model_spec: str, delay: float, db_path: str):
+def review(
+    scan_id: int | None, model_spec: str, delay: float, tools: bool, db_path: str
+):
     """Review findings from a scan with a (usually smarter) model."""
     db = Database(db_path)
     if scan_id is None:
@@ -298,6 +321,7 @@ def review(scan_id: int | None, model_spec: str, delay: float, db_path: str):
         target_dir,
         delay=delay,
         on_progress=on_progress,
+        tools=tools,
     )
 
     summary = db.review_summary(scan_id)

@@ -337,6 +337,8 @@ def run_loop(
     temperature: float = 0.1,
     post: Callable[[str, dict[str, Any], str], dict[str, Any]] = _post_chat,
     src_root: str | None = None,
+    system_prompt: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> tuple[str, int, int, list[dict[str, Any]], float | None]:
     """Drive the tool-use loop; return (final_text, in, out, steps, provider_cost).
 
@@ -345,6 +347,12 @@ def run_loop(
     with tools withheld so the model must produce its answer. If it still emits no
     parseable array, the last assistant text is returned (the runner's parser then
     yields ``[]`` — a legitimate "found nothing", not an error).
+
+    ``system_prompt`` and ``tools`` default to this module's ``SYSTEM_PROMPT`` /
+    ``TOOLS`` (the container audit framing over ``/src``) so the benchmark path is
+    unchanged. Host callers (the scan-mode API adapter) pass their own framing and
+    tool descriptions while reusing this loop's retry/budget/usage machinery; the
+    tool *names* must still be those ``dispatch_tool`` knows.
 
     ``provider_cost`` is the summed real charge the provider reports per call
     (OpenRouter's ``usage.cost`` when we request ``usage: {include: true}``), or
@@ -360,8 +368,10 @@ def run_loop(
     # unknown field. Providers that don't return ``cost`` just leave it None and
     # main() falls back to compute_cost.
     want_cost = "openrouter.ai" in base_url
+    system_prompt = SYSTEM_PROMPT if system_prompt is None else system_prompt
+    tools = TOOLS if tools is None else tools
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": prompt},
     ]
     total_in = 0
@@ -395,7 +405,7 @@ def run_loop(
         if want_cost:
             payload["usage"] = {"include": True}
         if not force_final:
-            payload["tools"] = TOOLS
+            payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
         resp = post(url, payload, api_key)

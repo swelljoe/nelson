@@ -116,6 +116,21 @@ nelson scan --mode focused /path/to/project
 nelson scan --mode focused /path/to/project --cwe CWE-89 --cwe CWE-78
 ```
 
+**Tools for OpenAI-compatible models.** Claude Code and Gemini CLI are already
+agents — they read whatever files they need on their own. A bare OpenAI-compatible
+endpoint (`openai:`, `lmstudio:`, `ollama:`) is not: by default it only ever sees
+the single file pasted into the prompt. Pass `--tools` to give those models a
+read-only `read_file` / `grep` / `list_dir` tool loop rooted at the scanned tree,
+so they can follow imports, callers, and helpers into other files before deciding
+whether a vulnerability is real and reachable. (Install [ripgrep](https://github.com/BurntSushi/ripgrep)
+for the `grep` tool.) This uses more tokens per file. It's a no-op for `claude:` /
+`gemini:` specs.
+
+```bash
+# Let a local Qwen poke around the project, not just the one file
+nelson scan --tools -m "lmstudio:Qwen/Qwen3-27B" /path/to/project
+```
+
 You can also point `nelson scan` at one or more individual files instead of a whole directory. This is useful for spot-checking a single file, or for scanning whatever a shell glob expands to. When you name files explicitly, the usual path-based filters (test/doc patterns, generated-file detection) are skipped — Nelson trusts you to know what you want. The same applies to `nelson inventory` and `nelson haha`.
 
 ```bash
@@ -152,9 +167,12 @@ nelson review 3
 
 # Review with a different model
 nelson review -m claude:opus
+
+# Let an OpenAI-compatible reviewer read related files while tracing reachability
+nelson review -m "lmstudio:Qwen/Qwen3-27B" --tools
 ```
 
-Each finding gets a verdict: `confirmed`, `false_positive`, `needs_review`, or `resolved` (if the file has been deleted since the scan). Review is idempotent -- running it again only processes unreviewed findings, so you can review with one model and then run a second pass with another.
+Each finding gets a verdict: `confirmed`, `false_positive`, `needs_review`, or `resolved` (if the file has been deleted since the scan). The `--tools` flag works the same way it does for `nelson scan`: it gives an OpenAI-compatible model (`openai:`/`lmstudio:`/`ollama:`) a read-only `read_file`/`grep`/`list_dir` loop over the scanned tree, so it can follow a finding into the files it touches before ruling on reachability. It's a no-op for `claude:`/`gemini:`, which already read files on their own. Review is idempotent -- running it again only processes unreviewed findings, so you can review with one model and then run a second pass with another.
 
 ### Reporting
 

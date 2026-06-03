@@ -98,6 +98,7 @@ def run_review(
     delay: float = 2.0,
     max_backoff: float = 300.0,
     on_progress=None,
+    tools: bool = False,
 ):
     """Review unverified findings from a scan.
 
@@ -109,11 +110,14 @@ def run_review(
         delay: Seconds between reviews (for CLI pacing)
         max_backoff: Maximum backoff on rate limiting
         on_progress: Optional callback(reviewed, total)
+        tools: Give an OpenAI-compatible reviewer a read-only tool loop over the
+            scanned tree so it can read related files when tracing reachability.
+            No-op for the CLI runtimes (Claude Code, Gemini CLI).
     """
     from .inventory import LANGUAGE_MAP
 
-    adapter = create_adapter(model_spec)
     target = Path(target_dir).resolve()
+    adapter = create_adapter(model_spec, tools=tools, tools_root=str(target))
 
     findings = db.unreviewed_findings(scan_id)
     if not findings:

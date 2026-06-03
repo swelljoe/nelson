@@ -196,6 +196,48 @@ def test_loop_honours_explicit_temperature(tmp_path):
     assert all(p["temperature"] == 0.6 for p in seen)  # repeat-trial diversity
 
 
+def test_loop_overrides_system_prompt_and_tools(tmp_path):
+    # Host callers (scan-mode adapter) supply their own framing + tool schema
+    # while reusing the loop; the benchmark defaults must not leak in.
+    (tmp_path / "a.c").write_text("int x;\n")
+    seen = []
+
+    def post(url, payload, api_key):
+        seen.append(payload)
+        return _final("[]")
+
+    custom_tools = [
+        {"type": "function", "function": {"name": "read_file", "parameters": {}}}
+    ]
+    run_loop(
+        "audit",
+        base_url="x",
+        model="m",
+        api_key="k",
+        post=post,
+        src_root=str(tmp_path),
+        system_prompt="CUSTOM SYSTEM",
+        tools=custom_tools,
+    )
+    assert seen[0]["messages"][0] == {"role": "system", "content": "CUSTOM SYSTEM"}
+    assert seen[0]["tools"] == custom_tools
+
+
+def test_loop_defaults_keep_benchmark_framing(tmp_path):
+    # No override → the container audit framing over /src, byte-for-byte.
+    seen = []
+
+    def post(url, payload, api_key):
+        seen.append(payload)
+        return _final("[]")
+
+    run_loop(
+        "audit", base_url="x", model="m", api_key="k", post=post, src_root=str(tmp_path)
+    )
+    assert seen[0]["messages"][0]["content"] == ral.SYSTEM_PROMPT
+    assert seen[0]["tools"] == ral.TOOLS
+
+
 # -- Sandbox (security-critical) --------------------------------------------
 
 

@@ -200,6 +200,7 @@ def _model_worker(
     max_backoff: float,
     cancel_event: threading.Event,
     progress_event: threading.Event,
+    tools: bool = False,
 ):
     """Drain pending jobs for a single model. Owns its own DB connection
     so it can run concurrently with other workers under SQLite WAL."""
@@ -207,7 +208,9 @@ def _model_worker(
     cwe_lookup = {c.id: c for c in CWE_TOP_25}
     cwe_lookup["OPEN"] = CWE_OPEN
 
-    adapter = create_adapter(model_spec)
+    # Tools let an OpenAI-compatible model read sibling files; root them at the
+    # scanned tree. No-op for the CLI runtimes, which already have file access.
+    adapter = create_adapter(model_spec, tools=tools, tools_root=str(target))
     db = Database(db_path)
     backoff = 0.0
     current_job_id: int | None = None
@@ -266,6 +269,7 @@ def run_scan(
     on_progress=None,
     parallel: bool = True,
     db_path: str | None = None,
+    tools: bool = False,
 ):
     """Process pending jobs for a scan.
 
@@ -287,6 +291,8 @@ def run_scan(
             models are passed (preserves the old serial behavior).
         db_path: Path to the SQLite db, used by workers to open their own
             connections. Defaults to ``str(db.path)``.
+        tools: Give OpenAI-compatible API models a ReAct tool loop (read sibling
+            files) rooted at ``target_dir``. No-op for the CLI runtimes.
     """
     if db_path is None:
         db_path = str(db.path)
@@ -315,6 +321,7 @@ def run_scan(
                 max_backoff,
                 cancel_event,
                 progress_event,
+                tools,
             )
         except Exception as e:
             log.error("Worker for %s failed: %s", spec, e, exc_info=True)
