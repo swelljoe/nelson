@@ -32,12 +32,12 @@ def build_job_matrix(
     files: list[SourceFile],
     models: list[str],
     cwe_ids: list[str] | None = None,
-    mode: str = "focused",
+    mode: str = "open",
 ) -> list[tuple[str, str, str]]:
     """Build (file_path, cwe_id, model_id) tuples.
 
-    mode="focused": one job per (file, applicable CWE, model)
     mode="open": one job per (file, model) with cwe_id="OPEN"
+    mode="focused": one job per (file, applicable CWE, model)
     """
     jobs = []
     for f in files:
@@ -59,7 +59,7 @@ def create_scan(
     target_dir: str,
     models: list[str],
     cwe_ids: list[str] | None = None,
-    mode: str = "focused",
+    mode: str = "open",
     files: list[SourceFile] | None = None,
 ) -> tuple[int, list[SourceFile]]:
     """Discover files, build matrix, create scan and jobs in DB.

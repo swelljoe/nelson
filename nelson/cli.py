@@ -129,9 +129,9 @@ def inventory(paths: tuple[str, ...]):
 )
 @click.option(
     "--mode",
-    type=click.Choice(["focused", "open"]),
-    default="focused",
-    help="'focused': per-CWE (default). 'open': find any vuln per file.",
+    type=click.Choice(["open", "focused"]),
+    default="open",
+    help="'open': find any vuln per file (default). 'focused': per-CWE.",
 )
 @click.option(
     "--parallel/--no-parallel",
