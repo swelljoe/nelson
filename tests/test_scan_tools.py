@@ -84,6 +84,16 @@ def test_bearer_token_reads_openai_api_key_env(monkeypatch):
     assert a._bearer_token() == "sk-hosted-123"
 
 
+def test_bearer_token_none_for_local_or_http_even_with_env_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-hosted-123")
+    local = create_adapter("lmstudio:m")
+    insecure = create_adapter("openai:m@http://api.deepseek.com/v1")
+    assert isinstance(local, OpenAIAPIAdapter)
+    assert isinstance(insecure, OpenAIAPIAdapter)
+    assert local._bearer_token() is None
+    assert insecure._bearer_token() is None
+
+
 def test_bearer_token_none_without_env_key(monkeypatch):
     # Unset -> no Authorization header, which is correct for localhost servers.
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
