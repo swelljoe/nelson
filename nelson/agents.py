@@ -636,16 +636,28 @@ class OpenAIAPIAdapter(AgentAdapter):
         self.tool_token_budget = tool_token_budget
 
     def _bearer_token(self) -> str | None:
-        """Resolve the profile to a bearer token, or ``None`` if no profile.
+        """Resolve a bearer token for the request, or ``None`` to send no header.
 
         Local servers (llama.cpp, LM Studio, Ollama) need no key, so the default
-        is no Authorization header. Hosted OpenAI-compatible endpoints attach a
-        profile; we use the resolved ``OPENAI_API_KEY`` (or the sole resolved
-        value). Raises :class:`MissingSecretError` for a configured-but-absent
-        secret so it becomes ``auth_failed``, not a silent unauthenticated call.
+        is no Authorization header. Two ways a key is supplied:
+
+        * A benchmark competitor attaches an :class:`AuthProfile`; we use the
+          resolved ``OPENAI_API_KEY`` (or the sole resolved value), and a
+          configured-but-absent secret raises :class:`MissingSecretError` so it
+          becomes ``auth_failed`` rather than a silent unauthenticated call.
+        * An ad-hoc CLI scan (no profile) reads ``OPENAI_API_KEY`` straight from
+          the environment — but only for non-local HTTPS endpoints. This is how
+          hosted endpoints (DeepSeek, OpenRouter, ...) are authenticated from
+          ``nelson scan``/``nelson review`` while avoiding accidental key leaks
+          to localhost or plaintext HTTP URLs.
         """
         if self.auth_profile is None:
-            return None
+            parsed = urlparse(self.base_url)
+            if parsed.scheme != "https":
+                return None
+            if parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+                return None
+            return os.environ.get("OPENAI_API_KEY")
         resolved = self.auth_profile.resolve_env()
         if "OPENAI_API_KEY" in resolved:
             return resolved["OPENAI_API_KEY"]
