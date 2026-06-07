@@ -164,11 +164,10 @@ def tool_read_file(args: dict[str, Any], src_root: str | None = None) -> str:
     s = max(1, int(start) if start is not None else 1)
     e = int(end) if end is not None else len(lines)
     window = lines[s - 1 : e]
-    # Prefix each line with its absolute 1-based line number (same `N:` delimiter as 
-    # `rg -n`),
-    # so numbers are consistent across tools). Without this the model reads raw
-    # text and must hand-count to cite a location — which it does badly (observed
-    # ~75-line drift), so a genuine find lands tens of lines off and the
+    # Prefix each line with its absolute 1-based line number (same `N:` delimiter as
+    # `rg -n`), so numbers are consistent across tools). Without this the model
+    # reads raw text and must hand-count to cite a location — which it does badly
+    # (observed ~75-line drift), so a genuine find lands tens of lines off and the
     # near-exact localization gate rejects it. Numbering removes the guesswork and
     # lets the gate trust the competitor's reported line.
     numbered = (f"{s + i}:{line}" for i, line in enumerate(window))
