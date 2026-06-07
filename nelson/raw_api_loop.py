@@ -161,11 +161,17 @@ def tool_read_file(args: dict[str, Any], src_root: str | None = None) -> str:
         return f"error: {e}"
     start = args.get("start_line")
     end = args.get("end_line")
-    if start is not None or end is not None:
-        s = max(1, int(start) if start is not None else 1)
-        e = int(end) if end is not None else len(lines)
-        lines = lines[s - 1 : e]
-    return "".join(lines)[:MAX_TOOL_OUTPUT]
+    s = max(1, int(start) if start is not None else 1)
+    e = int(end) if end is not None else len(lines)
+    window = lines[s - 1 : e]
+    # Prefix each line with its ABSOLUTE line number (``grep``'s ``rg -n`` format,
+    # so numbers are consistent across tools). Without this the model reads raw
+    # text and must hand-count to cite a location — which it does badly (observed
+    # ~75-line drift), so a genuine find lands tens of lines off and the
+    # near-exact localization gate rejects it. Numbering removes the guesswork and
+    # lets the gate trust the competitor's reported line.
+    numbered = (f"{s + i}:{line}" for i, line in enumerate(window))
+    return "".join(numbered)[:MAX_TOOL_OUTPUT]
 
 
 def tool_grep(args: dict[str, Any], src_root: str | None = None) -> str:

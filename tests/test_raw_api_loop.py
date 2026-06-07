@@ -282,7 +282,13 @@ def test_read_file_line_range(tmp_path):
     out = tool_read_file(
         {"path": "f.txt", "start_line": 2, "end_line": 3}, str(tmp_path)
     )
-    assert out == "l2\nl3\n"
+    # Absolute line numbers are prefixed so the model can cite exact locations.
+    assert out == "2:l2\n3:l3\n"
+
+
+def test_read_file_numbers_from_one(tmp_path):
+    (tmp_path / "f.txt").write_text("a\nb\nc\n")
+    assert tool_read_file({"path": "f.txt"}, str(tmp_path)) == "1:a\n2:b\n3:c\n"
 
 
 def test_list_dir_lists_entries(tmp_path):
