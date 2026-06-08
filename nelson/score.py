@@ -49,10 +49,18 @@ if TYPE_CHECKING:
 # this only absorbs off-by-a-few reporting, not whole-function slack.
 DEFAULT_LINE_TOLERANCE = 10
 
+# Weight a ``partial`` (right place, wrong bug) carries in the informational
+# half-credit rate. A finding localized to within tolerance still points a human
+# or another model at the right line, so it earns half of a confirmed hit. This
+# is display-only — the primary detection_rate counts confirmed hits, never this.
+PARTIAL_CREDIT = 0.5
+
 # Run outcomes that count toward the detection-rate denominator. judge_error and
 # excluded are deliberately *not* here — an undetermined or never-run case can
-# never be a "miss".
-ELIGIBLE_OUTCOMES = frozenset({"hit", "miss"})
+# never be a "miss". ``partial`` *is* eligible: it sits exactly where it used to
+# count as a "miss", so adding it leaves the denominator (and detection_rate)
+# numerically unchanged — it's a non-hit, just a more informative one.
+ELIGIBLE_OUTCOMES = frozenset({"hit", "miss", "partial"})
 
 
 # -- Localization gate -------------------------------------------------------
@@ -857,7 +865,10 @@ class RunScore:
 
     ``outcome`` is one of:
       hit         — a localized finding the judge confirmed is the same bug;
-      miss        — complete run, no confirmed finding (and none undetermined);
+      partial     — localized finding(s), all confidently judged a *different*
+                    bug: right place (within tolerance), wrong vulnerability.
+                    Eligible (a non-hit in the denominator), worth half credit;
+      miss        — complete run, no localized finding (and none undetermined);
       judge_error — complete run, no confirmed finding but >=1 localized finding
                     the judge could not decide (undetermined, NOT a miss);
       refused     — complete run the refusal judge confirmed declined the task
@@ -889,12 +900,17 @@ class RunScore:
 
     @property
     def eligible(self) -> bool:
-        """Counts toward the detection-rate denominator (hit or genuine miss)."""
+        """Counts toward the detection-rate denominator (hit, partial, or miss)."""
         return self.outcome in ELIGIBLE_OUTCOMES
 
     @property
     def is_hit(self) -> bool:
         return self.outcome == "hit"
+
+    @property
+    def is_partial(self) -> bool:
+        """Right place, wrong bug — eligible, half credit, never a hit."""
+        return self.outcome == "partial"
 
 
 def _outcome_from_findings(findings: list[FindingScore]) -> str:
@@ -908,7 +924,11 @@ def _outcome_from_findings(findings: list[FindingScore]) -> str:
     # was never run), the outcome can't be a miss — it's undetermined.
     if any(f.truth is None or f.truth.error is not None for f in localized):
         return "judge_error"
-    return "miss"
+    # Every localized finding was confidently judged a *different* bug: the model
+    # landed in the right place (within tolerance) but on the wrong vulnerability.
+    # That's worth more than a wrong-place miss — half credit — so it's its own
+    # tier rather than a plain miss.
+    return "partial"
 
 
 class Scorer:
@@ -1275,14 +1295,28 @@ class CaseScore:
     def is_hit(self) -> bool:
         return self.outcome == "hit"
 
+    @property
+    def is_partial(self) -> bool:
+        return self.outcome == "partial"
+
 
 # Best-to-worst precedence for rolling file-run outcomes into a case outcome:
 # any hit wins; failing that, an undetermined file (judge_error) keeps the case
-# out of the denominator rather than calling it a clean miss; a genuine miss
-# (the model engaged on some file) beats a refusal, which beats excluded.
+# out of the denominator rather than calling it a clean miss; a confirmed
+# right-place/wrong-bug ``partial`` beats a plain miss; a genuine miss (the model
+# engaged on some file) beats a refusal, which beats excluded.
 # (Integrity: never count a case as missed when a file that carries the bug went
-# unjudged; a case is only ``refused`` when the model declined on every file.)
-_CASE_OUTCOME_PRECEDENCE = ("hit", "judge_error", "miss", "refused", "excluded")
+# unjudged — judge_error stays above partial so a possibly-suppressed hit isn't
+# downgraded to half credit; a case is only ``refused`` when the model declined
+# on every file.)
+_CASE_OUTCOME_PRECEDENCE = (
+    "hit",
+    "judge_error",
+    "partial",
+    "miss",
+    "refused",
+    "excluded",
+)
 
 
 def _rollup_case_outcome(outcomes: Any) -> str:
@@ -1411,6 +1445,7 @@ class CompetitorDetection:
     competitor_name: str
     hits: int = 0
     misses: int = 0
+    partials: int = 0  # right place, wrong bug — eligible non-hit, half credit
     judge_error: int = 0  # undetermined — excluded from the denominator
     refused: int = 0  # model declined the task — excluded, NOT a miss
     excluded: int = 0  # auth_failed / infra_error — never a miss
@@ -1418,13 +1453,29 @@ class CompetitorDetection:
 
     @property
     def eligible(self) -> int:
-        """Cases that counted: confirmed hits + genuine misses."""
-        return self.hits + self.misses
+        """Cases that counted: confirmed hits + partials + genuine misses."""
+        return self.hits + self.misses + self.partials
 
     @property
     def detection_rate(self) -> float:
-        """Recall over eligible cases (0.0 when nothing was eligible)."""
+        """Recall over eligible cases (0.0 when nothing was eligible).
+
+        Counts confirmed hits only — a ``partial`` is an eligible non-hit, so it
+        sits in the denominator exactly where it used to as a ``miss`` and leaves
+        this number unchanged.
+        """
         return self.hits / self.eligible if self.eligible else 0.0
+
+    @property
+    def half_credit_rate(self) -> float:
+        """Informational: hits plus half-credit partials, over eligible cases.
+
+        Never a ranking key — it surfaces the value of right-place/wrong-bug
+        findings without moving the strict detection standings.
+        """
+        if not self.eligible:
+            return 0.0
+        return (self.hits + PARTIAL_CREDIT * self.partials) / self.eligible
 
 
 def detection_report(run_scores: list[RunScore]) -> list[CompetitorDetection]:
@@ -1441,6 +1492,8 @@ def detection_report(run_scores: list[RunScore]) -> list[CompetitorDetection]:
         d.judge_cost += cs.judge_cost
         if cs.outcome == "hit":
             d.hits += 1
+        elif cs.outcome == "partial":
+            d.partials += 1
         elif cs.outcome == "miss":
             d.misses += 1
         elif cs.outcome == "judge_error":
@@ -1549,6 +1602,7 @@ class LeaderboardEntry:
     # Detection (rolled up to cases).
     hits: int = 0
     misses: int = 0
+    partials: int = 0  # right place, wrong bug — eligible non-hit, half credit
     judge_error: int = 0
     refused: int = 0  # model declined — excluded from detection, reported apart
     excluded: int = 0
@@ -1574,21 +1628,38 @@ class LeaderboardEntry:
 
     @property
     def eligible(self) -> int:
-        """Cases that counted toward detection: hits + genuine misses (pooled)."""
-        return self.hits + self.misses
+        """Cases that counted toward detection: hits + partials + misses (pooled).
+
+        A ``partial`` sits in the denominator exactly where it used to as a
+        ``miss``, so pooling it here leaves ``detection_rate`` unchanged.
+        """
+        return self.hits + self.misses + self.partials
 
     @property
     def detection_rate(self) -> float:
-        """Detection rate.
+        """Detection rate (confirmed hits over eligible cases).
 
-        For repeated runs this is the **mean across trials** (each trial scored on
-        its own, then averaged) — a typical single run, not best-of-N. Trials with
-        zero eligible cases count as 0.0 so the mean is truly across trials.
+        A ``partial`` is an eligible non-hit, so it never lifts this number — the
+        strict standings are unaffected by the half-credit tier. For repeated runs
+        this is the **mean across trials** (each trial scored on its own, then
+        averaged) — a typical single run, not best-of-N. Trials with zero eligible
+        cases count as 0.0 so the mean is truly across trials.
         """
         if self.trial_rates:
             denom = max(self.n_trials, len(self.trial_rates))
             return sum(self.trial_rates) / denom if denom else 0.0
         return self.hits / self.eligible if self.eligible else 0.0
+
+    @property
+    def half_credit_rate(self) -> float:
+        """Informational: hits plus half-credit partials, over eligible cases.
+
+        Pooled (not trial-averaged) and never a ranking key — it shows the value
+        of right-place/wrong-bug findings without moving the strict standings.
+        """
+        if not self.eligible:
+            return 0.0
+        return (self.hits + PARTIAL_CREDIT * self.partials) / self.eligible
 
     @property
     def trial_min_rate(self) -> float:
@@ -1719,6 +1790,7 @@ def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
                 knowledge_cutoff=cutoff.get(name),
                 hits=d.hits if d else 0,
                 misses=d.misses if d else 0,
+                partials=d.partials if d else 0,
                 judge_error=d.judge_error if d else 0,
                 refused=d.refused if d else 0,
                 excluded=d.excluded if d else 0,

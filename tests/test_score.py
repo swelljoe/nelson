@@ -199,7 +199,8 @@ def test_score_run_off_target_finding_is_a_miss_without_judging(tmp_path):
     assert f["judge_truth_verdict"] is None
 
 
-def test_score_run_localized_but_different_bug_is_a_miss(tmp_path):
+def test_score_run_localized_but_different_bug_is_a_partial(tmp_path):
+    # Right place (within tolerance), wrong bug: half credit, not a miss.
     db = Database(tmp_path / "t.db")
     case_id = _case(db)
     run_id = _complete_run(db, case_id, findings=[("Foo.java", 76)])
@@ -207,8 +208,10 @@ def test_score_run_localized_but_different_bug_is_a_miss(tmp_path):
 
     rs = Scorer(db, judge).score_run(run_id)
 
-    assert rs.outcome == "miss"
-    assert rs.eligible  # a genuine miss still counts in the denominator
+    assert rs.outcome == "partial"
+    assert rs.is_partial
+    assert not rs.is_hit
+    assert rs.eligible  # a partial still counts in the denominator (where a miss did)
     assert judge.calls == 1
 
 
@@ -320,6 +323,31 @@ def test_detection_report_rates_and_exclusions():
     assert report["beta"].detection_rate == 1.0
 
 
+def test_detection_report_partial_is_eligible_non_hit():
+    # A partial sits in the denominator exactly where a miss did, so it never
+    # lifts detection_rate; half_credit_rate surfaces its half credit.
+    from nelson.score import RunScore
+
+    scores = [
+        RunScore(1, "c1", "alpha", "complete", "hit"),
+        RunScore(2, "c2", "alpha", "complete", "partial"),
+        RunScore(3, "c3", "alpha", "complete", "miss"),
+        RunScore(4, "c4", "alpha", "complete", "partial"),
+    ]
+    d = {r.competitor_name: r for r in detection_report(scores)}["alpha"]
+    assert d.hits == 1 and d.partials == 2 and d.misses == 1
+    assert d.eligible == 4  # hits + partials + misses
+    assert d.detection_rate == 0.25  # 1/4 — unchanged by the partials
+    # (1 + 0.5*2) / 4 = 0.5
+    assert d.half_credit_rate == pytest.approx(0.5)
+
+
+def test_competitor_detection_half_credit_rate_zero_eligible():
+    d = CompetitorDetection("x", hits=0, partials=0, misses=0, excluded=2)
+    assert d.eligible == 0
+    assert d.half_credit_rate == 0.0
+
+
 def test_drop_competitors_filters_named_competitors():
     from nelson.score import RunScore, drop_competitors
 
@@ -367,6 +395,41 @@ def test_case_scores_undetermined_beats_miss():
         RunScore(2, "GHSA-b", "alpha", "complete", "judge_error"),
     ]
     assert case_scores(runs)[0].outcome == "judge_error"
+
+
+def test_case_scores_partial_beats_miss():
+    from nelson.score import RunScore, case_scores
+
+    # No hit; one file right-place/wrong-bug -> the case is a partial, not a miss.
+    runs = [
+        RunScore(1, "GHSA-c", "alpha", "complete", "miss"),
+        RunScore(2, "GHSA-c", "alpha", "complete", "partial"),
+    ]
+    cs = case_scores(runs)[0]
+    assert cs.outcome == "partial"
+    assert cs.is_partial and cs.eligible and not cs.is_hit
+
+
+def test_case_scores_undetermined_beats_partial():
+    from nelson.score import RunScore, case_scores
+
+    # Integrity: an unjudged file may hide a hit, so judge_error must outrank a
+    # confirmed partial — a possible hit is never downgraded to half credit.
+    runs = [
+        RunScore(1, "GHSA-d", "alpha", "complete", "partial"),
+        RunScore(2, "GHSA-d", "alpha", "complete", "judge_error"),
+    ]
+    assert case_scores(runs)[0].outcome == "judge_error"
+
+
+def test_case_scores_hit_beats_partial():
+    from nelson.score import RunScore, case_scores
+
+    runs = [
+        RunScore(1, "GHSA-e", "alpha", "complete", "partial"),
+        RunScore(2, "GHSA-e", "alpha", "complete", "hit"),
+    ]
+    assert case_scores(runs)[0].outcome == "hit"
 
 
 def test_noise_report_per_trial_detection_and_flaky_cases():
@@ -600,7 +663,7 @@ def test_score_run_fp_judges_localized_different_bug(tmp_path):
 
     assert truth.calls == 1  # localized -> truth-judged
     assert fp.calls == 1  # different_bug -> also FP-judged
-    assert rs.outcome == "miss"  # detection: not the target bug
+    assert rs.outcome == "partial"  # detection: right place, not the target bug
     assert rs.findings[0].fp_category == "real_other"
     assert db.run_findings(run_id)[0]["judge_fp_verdict"] == "real_bug"
 

@@ -1300,18 +1300,21 @@ def _emit_run_score(rs) -> None:
 def _emit_detection_report(reports) -> None:
     """Per-competitor detection table."""
     click.echo(
-        f"\n{'COMPETITOR':<26} {'DET':>5} {'HIT':>4} {'MISS':>4} "
+        f"\n{'COMPETITOR':<26} {'DET':>5} {'HIT':>4} {'PART':>4} {'MISS':>4} "
         f"{'JERR':>4} {'REFU':>4} {'EXCL':>4} {'JUDGE$':>8}"
     )
     for d in reports:
         rate = f"{d.detection_rate:.0%}" if d.eligible else "-"
         click.echo(
-            f"{d.competitor_name:<26} {rate:>5} {d.hits:>4} {d.misses:>4} "
-            f"{d.judge_error:>4} {d.refused:>4} {d.excluded:>4} ${d.judge_cost:>7.3f}"
+            f"{d.competitor_name:<26} {rate:>5} {d.hits:>4} {d.partials:>4} "
+            f"{d.misses:>4} {d.judge_error:>4} {d.refused:>4} {d.excluded:>4} "
+            f"${d.judge_cost:>7.3f}"
         )
     click.echo(
-        "\nDET = hits / eligible (hits + genuine misses). JERR (undetermined), "
-        "REFU (model refused) and EXCL (auth/infra) are never counted as misses."
+        "\nDET = hits / eligible (hits + partials + genuine misses). PART = right "
+        "spot, wrong bug (eligible non-hit, half credit, never lifts DET). JERR "
+        "(undetermined), REFU (model refused) and EXCL (auth/infra) are never "
+        "counted as misses."
     )
 
 
@@ -1438,11 +1441,14 @@ def bench_score(
 def _emit_leaderboard(entries) -> None:
     """Per-competitor leaderboard table (detection + precision + economics)."""
     click.echo(
-        f"\n{'#':>2} {'COMPETITOR':<26} {'SIZE':<8} {'DET':>5} {'PREC':>5} "
-        f"{'FP/C':>5} {'OTHER':>5} {'COST/C':>8} {'LAT':>6} {'TOK/C':>7} {'CASES':>5}"
+        f"\n{'#':>2} {'COMPETITOR':<26} {'SIZE':<8} {'DET':>5} {'DET+½':>6} "
+        f"{'PART':>4} {'PREC':>5} {'FP/C':>5} {'OTHER':>5} {'COST/C':>8} "
+        f"{'LAT':>6} {'TOK/C':>7} {'CASES':>5}"
     )
     for i, e in enumerate(entries, 1):
         det = f"{e.detection_rate:.0%}" if e.eligible else "-"
+        dethalf = f"{e.half_credit_rate:.0%}" if e.eligible else "-"
+        part = str(e.partials) if e.partials else "-"
         prec = f"{e.precision:.0%}" if e.precision is not None else "-"
         fpc = f"{e.fp_per_case:.2f}" if e.fp_per_case is not None else "-"
         other = str(e.real_others) if e.real_others else "-"
@@ -1452,13 +1458,16 @@ def _emit_leaderboard(entries) -> None:
         tok = _fmt_tokens(tpc) if tpc is not None else "-"
         click.echo(
             f"{i:>2} {e.competitor_name:<26} {(e.size_class or '-'):<8} "
-            f"{det:>5} {prec:>5} {fpc:>5} {other:>5} {cpc:>8} {lat:>6} "
-            f"{tok:>7} {e.cases:>5}"
+            f"{det:>5} {dethalf:>6} {part:>4} {prec:>5} {fpc:>5} {other:>5} "
+            f"{cpc:>8} {lat:>6} {tok:>7} {e.cases:>5}"
         )
     click.echo(
-        "\nRanked by detection, then precision, then cost/case. OTHER = confirmed "
-        "real bugs found that are not the known target CVE. COST/C, LAT and TOK/C "
-        "are the competitor's own spend/time/tokens per audited case (judge spend "
+        "\nRanked by detection, then precision, then cost/case. DET+½ (= (hits + "
+        "0.5*partials)/eligible) and PART (cases localized to the right spot but "
+        "judged a different bug) are informational — a partial is an eligible "
+        "non-hit and never moves DET or the rank. OTHER = confirmed real bugs found "
+        "that are not the known target CVE. COST/C, LAT and TOK/C are the "
+        "competitor's own spend/time/tokens per audited case (judge spend "
         "excluded). TOK/C reflects provider-reported usage — under-reporting compat "
         "endpoints understate it."
     )

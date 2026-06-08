@@ -24,6 +24,7 @@ _CSS = """\
   --accent: #e94560;
   --green: #4ecca3;
   --yellow: #f0c040;
+  --amber: #c98a2e;
   --orange: #e07020;
   --red: #e94560;
   --blue: #4ea8de;
@@ -724,6 +725,7 @@ _LEADERBOARD_EXTRA_CSS = """\
 .matrix td, .matrix th { text-align: center; }
 .matrix th.comp, .matrix td.comp { text-align: left; font-family: monospace; }
 .cell-hit { color: var(--green); font-weight: 700; }
+.cell-partial { color: var(--amber); font-weight: 700; }
 .cell-miss { color: var(--text-muted); }
 .cell-jerr { color: var(--yellow); }
 .cell-refu { color: var(--cyan); font-style: italic; }
@@ -917,6 +919,7 @@ def _scatter_svg(
 
 _OUTCOME_CELL = {
     "hit": ("cell-hit", "HIT"),
+    "partial": ("cell-partial", "part"),
     "miss": ("cell-miss", "miss"),
     "judge_error": ("cell-jerr", "jerr"),
     "refused": ("cell-refu", "refu"),
@@ -1047,9 +1050,16 @@ def generate_leaderboard_report(
         "<table><tr>"
         '<th class="lead-rank">#</th><th>Competitor</th><th>Size</th>'
         '<th class="num">Detect</th>'
-        '<th class="num" title="Single run: case hits / eligible (hits + genuine '
-        "misses). Repeated runs (--repeat): per-trial detection range (min-max); "
-        'hover a cell for the best-of-N pooled count and the spread.">Hits/Elig</th>'
+        '<th class="num" title="Informational only (not the ranking key): hits plus '
+        "half credit for partials — (hits + 0.5*partials) / eligible. Pooled across "
+        'trials.">det+&frac12;</th>'
+        '<th class="num" title="Single run: case hits / eligible (hits + partials + '
+        "genuine misses). Repeated runs (--repeat): per-trial detection range "
+        '(min-max); hover a cell for the best-of-N pooled count and the spread.">'
+        "Hits/Elig</th>"
+        '<th class="num" title="Cases localized to the right spot (within tolerance) '
+        "but judged a different bug — half credit, never counted as a hit. Pooled "
+        'across trials.">Partial</th>'
         '<th class="num">Precision</th><th class="num">FP/case</th>'
         '<th class="num" title="Confirmed real bugs the model found that are not '
         "the known target CVE — credited capability, but does not count toward "
@@ -1101,7 +1111,9 @@ def generate_leaderboard_report(
             f"<td>{escape(_display_name(e.competitor_name))}{partial}{star}</td>"
             f"<td>{escape(e.size_class or '—')}</td>"
             f'<td class="num">{detect}{partial}</td>'
+            f'<td class="num">{_pct(e.half_credit_rate) if e.eligible else "—"}</td>'
             f'<td class="num">{hits_elig}</td>'
+            f'<td class="num cell-partial">{e.partials if e.partials else "—"}</td>'
             f'<td class="num">{_pct(e.precision)}</td>'
             f'<td class="num">{f"{e.fp_per_case:.2f}" if e.fp_per_case is not None else "—"}</td>'
             f'<td class="num">{e.real_others if e.real_others else "—"}</td>'
@@ -1112,9 +1124,14 @@ def generate_leaderboard_report(
         )
     parts.append("</table>")
     parts.append(
-        '<p class="muted">Detect = case hits / eligible (hits + genuine misses); '
-        "undetermined, refused, and auth/infra-excluded cases are not in the "
-        "denominator. "
+        '<p class="muted">Detect = case hits / eligible (hits + partials + genuine '
+        "misses); undetermined, refused, and auth/infra-excluded cases are not in "
+        "the denominator. Partial = cases localized to the right spot but judged a "
+        "<em>different</em> bug — right place, wrong bug. It is an eligible non-hit "
+        "(it sits in the denominator where it would otherwise be a miss), so it "
+        "never moves Detect or the ranking; det+&frac12; "
+        "(= (hits + 0.5&middot;partials) / eligible) shows its half-credit value "
+        "informationally. "
         "Precision = true findings / (true + false positives). Other real = "
         "confirmed real bugs the model found that are not the planted target CVE "
         "(extra capability, but not counted as detection). Cost/latency are "
@@ -1257,7 +1274,8 @@ def generate_leaderboard_report(
             else ""
         )
         parts.append(
-            '<p class="muted">HIT = detected; miss = looked, found nothing; '
+            '<p class="muted">HIT = detected; part = right spot, wrong bug '
+            "(half credit, eligible non-hit); miss = looked, found nothing; "
             "jerr = judge undetermined (out of denominator); refu = model refused "
             "the task (out of denominator, never a miss); excl = auth/infra "
             f"failure (never a miss); · = not run.{flaky_note}</p>"
