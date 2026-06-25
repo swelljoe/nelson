@@ -50,29 +50,61 @@ SEMGREP_WALL_TIMEOUT = 240  # whole-scan subprocess cap (per-rule cap is --timeo
 # tree-sitter (read-grep-treesitter profile): map a file extension to the grammar
 # name (and its baked-in per-language module). Covers the corpus languages.
 TS_LANG_BY_EXT = {
-    ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp",
-    ".hpp": "cpp", ".hh": "cpp", ".go": "go", ".java": "java",
-    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
-    ".py": "python", ".rs": "rust", ".php": "php",
+    ".c": "c",
+    ".h": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
+    ".hh": "cpp",
+    ".go": "go",
+    ".java": "java",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".py": "python",
+    ".rs": "rust",
+    ".php": "php",
 }
 TS_MODULE_BY_LANG = {
-    "c": "tree_sitter_c", "cpp": "tree_sitter_cpp", "go": "tree_sitter_go",
-    "java": "tree_sitter_java", "javascript": "tree_sitter_javascript",
-    "python": "tree_sitter_python", "rust": "tree_sitter_rust",
+    "c": "tree_sitter_c",
+    "cpp": "tree_sitter_cpp",
+    "go": "tree_sitter_go",
+    "java": "tree_sitter_java",
+    "javascript": "tree_sitter_javascript",
+    "python": "tree_sitter_python",
+    "rust": "tree_sitter_rust",
     "php": "tree_sitter_php",
 }
 # Node types that introduce a named definition, unioned across those grammars.
 # Used to extract a file outline and to resolve where a symbol is defined.
-TS_DEF_TYPES = frozenset({
-    "function_definition", "function_declaration", "function_item",
-    "method_definition", "method_declaration", "constructor_declaration",
-    "class_definition", "class_declaration", "class_specifier",
-    "struct_specifier", "struct_item", "enum_specifier", "enum_item",
-    "union_specifier", "interface_declaration", "trait_item", "impl_item",
-    "trait_declaration", "enum_declaration",
-    "type_spec", "type_alias_declaration",
-    "module", "namespace_definition",
-})
+TS_DEF_TYPES = frozenset(
+    {
+        "function_definition",
+        "function_declaration",
+        "function_item",
+        "method_definition",
+        "method_declaration",
+        "constructor_declaration",
+        "class_definition",
+        "class_declaration",
+        "class_specifier",
+        "struct_specifier",
+        "struct_item",
+        "enum_specifier",
+        "enum_item",
+        "union_specifier",
+        "interface_declaration",
+        "trait_item",
+        "impl_item",
+        "trait_declaration",
+        "enum_declaration",
+        "type_spec",
+        "type_alias_declaration",
+        "module",
+        "namespace_definition",
+    }
+)
 TS_NAME_NODE_TYPES = frozenset(
     {"identifier", "field_identifier", "type_identifier", "name"}
 )

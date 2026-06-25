@@ -182,8 +182,8 @@ THEME_HEAD = (
 
 # Self-contained: flips data-theme on <html> and persists the choice.
 THEME_TOGGLE = (
-    "<button class=\"theme-toggle\" type=\"button\" "
-    "onclick=\"(function(){var r=document.documentElement;"
+    '<button class="theme-toggle" type="button" '
+    'onclick="(function(){var r=document.documentElement;'
     "var t=r.getAttribute('data-theme')==='dark'?'light':'dark';"
     "r.setAttribute('data-theme',t);"
     "try{localStorage.setItem('nelson-theme',t);}catch(e){}})()\">"
@@ -208,8 +208,8 @@ def page(
     sub = f'<p class="subtitle">{escape(subtitle)}</p>' if subtitle else ""
     width_css = f"body{{max-width:{max_width}}}" if max_width != "1100px" else ""
     return (
-        f"<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-        f"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        f'<meta name="viewport" content="width=device-width,initial-scale=1">'
         f"<title>{escape(title)}</title>{THEME_HEAD}"
         f"<style>{THEME_VARS}{BASE_CSS}{extra_css}{width_css}</style></head>"
         f"<body>{THEME_TOGGLE}\n<h1>{escape(title)}</h1>{sub}\n{body}\n</body></html>"

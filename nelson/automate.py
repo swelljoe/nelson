@@ -208,9 +208,7 @@ def plan_matrix(
             if recency_filter and not case_is_fresh_for(case, comp):
                 continue
             cell_repo_scope = repo_scope or competitor_repo_scope(comp)
-            targets = (
-                [REPO_SCOPE_TARGET] if cell_repo_scope else vulnerable_files(case)
-            )
+            targets = [REPO_SCOPE_TARGET] if cell_repo_scope else vulnerable_files(case)
             for target in targets:
                 for trial in range(max(1, repeat)):
                     statuses = existing.get(
