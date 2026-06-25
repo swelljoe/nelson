@@ -9,102 +9,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .db import Database
+from .report_style import BASE_CSS, THEME_HEAD, THEME_TOGGLE, THEME_VARS
 
 if TYPE_CHECKING:
     from .score import CaseScore, CompetitorNoise, LeaderboardEntry
 
-# Shared CSS used by both report types
-_CSS = """\
-:root {
-  --bg: #1a1a2e;
-  --surface: #16213e;
-  --surface2: #0f3460;
-  --text: #e0e0e0;
-  --text-muted: #8899aa;
-  --accent: #e94560;
-  --green: #4ecca3;
-  --yellow: #f0c040;
-  --amber: #c98a2e;
-  --orange: #e07020;
-  --red: #e94560;
-  --blue: #4ea8de;
-  --cyan: #56cfe1;
-  --border: #2a3a5e;
-}
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
-  background: var(--bg); color: var(--text);
-  line-height: 1.6; padding: 2rem;
-  max-width: 1200px; margin: 0 auto;
-}
-h1 { color: var(--accent); margin-bottom: 0.5rem; font-size: 1.8rem; }
-h2 { color: var(--blue); margin: 1.5rem 0 0.75rem; font-size: 1.3rem; }
-h3 { color: var(--cyan); margin: 1rem 0 0.5rem; font-size: 1.1rem; }
-.subtitle { color: var(--text-muted); margin-bottom: 1.5rem; }
-table {
-  width: 100%; border-collapse: collapse;
-  margin: 0.75rem 0; background: var(--surface);
-  border-radius: 6px; overflow: hidden;
-}
-th, td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid var(--border); }
-th { background: var(--surface2); color: var(--blue); font-weight: 600; }
-tr:last-child td { border-bottom: none; }
-tr:hover { background: rgba(78, 168, 222, 0.05); }
-.badge {
-  display: inline-block; padding: 0.15rem 0.5rem;
-  border-radius: 3px; font-size: 0.8rem; font-weight: 600;
-}
-.badge-high, .badge-confirmed { background: rgba(233, 69, 96, 0.2); color: var(--red); }
-.badge-medium, .badge-needs_review { background: rgba(240, 192, 64, 0.2); color: var(--yellow); }
-.badge-low, .badge-unreviewed { background: rgba(136, 153, 170, 0.2); color: var(--text-muted); }
-.badge-false_positive, .badge-resolved { background: rgba(78, 204, 163, 0.2); color: var(--green); }
-.badge-complete { background: rgba(78, 204, 163, 0.2); color: var(--green); }
-.badge-error { background: rgba(233, 69, 96, 0.2); color: var(--red); }
-.badge-running, .badge-pending { background: rgba(240, 192, 64, 0.2); color: var(--yellow); }
-.card {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 6px; padding: 1rem; margin: 0.75rem 0;
-}
-.finding { border-left: 3px solid var(--border); }
-.finding-high { border-left-color: var(--red); }
-.finding-medium { border-left-color: var(--yellow); }
-.finding-low { border-left-color: var(--text-muted); }
-.finding-header { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
-.code-block {
-  background: var(--bg); padding: 0.5rem 0.75rem; margin: 0.5rem 0;
-  border-radius: 4px; font-family: 'Fira Code', monospace;
-  font-size: 0.85rem; overflow-x: auto; white-space: pre-wrap;
-}
-.review-box {
-  margin-top: 0.5rem; padding: 0.5rem 0.75rem;
-  background: var(--bg); border-radius: 4px;
-  font-size: 0.9rem;
-}
-.stats-grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 0.75rem; margin: 0.75rem 0;
-}
-.stat-card {
-  background: var(--surface); border: 1px solid var(--border);
-  border-radius: 6px; padding: 0.75rem; text-align: center;
-}
-.stat-value { font-size: 1.8rem; font-weight: 700; }
-.stat-label { font-size: 0.8rem; color: var(--text-muted); }
-.file-group { margin: 1rem 0; }
-.file-name {
-  font-family: monospace; font-size: 0.95rem;
-  color: var(--cyan); padding: 0.5rem; cursor: pointer;
-  background: var(--surface2); border-radius: 4px 4px 0 0;
-}
-footer {
-  margin-top: 2rem; padding-top: 1rem;
-  border-top: 1px solid var(--border);
-  color: var(--text-muted); font-size: 0.8rem;
-}
-a { color: var(--blue); text-decoration: none; }
-a:hover { text-decoration: underline; }
-"""
+# Shared, themeable CSS for every report (see nelson/report_style.py). The four
+# generators below inject THEME_HEAD into <head> and THEME_TOGGLE after <body>.
+_CSS = THEME_VARS + BASE_CSS
 
 
 def _badge(value: str | None) -> str:
@@ -166,9 +78,9 @@ def generate_scan_report(db: Database, scan_id: int) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Nelson Scan Report — Scan {scan_id}</title>
-<style>{_CSS}</style>
+<style>{_CSS}</style>{THEME_HEAD}
 </head>
-<body>
+<body>{THEME_TOGGLE}
 <h1>Nelson Scan Report</h1>
 <p class="subtitle">Scan {scan_id} — {escape(mode)} mode — {escape(s["target_dir"])}</p>
 """)
@@ -365,9 +277,9 @@ def generate_summary_report(db: Database) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Nelson Executive Summary</title>
-<style>{_CSS}</style>
+<style>{_CSS}</style>{THEME_HEAD}
 </head>
-<body>
+<body>{THEME_TOGGLE}
 <h1>Nelson Executive Summary</h1>
 <p class="subtitle">{len(scans)} scan{"s" if len(scans) != 1 else ""} — generated {_timestamp()}</p>
 """)
@@ -540,8 +452,8 @@ _COMPARE_EXTRA_CSS = """\
   border-radius: 999px; font-weight: 700; font-size: 0.85rem;
   background: var(--surface2); color: var(--blue);
 }
-.agreement-strong { background: rgba(233, 69, 96, 0.2); color: var(--red); }
-.agreement-partial { background: rgba(240, 192, 64, 0.2); color: var(--yellow); }
+.agreement-strong { background: var(--bad-bg); color: var(--red); }
+.agreement-partial { background: var(--amber-bg); color: var(--yellow); }
 .flag-row {
   display: grid;
   grid-template-columns: 1.2rem 14rem 4rem auto auto;
@@ -606,9 +518,9 @@ def generate_compare_report(scan_ids, models, clusters) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Nelson Model Comparison — {escape(label)}</title>
-<style>{_CSS}{_COMPARE_EXTRA_CSS}</style>
+<style>{_CSS}{_COMPARE_EXTRA_CSS}</style>{THEME_HEAD}
 </head>
-<body>
+<body>{THEME_TOGGLE}
 <h1>Model Comparison</h1>
 <p class="subtitle">{escape(label)} — {n_models} models — {len(clusters)} clusters</p>
 """)
@@ -1024,9 +936,9 @@ def generate_leaderboard_report(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{escape(title)}</title>
-<style>{_CSS}{_LEADERBOARD_EXTRA_CSS}</style>
+<style>{_CSS}{_LEADERBOARD_EXTRA_CSS}</style>{THEME_HEAD}
 </head>
-<body>
+<body>{THEME_TOGGLE}
 <h1>{escape(title)}</h1>
 <p class="subtitle">{len(entries)} competitors — {total_hits} case hits across \
 {total_cases} audited cases</p>

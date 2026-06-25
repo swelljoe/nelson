@@ -14,14 +14,24 @@ import pytest
 import nelson.raw_api_loop as ral
 from nelson.raw_api_loop import (
     MAX_HTTP_RETRIES,
+    SEMGREP_TOOLS,
+    TOOLS,
+    TREESITTER_TOOLS,
+    _format_semgrep,
     _post_chat,
     _resolve_in_src,
+    _ts_lang_for,
     compute_cost,
     dispatch_tool,
     run_loop,
+    select_system_prompt,
+    select_tools,
     tool_grep,
     tool_list_dir,
+    tool_outline,
     tool_read_file,
+    tool_semgrep,
+    tool_symbol,
     usage_delta,
 )
 
@@ -116,6 +126,63 @@ def test_loop_no_final_array_falls_back_to_last_text(tmp_path):
         src_root=str(tmp_path),
     )
     assert final_text == "I could not find anything exploitable."
+
+
+# -- Native (plain-text) tool calls, e.g. DeepSeek DSML ----------------------
+
+_DSML = "｜｜DSML｜｜"  # noqa: RUF001  DeepSeek's native tag prefix (fullwidth bars)
+
+
+def _native_call(name, args):
+    """An assistant turn that wrote a tool call as plain-text XML (DeepSeek DSML),
+    with NO structured ``tool_calls`` field — the case the fallback must rescue."""
+    params = "".join(
+        f'<{_DSML}parameter name="{k}">{v}</{_DSML}parameter>' for k, v in args.items()
+    )
+    content = f'<{_DSML}invoke name="{name}">{params}</{_DSML}invoke>'
+    return {
+        "choices": [{"message": {"role": "assistant", "content": content}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+
+
+def test_parse_native_tool_calls_reads_dsml_and_ignores_plain_text():
+    from nelson.raw_api_loop import parse_native_tool_calls
+
+    content = (
+        f'<{_DSML}invoke name="read_file">'
+        f'<{_DSML}parameter name="path">/src/a.c</{_DSML}parameter>'
+        f'<{_DSML}parameter name="start_line">5</{_DSML}parameter>'
+        f"</{_DSML}invoke>"
+    )
+    assert parse_native_tool_calls(content) == [
+        {"name": "read_file", "args": {"path": "/src/a.c", "start_line": 5}}
+    ]
+    # A normal final answer (JSON array) is not a tool call.
+    assert parse_native_tool_calls('[{"file": "a.c", "line": 1}]') == []
+    assert parse_native_tool_calls("") == []
+
+
+def test_loop_executes_native_text_tool_call_then_continues(tmp_path):
+    # DeepSeek falls back to DSML mid-loop: the loop must run the tool and keep
+    # going, not mistake the DSML turn for the final answer.
+    (tmp_path / "a.c").write_text("int main() { return 0; }\n")
+    answer = '[{"file": "a.c", "line": 1, "confidence": "low"}]'
+    post = _post_returning(
+        _native_call("read_file", {"path": "a.c"}),
+        _final(answer),
+    )
+    final_text, _tin, _tout, steps, _cost = run_loop(
+        "audit a.c",
+        base_url="https://api.deepseek.com",
+        model="m",
+        api_key="k",
+        post=post,
+        src_root=str(tmp_path),
+    )
+    assert final_text == answer  # reached the real answer, did not stop at the DSML
+    assert len(steps) == 2
+    assert steps[0]["tool_calls"] == ["read_file(native)"]
 
 
 def test_loop_sums_provider_cost_and_requests_it_on_openrouter(tmp_path):
@@ -299,6 +366,132 @@ def test_list_dir_lists_entries(tmp_path):
 
 def test_dispatch_unknown_tool_is_error():
     assert "unknown tool" in dispatch_tool("nope", {}, None)
+
+
+# -- Semgrep tool + profile selection ---------------------------------------
+
+
+def test_select_tools_default_is_read_grep(monkeypatch):
+    monkeypatch.delenv("NELSON_TOOL_PROFILE", raising=False)
+    assert select_tools() == TOOLS
+    monkeypatch.setenv("NELSON_TOOL_PROFILE", "read-grep")
+    assert select_tools() == TOOLS
+
+
+def test_select_tools_semgrep_profile_adds_semgrep(monkeypatch):
+    monkeypatch.setenv("NELSON_TOOL_PROFILE", "read-grep-semgrep")
+    tools = select_tools()
+    assert tools == SEMGREP_TOOLS
+    names = {t["function"]["name"] for t in tools}
+    assert "semgrep" in names and {"read_file", "grep", "list_dir"} <= names
+
+
+def test_select_system_prompt_control_is_baseline(monkeypatch):
+    # Control profile must be byte-identical to the baseline system prompt.
+    monkeypatch.setenv("NELSON_TOOL_PROFILE", "read-grep")
+    assert select_system_prompt() == ral.SYSTEM_PROMPT
+    monkeypatch.delenv("NELSON_TOOL_PROFILE", raising=False)
+    assert select_system_prompt() == ral.SYSTEM_PROMPT
+
+
+def test_select_system_prompt_semgrep_adds_note(monkeypatch):
+    monkeypatch.setenv("NELSON_TOOL_PROFILE", "read-grep-semgrep")
+    prompt = select_system_prompt()
+    assert prompt.startswith(ral.SYSTEM_PROMPT)
+    assert "semgrep" in prompt and "does NOT prove the file is safe" in prompt
+
+
+def test_semgrep_rejects_escape(tmp_path):
+    # Same sandbox guarantee as the other tools — never scan outside /src.
+    assert "outside" in tool_semgrep({"path": "../etc"}, str(tmp_path))
+
+
+def test_semgrep_dispatches_and_parses(tmp_path, monkeypatch):
+    # No real semgrep binary needed: inject a scripted CompletedProcess so the
+    # JSON-parse + render path is what's under test.
+    (tmp_path / "q.py").write_text("x = 1\n")
+    payload = {
+        "results": [
+            {
+                "check_id": "python.lang.security.sqli",
+                "path": "q.py",
+                "start": {"line": 12},
+                "extra": {
+                    "severity": "ERROR",
+                    "message": "User input flows into SQL query.",
+                    "dataflow_trace": {
+                        "taint_source": [
+                            "Loc",
+                            [{"path": "q.py", "start": {"line": 3}}],
+                        ],
+                        "taint_sink": [
+                            "Loc",
+                            [{"path": "q.py", "start": {"line": 12}}],
+                        ],
+                    },
+                },
+            }
+        ]
+    }
+
+    class _Proc:
+        stdout = json.dumps(payload)
+        stderr = ""
+
+    monkeypatch.setattr(ral.subprocess, "run", lambda *a, **k: _Proc())
+    out = tool_semgrep({"path": "q.py"}, str(tmp_path))
+    assert "1 finding" in out
+    assert "q.py:12" in out and "python.lang.security.sqli" in out
+    assert "dataflow: source q.py:3 -> sink q.py:12" in out
+
+
+# -- tree-sitter tools + profile selection ----------------------------------
+
+
+def test_select_tools_treesitter_profile_adds_structure_tools(monkeypatch):
+    monkeypatch.setenv("NELSON_TOOL_PROFILE", "read-grep-treesitter")
+    tools = select_tools()
+    assert tools == TREESITTER_TOOLS
+    names = {t["function"]["name"] for t in tools}
+    assert {"outline", "symbol"} <= names
+    assert {"read_file", "grep", "list_dir"} <= names
+    assert "semgrep" not in names  # profiles don't bleed into each other
+
+
+def test_select_system_prompt_treesitter_adds_note(monkeypatch):
+    monkeypatch.setenv("NELSON_TOOL_PROFILE", "read-grep-treesitter")
+    prompt = select_system_prompt()
+    assert prompt.startswith(ral.SYSTEM_PROMPT)
+    assert "tree-sitter" in prompt and "outline" in prompt and "symbol" in prompt
+
+
+def test_ts_lang_for_maps_extensions():
+    assert _ts_lang_for("a/b/foo.c") == "c"
+    assert _ts_lang_for("Foo.java") == "java"
+    assert _ts_lang_for("x.go") == "go"
+    assert _ts_lang_for("y.py") == "python"
+    assert _ts_lang_for("README.md") is None
+
+
+def test_outline_rejects_escape(tmp_path):
+    assert "outside" in tool_outline({"path": "../etc/passwd"}, str(tmp_path))
+
+
+def test_outline_unsupported_language(tmp_path):
+    (tmp_path / "notes.txt").write_text("hello")
+    assert "unsupported" in tool_outline({"path": "notes.txt"}, str(tmp_path))
+
+
+def test_symbol_empty_name_is_error(tmp_path):
+    assert "empty name" in tool_symbol({"name": ""}, str(tmp_path))
+
+
+def test_format_semgrep_no_findings_is_distinct_from_error():
+    assert "no findings" in _format_semgrep({"results": []}, "f.c")
+    # Scan errors must not read as a clean "nothing found".
+    scan = {"results": [], "errors": [{"message": "parse fail"}]}
+    errd = _format_semgrep(scan, "f.c")
+    assert "error" in errd and "parse fail" in errd
 
 
 # -- Cost --------------------------------------------------------------------
