@@ -486,7 +486,7 @@ def _ts_parser(lang: str) -> Any:
     # the other profiles stdlib-clean) on a host without the packages.
     import importlib
 
-    from tree_sitter import Language, Parser
+    from tree_sitter import Language, Parser  # ty: ignore[unresolved-import]
 
     module = importlib.import_module(TS_MODULE_BY_LANG[lang])
     # Most grammar packages expose `language()`; a few (php, typescript) name it
