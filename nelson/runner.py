@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -40,13 +41,49 @@ if TYPE_CHECKING:
 # Minimal Fedora base + the tools the agent's own grep/file tools shell out to.
 # The claude binary itself is bind-mounted at run time (see ClaudeCodeRuntime).
 # python3 backs the raw-api-loop runtime's in-container ReAct agent (stdlib only,
-# no pip). The tag carries a `-py` suffix so `ensure_image` rebuilds rather than
-# reusing an older python-less image cached under the bare `:fedora` tag.
-IMAGE_TAG = "nelson-bench:fedora-py"
+# no pip for the harness itself). The tag suffix forces `ensure_image` to rebuild
+# rather than reuse an older image cached under a previous tag.
+#
+# This "tools" image additionally carries optional static-analysis helpers used by
+# extended tool profiles — each tool is only *advertised* to competitors on its
+# profile; plain read-grep competitors run in the same image but never see them,
+# so those controls stay clean:
+#   - Semgrep + a DATE-PINNED community ruleset  -> read-grep-semgrep
+#   - tree-sitter (structure/AST, no bug rules)  -> read-grep-treesitter
+#
+# Contamination guard (semgrep only): every corpus CVE was disclosed 2026-05-20/21,
+# so a semgrep-rules snapshot pinned to the last commit on/before SEMGREP_RULES_CUTOFF
+# (strictly before any disclosure) CANNOT contain a rule that encodes a planted bug.
+# Generic pattern rules (e.g. tainted-input-to-SQL) survive — that is the honest tool
+# capability we mean to measure; per-CVE rules are excluded by date. Rules are baked
+# in (.git stripped) so scans run fully offline at run time. tree-sitter needs no such
+# guard — it is a pure parser with no notion of vulnerabilities.
+IMAGE_TAG = "nelson-bench:fedora-tools"
 CONTAINERFILE = """\
 FROM registry.fedoraproject.org/fedora-minimal:41
 RUN microdnf install -y git ripgrep ca-certificates findutils shadow-utils python3 \\
+        python3-pip gcc python3-devel \\
     && microdnf clean all
+# Semgrep OSS engine (read-grep-semgrep) + tree-sitter grammars (read-grep-treesitter).
+# gcc/python3-devel are present so any grammar without a cp313 wheel builds from source.
+# Per-language grammar packages bake the compiled parser INTO the image (each wheel
+# ships its grammar) so scans are fully offline — unlike tree-sitter-language-pack,
+# which fetches grammars from GitHub at runtime and breaks with no network.
+RUN pip3 install --no-cache-dir semgrep tree-sitter \\
+        tree-sitter-c tree-sitter-cpp tree-sitter-go tree-sitter-java \\
+        tree-sitter-javascript tree-sitter-python tree-sitter-rust tree-sitter-php
+# Date-pinned community ruleset, baked in for offline contamination-free scans.
+ARG SEMGREP_RULES_CUTOFF=2026-04-01
+RUN git clone --filter=blob:none \\
+        https://github.com/semgrep/semgrep-rules /opt/semgrep-rules
+RUN cd /opt/semgrep-rules \\
+    && git checkout "$(git rev-list -1 --before=${SEMGREP_RULES_CUTOFF} HEAD)" \\
+    && rm -rf .git
+# Keep only real rule files. The repo also ships CI workflows, test fixtures, and
+# dev configs as .yaml; semgrep ABORTS the whole scan if any loaded config lacks a
+# top-level `rules:` key, so strip every non-rule yaml (leaves ~2050 rule files).
+RUN find /opt/semgrep-rules \\( -name '*.yaml' -o -name '*.yml' \\) \\
+        ! -exec grep -qE '^rules:' {} \\; -delete
 # A real passwd entry so the agent's getpwuid() works and HOME is writable.
 RUN useradd -u 1000 -m -s /bin/bash agent
 USER agent
@@ -76,6 +113,33 @@ only vulnerabilities in {target} itself. Look for memory-safety bugs, injection
 deserialization, SSRF, and the like. Report only real, exploitable issues — not
 style nits or theoretical concerns. Many files in a codebase are perfectly clean:
 if {target} has no exploitable vulnerability, that is a valid and expected answer."""
+
+# Repo-scope variant (the whole-repo audit experiment): instead of pointing at one
+# file, the model is turned loose on the entire mounted tree and reports findings
+# wherever they live. Motivation: the hardest planted bugs (cross-file authz, UAF
+# spanning alloc/free across functions) resist a single-file blind read; giving the
+# model the whole tree to navigate tests whether *information access* — not
+# capability — is the file-scope ceiling. Kept deliberately neutral, same weakness
+# categories as the file-scoped intro, so detection/FP measurement stays comparable;
+# it does not say "there is a bug, find it" (that would leak and wreck FP scoring).
+_AUDIT_INTRO_REPO = """\
+You are an expert security auditor reviewing an unfamiliar codebase. The complete
+source tree is mounted read-only at /src.
+
+Audit the whole codebase for *exploitable* security vulnerabilities. Begin by
+orienting yourself in the tree, then read closely wherever risk concentrates:
+code that handles untrusted or external input, performs privileged or
+security-sensitive operations, manages memory or resource lifetimes, or enforces
+authentication and authorization. Follow definitions, callers, and data flow
+across files freely — a single vulnerability often spans several functions or
+files, so navigation between them is part of the job.
+
+Look for memory-safety bugs, injection (SQL / command / path), authentication or
+authorization flaws, unsafe deserialization, SSRF, and the like. Report only
+real, exploitable issues — not style nits or theoretical concerns. Report each
+vulnerability wherever in the tree it lives. Much of a codebase is perfectly
+clean: report only what you can actually substantiate, and if you find nothing
+exploitable, that is a valid answer."""
 
 _OUTPUT_SPEC = """\
 When you are done, output ONLY a JSON array as your final message, with no prose
@@ -596,17 +660,31 @@ def vulnerable_files(case: Case) -> list[str]:
     return [f for f in case.gt_files if _audit_target(f)] or list(case.gt_files)
 
 
+def _competitor_repo_scope(competitor: Competitor) -> bool:
+    """Per-competitor repo-scope opt-in via ``cost_model`` (``"repo_scope": true``),
+    so a roster can carry file-scope and repo-scope arms as distinct competitors."""
+    from .runtimes import parse_cost_model
+
+    return bool(parse_cost_model(competitor.cost_model).get("repo_scope"))
+
+
 def build_competitor_prompt(
     case: Case,
     target_file: str,
     *,
     oracle_cwe: bool = False,
     prompt_mode: str = "open",
+    repo_scope: bool = False,
 ) -> str:
     """The neutral, file-scoped audit prompt for ``target_file``.
 
     Takes ``case`` for parity with other builders, and by default reveals
     nothing about the planted vulnerability — only which file to review.
+
+    ``repo_scope`` switches to the whole-repo intro: the model audits the entire
+    mounted tree and reports findings wherever they live, ``target_file`` is
+    ignored (the cell carries a sentinel), and the leaky/strategy preambles are
+    skipped — it is the plain open audit at repo granularity.
 
     When ``oracle_cwe`` is set and the case carries a ground-truth ``cwe``, the
     prompt is augmented with that weakness class (the "shape of the needle"
@@ -618,6 +696,8 @@ def build_competitor_prompt(
     threat-modelling scaffold; ``"checklist"`` folds the language's applicable
     weakness classes into one breadth pass. None of these name the planted bug,
     so they are honest open-prompt variants."""
+    if repo_scope:
+        return f"{_AUDIT_INTRO_REPO}\n\n{_OUTPUT_SPEC}"
     safe_target = target_file.replace("{", "{{").replace("}", "}}")
     intro = _AUDIT_INTRO.format(target=safe_target)
     extra = ""
@@ -845,6 +925,7 @@ class BenchRunner:
         preflight: bool = False,
         oracle_cwe: bool = False,
         prompt_mode: str = "open",
+        repo_scope: bool = False,
     ):
         self.db = db
         self.backend = backend or PodmanBackend()
@@ -870,6 +951,9 @@ class BenchRunner:
         # Prompt-strategy arm for the open-prompt experiment ("open" | "plan" |
         # "checklist"). Non-leaking; ignored when oracle_cwe is set.
         self.prompt_mode = prompt_mode
+        # Repo-scope experiment: audit the whole mounted tree (one cell per case,
+        # sentinel target_file) instead of file-by-file. Off by default.
+        self.repo_scope = repo_scope
 
     def prewarm_checkout(self, case: Case) -> Path:
         """Materialize ``case``'s pristine source tree, returning the mount path.
@@ -938,7 +1022,12 @@ class BenchRunner:
                     self.db.mark_run_infra_error(run_id, pf.detail)
                 return RunResult(status=status, error=pf.detail)
 
-        name = f"nelson-run-{run_id}"
+        # Container name must be unique across concurrent loop PROCESSES: run_id is
+        # per-DB, so two parallel loops (one per device, separate DBs) would both
+        # mint nelson-run-1 and collide (podman exit 125). NELSON_RUN_NS namespaces
+        # the name per job; unset, the name is unchanged (single-loop behaviour).
+        ns = os.environ.get("NELSON_RUN_NS", "")
+        name = f"nelson-run-{ns}{run_id}"
         # Managed manually (not TemporaryDirectory): the container writes into the
         # mounted config dir as a userns-mapped subuid, leaving files the host
         # user can't unlink — so cleanup must go through `podman unshare`.
@@ -958,6 +1047,9 @@ class BenchRunner:
                         target_file,
                         oracle_cwe=self.oracle_cwe,
                         prompt_mode=self.prompt_mode,
+                        repo_scope=(
+                            self.repo_scope or _competitor_repo_scope(competitor)
+                        ),
                     ),
                     src_dir=checkout,
                     auth=material,

@@ -243,8 +243,30 @@ def test_raw_api_loop_build_spec_mounts_and_env(tmp_path):
     assert spec.env["NELSON_API_KEY"] == "sk-1"
     assert spec.env["NELSON_INPUT_USD_PER_MTOK"] == "0.14"
     assert spec.env["NELSON_OUTPUT_USD_PER_MTOK"] == "0.28"
+    # The tool profile is propagated so the in-container agent selects its toolset.
+    assert spec.env["NELSON_TOOL_PROFILE"] == "read-grep"
     # No temperature in the cost_model -> the env var is left unset (loop default).
     assert "NELSON_TEMPERATURE" not in spec.env
+
+
+def test_raw_api_loop_build_spec_propagates_semgrep_profile(tmp_path):
+    comp = Competitor(
+        name="raw/ds-semgrep",
+        model="deepseek-chat",
+        runtime="raw-api-loop",
+        tool_profile="read-grep-semgrep",
+        cost_model='{"base_url": "https://api.deepseek.com"}',
+    )
+    ctx = RuntimeContext(
+        competitor=comp,
+        prompt="audit a.c",
+        src_dir=tmp_path / "src",
+        auth=AuthMaterial(env={"NELSON_API_KEY": "sk-1"}, mounts=[]),
+        name="r1",
+        network=True,
+    )
+    spec = RawApiLoopRuntime().build_spec(ctx)
+    assert spec.env["NELSON_TOOL_PROFILE"] == "read-grep-semgrep"
 
 
 def test_raw_api_loop_build_spec_passes_temperature(tmp_path):

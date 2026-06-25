@@ -374,6 +374,10 @@ class RawApiLoopRuntime:
             "NELSON_MODEL": ctx.competitor.model,
             "NELSON_MAX_STEPS": str(cfg.get("max_steps", 40)),
             "NELSON_TOKEN_BUDGET": str(cfg.get("token_budget", 500000)),
+            # Drives which tools the in-container agent advertises (e.g. a
+            # "read-grep-semgrep" profile adds the static-analysis tool); the base
+            # "read-grep" profile is unchanged, so existing competitors are unaffected.
+            "NELSON_TOOL_PROFILE": ctx.competitor.tool_profile,
             **ctx.auth.env,
         }
         if cfg.get("input_usd_per_mtok") is not None:

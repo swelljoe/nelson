@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -41,6 +42,41 @@ from typing import Any
 
 SRC_ROOT = "/src"
 MAX_TOOL_OUTPUT = 20_000  # chars; keep a single tool result from blowing context
+# Date-pinned community ruleset baked into the `-semgrep` image (see runner.py).
+# Scanned offline via `--config <dir>` so no newer rule is fetched at run time.
+SEMGREP_RULES_DIR = os.environ.get("NELSON_SEMGREP_RULES", "/opt/semgrep-rules")
+SEMGREP_WALL_TIMEOUT = 240  # whole-scan subprocess cap (per-rule cap is --timeout)
+
+# tree-sitter (read-grep-treesitter profile): map a file extension to the grammar
+# name (and its baked-in per-language module). Covers the corpus languages.
+TS_LANG_BY_EXT = {
+    ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp",
+    ".hpp": "cpp", ".hh": "cpp", ".go": "go", ".java": "java",
+    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
+    ".py": "python", ".rs": "rust", ".php": "php",
+}
+TS_MODULE_BY_LANG = {
+    "c": "tree_sitter_c", "cpp": "tree_sitter_cpp", "go": "tree_sitter_go",
+    "java": "tree_sitter_java", "javascript": "tree_sitter_javascript",
+    "python": "tree_sitter_python", "rust": "tree_sitter_rust",
+    "php": "tree_sitter_php",
+}
+# Node types that introduce a named definition, unioned across those grammars.
+# Used to extract a file outline and to resolve where a symbol is defined.
+TS_DEF_TYPES = frozenset({
+    "function_definition", "function_declaration", "function_item",
+    "method_definition", "method_declaration", "constructor_declaration",
+    "class_definition", "class_declaration", "class_specifier",
+    "struct_specifier", "struct_item", "enum_specifier", "enum_item",
+    "union_specifier", "interface_declaration", "trait_item", "impl_item",
+    "trait_declaration", "enum_declaration",
+    "type_spec", "type_alias_declaration",
+    "module", "namespace_definition",
+})
+TS_NAME_NODE_TYPES = frozenset(
+    {"identifier", "field_identifier", "type_identifier", "name"}
+)
+TS_MAX_FILES = 40  # cap files parsed per symbol query
 # Per-API-call read timeout. Reasoning models (Gemini 3.x pro, MiMo) can think for
 # minutes on a single turn over a large C file; a tight cap aborts the whole run as
 # an infra_error and silently drops the slowest (often strongest) models from the
@@ -75,6 +111,36 @@ SYSTEM_PROMPT = (
     "You are a tool-using security auditor. Use the provided tools to read the "
     "code under /src that you need, then give your final answer EXACTLY as the "
     "JSON array specified in the user's instructions, with no prose around it."
+)
+
+# Appended to the system prompt ONLY on a semgrep tool profile. Models otherwise
+# default to read_file/grep and never discover the static-analysis tool, so the
+# experiment would measure an unused tool. This tells the model the tool exists
+# and may be used — it does NOT leak anything about the planted bug (no CVE, class,
+# or location) — and stresses that a clean scan is not proof of safety so a model
+# does not rubber-stamp a file semgrep happens not to flag. The control profile's
+# prompt is unchanged (byte-identical to the baseline), so the pair stays clean.
+SEMGREP_SYSTEM_NOTE = (
+    " In addition to reading and grepping, you have a `semgrep` tool that runs a "
+    "static analyzer over a file or directory under /src and returns rule matches "
+    "with source->sink data-flow (taint) traces. Use it where it helps — to "
+    "corroborate a suspicion or surface tainted data flows you might miss by "
+    "reading alone — but treat its output as advisory: it has limited coverage, a "
+    "clean result does NOT prove the file is safe, and you must still judge real "
+    "exploitability yourself."
+)
+
+# Appended to the system prompt ONLY on a treesitter tool profile (same rationale
+# as SEMGREP_SYSTEM_NOTE — models will not use a tool they were not told about). It
+# describes structure-navigation tools and leaks nothing about the planted bug.
+TREESITTER_SYSTEM_NOTE = (
+    " In addition to reading and grepping, you have tree-sitter structure tools: "
+    "`outline` gives a file's functions, methods, and type definitions with their "
+    "signatures and line numbers; `symbol` resolves a name across /src to where it "
+    "is defined (with signature) and the sites that reference it. Use them to "
+    "navigate precisely and to see how the pieces fit together — to follow a "
+    "callee's definition or find every caller — rather than relying on text search "
+    "alone. They describe structure only; they do not judge security."
 )
 
 # OpenAI function-calling schema for the three sandboxed tools.
@@ -120,6 +186,88 @@ TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "path": {"type": "string", "description": "path under /src"},
                 },
+            },
+        },
+    },
+]
+
+# The static-analysis tool, advertised ONLY to competitors on a tool profile whose
+# name contains "semgrep" (see select_tools / NELSON_TOOL_PROFILE). It runs Semgrep
+# over a path under /src with a fixed offline ruleset and returns taint/dataflow
+# findings. The description tells the model what the tool can and cannot establish
+# so a clean scan is not mistaken for proof of safety (which would tank recall).
+SEMGREP_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "semgrep",
+        "description": (
+            "Run the Semgrep static analyzer over a file or directory under /src, "
+            "using a fixed offline ruleset. Returns matches as: rule id, "
+            "file:line, severity, message, and — where the rule is a taint rule — "
+            "the source->sink dataflow trace. Useful for data-flow and "
+            "known-pattern signal to corroborate or steer your own reading. "
+            "IMPORTANT: Semgrep has limited rule coverage (especially for C/C++ "
+            "memory safety); the ABSENCE of a finding does NOT mean the code is "
+            "safe, and a finding still needs your judgement of real exploitability."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "file or directory under /src to scan",
+                },
+            },
+            "required": ["path"],
+        },
+    },
+}
+
+# read-grep-semgrep profile = the three base tools plus semgrep.
+SEMGREP_TOOLS: list[dict[str, Any]] = [*TOOLS, SEMGREP_TOOL]
+
+# The tree-sitter tools, advertised ONLY to competitors on a profile whose name
+# contains "treesitter". They give STRUCTURE (definitions, signatures, cross-file
+# references) with no opinion about vulnerabilities — the bet is that knowing how
+# the pieces fit together helps the model reason, without a scanner doing its job.
+TREESITTER_TOOLS: list[dict[str, Any]] = [
+    *TOOLS,
+    {
+        "type": "function",
+        "function": {
+            "name": "outline",
+            "description": (
+                "Structural outline of a source file under /src via tree-sitter: "
+                "every function, method, class, struct, and type definition with "
+                "its line number and signature. Use it to orient quickly in an "
+                "unfamiliar file before reading."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "file under /src"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "symbol",
+            "description": (
+                "Resolve a symbol across /src via tree-sitter: where a function, "
+                "method, type, struct, or class NAME is DEFINED (with signature and "
+                "location) and the sites that REFERENCE it. Use it to see how the "
+                "pieces fit together — to follow a callee's definition or find every "
+                "caller of a function — more precisely than a text grep."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "symbol name"},
+                },
+                "required": ["name"],
             },
         },
     },
@@ -209,10 +357,266 @@ def tool_list_dir(args: dict[str, Any], src_root: str | None = None) -> str:
     return "\n".join(entries)[:MAX_TOOL_OUTPUT]
 
 
+def _format_semgrep(data: dict[str, Any], rel: str) -> str:
+    """Render semgrep's JSON into a compact, context-budget-safe summary."""
+    results = data.get("results") or []
+    if not results:
+        # Surface scan errors (e.g. an unparseable target) distinctly from a clean
+        # scan so the model doesn't read a failed run as "nothing found".
+        errs = data.get("errors") or []
+        if errs:
+            msgs = "; ".join(str(e.get("message", e))[:120] for e in errs[:3])
+            return f"(semgrep: no findings; {len(errs)} scan error(s): {msgs})"
+        return f"(semgrep: no findings under {rel})"
+    out = [f"semgrep: {len(results)} finding(s) under {rel}"]
+    for r in results:
+        extra = r.get("extra") or {}
+        loc = f"{r.get('path', '?')}:{(r.get('start') or {}).get('line', '?')}"
+        sev = extra.get("severity", "")
+        msg = " ".join(str(extra.get("message", "")).split())
+        # Local-path configs prefix the rule id with the rules dir as dotted
+        # segments (e.g. "opt.semgrep-rules.python..."); drop it for readability.
+        check = str(r.get("check_id", "?")).removeprefix("opt.semgrep-rules.")
+        out.append(f"\n- {loc} [{sev}] {check}\n  {msg[:300]}")
+        # Taint rules carry a source->sink trace — the data-flow signal we want the
+        # model to see. Render source and sink locations compactly when present.
+        trace = extra.get("dataflow_trace") or {}
+        src = trace.get("taint_source")
+        sink = trace.get("taint_sink")
+
+        def _loc(node: Any) -> str | None:
+            # A trace node is typically ["Loc", [ {start:{line}, path}, ... ]].
+            with contextlib.suppress(Exception):
+                cell = node[1][0]
+                line = cell.get("start", {}).get("line", "?")
+                return f"{cell.get('path', '?')}:{line}"
+            return None
+
+        s_loc, k_loc = (_loc(src) if src else None), (_loc(sink) if sink else None)
+        if s_loc or k_loc:
+            out.append(f"  dataflow: source {s_loc or '?'} -> sink {k_loc or '?'}")
+    return "\n".join(out)[:MAX_TOOL_OUTPUT]
+
+
+def tool_semgrep(args: dict[str, Any], src_root: str | None = None) -> str:
+    rel = str(args.get("path", "."))
+    real = _resolve_in_src(rel, src_root)
+    if real is None:
+        return f"error: path {rel!r} is outside the source tree"
+    if not os.path.exists(real):
+        return f"error: no such path: {rel}"
+    try:
+        proc = subprocess.run(
+            [
+                "semgrep",
+                "scan",
+                "--config",
+                SEMGREP_RULES_DIR,
+                "--json",
+                "--quiet",
+                "--metrics",
+                "off",
+                "--disable-version-check",
+                "--dataflow-traces",
+                "--timeout",
+                "30",
+                "--max-target-bytes",
+                "2000000",
+                real,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=SEMGREP_WALL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return f"error: semgrep timed out after {SEMGREP_WALL_TIMEOUT}s on {rel}"
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"error: {e}"
+    if not proc.stdout.strip():
+        return f"error: semgrep produced no output; stderr: {proc.stderr[:500]}"
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return f"error: semgrep output unparseable; stderr: {proc.stderr[:500]}"
+    return _format_semgrep(data, rel)
+
+
+# -- tree-sitter tools (structure/AST) ---------------------------------------
+
+
+def _ts_lang_for(path: str) -> str | None:
+    return TS_LANG_BY_EXT.get(os.path.splitext(path)[1].lower())
+
+
+def _ts_parser(lang: str) -> Any:
+    # Lazy import: the grammars live only in the container image, and only the
+    # treesitter profile ever calls these tools — the module stays importable (and
+    # the other profiles stdlib-clean) on a host without the packages.
+    import importlib
+
+    from tree_sitter import Language, Parser
+
+    module = importlib.import_module(TS_MODULE_BY_LANG[lang])
+    # Most grammar packages expose `language()`; a few (php, typescript) name it
+    # per-dialect, e.g. `language_php()`.
+    lang_fn = getattr(module, "language", None) or getattr(module, f"language_{lang}")
+    language = Language(lang_fn())
+    try:
+        return Parser(language)
+    except TypeError:  # older binding: language set via attribute
+        parser = Parser()
+        parser.language = language
+        return parser
+
+
+def _ts_walk(node: Any):
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        yield n
+        stack.extend(n.children)
+
+
+def _ts_def_name(node: Any) -> str:
+    """Best-effort name of a definition node across grammars."""
+    named = node.child_by_field_name("name")
+    if named is not None:
+        return _ts_text(named)
+    # C/C++ functions nest the name inside (possibly several) declarators; descend
+    # the `declarator` field until we reach the identifier itself.
+    decl = node.child_by_field_name("declarator")
+    seen = 0
+    while decl is not None and seen < 8:
+        if decl.type in TS_NAME_NODE_TYPES:
+            return _ts_text(decl)
+        inner = decl.child_by_field_name("declarator")
+        if inner is None:
+            for c in decl.children:
+                if c.type in TS_NAME_NODE_TYPES:
+                    return _ts_text(c)
+            break
+        decl = inner
+        seen += 1
+    for c in node.children:  # shallow fallback
+        if c.type in TS_NAME_NODE_TYPES:
+            return _ts_text(c)
+    return "?"
+
+
+def _ts_has_body(node: Any) -> bool:
+    """True if a struct/union/enum specifier actually defines a body (vs a type ref)."""
+    return any(
+        c.type in ("field_declaration_list", "enumerator_list", "declaration_list")
+        for c in node.children
+    )
+
+
+def _ts_text(node: Any) -> str:
+    return node.text.decode("utf-8", "replace")
+
+
+def _ts_signature(node: Any) -> str:
+    """The declaration header — everything up to the body — collapsed to one line.
+
+    Cutting at the opening brace yields a full C/Go/Java signature ("int foo(char *p)")
+    even when C splits the return type onto its own line; brace-less languages
+    (Python) fall back to the first line ("def foo(a):").
+    """
+    txt = _ts_text(node)
+    head = txt.split("{", 1)[0] if "{" in txt else txt.split("\n", 1)[0]
+    return " ".join(head.split())[:160]
+
+
+def tool_outline(args: dict[str, Any], src_root: str | None = None) -> str:
+    rel = str(args.get("path", ""))
+    real = _resolve_in_src(rel, src_root)
+    if real is None:
+        return f"error: path {rel!r} is outside the source tree"
+    if not os.path.isfile(real):
+        return f"error: not a file: {rel}"
+    lang = _ts_lang_for(real)
+    if lang is None:
+        return f"error: unsupported language for {rel}"
+    try:
+        with open(real, "rb") as f:
+            data = f.read()
+        tree = _ts_parser(lang).parse(data)
+    except Exception as e:  # parser/import failure must not kill the loop
+        return f"error: {e}"
+    rows = []
+    for n in _ts_walk(tree.root_node):
+        if n.type not in TS_DEF_TYPES:
+            continue
+        if n.type.endswith("_specifier") and not _ts_has_body(n):
+            continue  # a `struct foo *` type reference, not a definition
+        line = n.start_point[0] + 1
+        entry = f"L{line} {n.type} {_ts_def_name(n)}: {_ts_signature(n)[:120]}"
+        rows.append((line, entry))
+    if not rows:
+        return f"(no definitions found in {rel})"
+    rows.sort()
+    return "\n".join(r[1] for r in rows)[:MAX_TOOL_OUTPUT]
+
+
+def tool_symbol(args: dict[str, Any], src_root: str | None = None) -> str:
+    name = str(args.get("name", ""))
+    if not name:
+        return "error: empty name"
+    root = src_root or SRC_ROOT
+    try:
+        proc = subprocess.run(
+            ["rg", "-l", "--no-messages", "-F", "--", name, root],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"error: {e}"
+    files = [f for f in proc.stdout.splitlines() if f][:TS_MAX_FILES]
+    defs: list[str] = []
+    refs: list[str] = []
+    for path in files:
+        lang = _ts_lang_for(path)
+        if lang is None:
+            continue
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            tree = _ts_parser(lang).parse(data)
+        except Exception:  # noqa: S112 - an unparseable file is skipped, not fatal
+            continue
+        relp = os.path.relpath(path, root)
+        for n in _ts_walk(tree.root_node):
+            ln = n.start_point[0] + 1
+            if n.type in TS_DEF_TYPES and _ts_def_name(n) == name:
+                if n.type.endswith("_specifier") and not _ts_has_body(n):
+                    continue
+                defs.append(f"{relp}:{ln} {n.type}: {_ts_signature(n)[:140]}")
+            elif n.type in TS_NAME_NODE_TYPES and _ts_text(n) == name:
+                refs.append(f"{relp}:{ln}")
+        if len(defs) >= 50:
+            break
+    out = []
+    if defs:
+        out.append(f"definitions of {name!r} ({len(defs)}):")
+        out.extend("  " + d for d in defs[:50])
+    else:
+        out.append(f"no definitions of {name!r} found (may be external or a variable)")
+    if refs:
+        seen: set[str] = set()
+        uniq = [r for r in refs if not (r in seen or seen.add(r))]
+        out.append(f"references ({len(uniq)}, up to 60 shown):")
+        out.append("  " + ", ".join(uniq[:60]))
+    return "\n".join(out)[:MAX_TOOL_OUTPUT]
+
+
 TOOL_FUNCS: dict[str, Callable[[dict[str, Any], str | None], str]] = {
     "read_file": tool_read_file,
     "grep": tool_grep,
     "list_dir": tool_list_dir,
+    "semgrep": tool_semgrep,
+    "outline": tool_outline,
+    "symbol": tool_symbol,
 }
 
 
@@ -329,6 +733,52 @@ def _trim(value: Any, limit: int = 2000) -> Any:
     return value
 
 
+# Tool calls a model emitted as plain TEXT instead of the structured ``tool_calls``
+# field. DeepSeek v4 in particular falls back mid-loop to its native XML format —
+# an <invoke name="read_file"> block whose tag is prefixed with DeepSeek's DSML
+# marker — which the OpenAI-shaped client never sees in ``message.tool_calls``.
+# Without this the loop reads that turn as the final answer and stops while the
+# model was still trying to navigate. The prefix before ``invoke``/``parameter``
+# varies by model (DeepSeek's DSML marker, Anthropic's ``antml:``) so it is matched
+# loosely; only the ``invoke name="..."`` / ``parameter name="..."`` shape matters.
+_NATIVE_INVOKE_RE = re.compile(
+    r'<[^>]*?invoke\s+name="([^"]+)"\s*>(.*?)</[^>]*?invoke\s*>', re.DOTALL
+)
+_NATIVE_PARAM_RE = re.compile(
+    r'<[^>]*?parameter\s+name="([^"]+)"[^>]*?>(.*?)</[^>]*?parameter\s*>', re.DOTALL
+)
+
+
+def _coerce_native_param(val: str) -> Any:
+    """Best-effort type for a text-XML parameter (line numbers want ints; paths and
+    patterns stay strings). Falls back to the raw string when it is not numeric."""
+    val = val.strip()
+    try:
+        return int(val)
+    except ValueError:
+        pass
+    try:
+        return float(val)
+    except ValueError:
+        return val
+
+
+def parse_native_tool_calls(content: str) -> list[dict[str, Any]]:
+    """Extract ``[{"name", "args"}]`` from tool calls a model wrote as plain-text
+    XML (see ``_NATIVE_INVOKE_RE``). Empty list when there are none — so the caller
+    only treats a turn as native-tool-use when something actually parses."""
+    if not content or "invoke" not in content:
+        return []
+    calls: list[dict[str, Any]] = []
+    for m in _NATIVE_INVOKE_RE.finditer(content):
+        args = {
+            pm.group(1).strip(): _coerce_native_param(pm.group(2))
+            for pm in _NATIVE_PARAM_RE.finditer(m.group(2))
+        }
+        calls.append({"name": m.group(1).strip(), "args": args})
+    return calls
+
+
 # -- The ReAct loop ----------------------------------------------------------
 
 
@@ -425,6 +875,14 @@ def run_loop(
         choices = resp.get("choices") or [{}]
         msg = (choices[0].get("message") or {}) if choices else {}
         tool_calls = msg.get("tool_calls") or []
+        # Fallback: a model (DeepSeek) that wrote tool calls as plain-text XML rather
+        # than in the structured field. Only consulted when there are no structured
+        # calls and we still want tool use, so normal turns are untouched.
+        native_calls = (
+            parse_native_tool_calls(msg.get("content") or "")
+            if (not tool_calls and not force_final)
+            else []
+        )
         steps.append(
             {
                 "type": "step",
@@ -432,7 +890,8 @@ def run_loop(
                 "content": _trim(msg.get("content")),
                 "tool_calls": [
                     (tc.get("function") or {}).get("name") for tc in tool_calls
-                ],
+                ]
+                or [f"{c['name']}(native)" for c in native_calls],
             }
         )
 
@@ -455,6 +914,19 @@ def run_loop(
                         "content": result[:MAX_TOOL_OUTPUT],
                     }
                 )
+            continue
+
+        if native_calls:
+            # Echo the assistant turn verbatim, then feed results back as a plain
+            # user turn — no tool_call_id to honour (the model never sent one), so
+            # this stays valid for any OpenAI-compatible endpoint.
+            messages.append({"role": "assistant", "content": msg.get("content") or ""})
+            results = [
+                f"Tool {c['name']} result:\n"
+                + dispatch_tool(c["name"], c["args"], src_root)[:MAX_TOOL_OUTPUT]
+                for c in native_calls
+            ]
+            messages.append({"role": "user", "content": "\n\n".join(results)})
             continue
 
         # No tool calls (or the forced-final turn): this is the answer.
@@ -481,6 +953,32 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def select_tools() -> list[dict[str, Any]]:
+    """Pick the advertised toolset from the competitor's tool profile.
+
+    The profile string (set as NELSON_TOOL_PROFILE by the runtime) finally drives
+    behaviour rather than being a passive DB label: a name containing "semgrep"
+    gets the static-analysis tool on top of the base three; everything else gets
+    exactly the original read-grep set, so existing competitors are unchanged.
+    """
+    profile = os.environ.get("NELSON_TOOL_PROFILE", "")
+    if "semgrep" in profile:
+        return SEMGREP_TOOLS
+    if "treesitter" in profile:
+        return TREESITTER_TOOLS
+    return TOOLS
+
+
+def select_system_prompt() -> str:
+    """System prompt for the active profile: base, plus a tool note if applicable."""
+    profile = os.environ.get("NELSON_TOOL_PROFILE", "")
+    if "semgrep" in profile:
+        return SYSTEM_PROMPT + SEMGREP_SYSTEM_NOTE
+    if "treesitter" in profile:
+        return SYSTEM_PROMPT + TREESITTER_SYSTEM_NOTE
+    return SYSTEM_PROMPT
+
+
 def main() -> None:
     prompt = sys.stdin.read()
     base_url = os.environ.get("NELSON_BASE_URL", "")
@@ -503,6 +1001,8 @@ def main() -> None:
             max_steps=_int_env("NELSON_MAX_STEPS", 40),
             token_budget=_int_env("NELSON_TOKEN_BUDGET", 500_000),
             temperature=0.1 if temperature is None else temperature,
+            tools=select_tools(),
+            system_prompt=select_system_prompt(),
         )
     except urllib.error.HTTPError as e:
         body = ""

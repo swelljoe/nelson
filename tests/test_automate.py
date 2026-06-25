@@ -496,6 +496,58 @@ def test_run_once_concurrency_never_overlaps_one_model_but_overlaps_distinct(tmp
     assert runner.max_inflight > 1  # but distinct models did run in parallel
 
 
+class _EndpointProbeRunner:
+    """Records in-flight runs keyed by rate-limit endpoint (base_url+model), to
+    prove two competitors sharing one endpoint are serialized while distinct
+    endpoints overlap — the shared-server A/B-arm guard."""
+
+    def __init__(self, db, *, hold=0.04):
+        self.db = db
+        self.hold = hold
+        self._lock = threading.Lock()
+        self._inflight: dict[str, int] = {}
+        self.same_endpoint_overlap = False
+        self.max_inflight = 0
+
+    def run_case(self, case, competitor, target_file, trial=0) -> RunResult:
+        from nelson.automate import _rate_limit_key
+
+        key = _rate_limit_key(competitor)
+        with self._lock:
+            self._inflight[key] = self._inflight.get(key, 0) + 1
+            if self._inflight[key] > 1:
+                self.same_endpoint_overlap = True
+            self.max_inflight = max(self.max_inflight, sum(self._inflight.values()))
+        time.sleep(self.hold)
+        with self._lock:
+            self._inflight[key] -= 1
+        comp_id = self.db.upsert_competitor(competitor.to_db_fields())
+        row = self.db.get_case(case.ext_id)
+        case_id = row["id"] if row else self.db.upsert_case(case.to_db_fields())
+        run_id = self.db.create_run(case_id, comp_id, target_file, trial)
+        self.db.start_run(run_id)
+        self.db.complete_run(
+            run_id, cost_usd=0.0, wall_clock_s=1.0, tokens_in=1, tokens_out=1
+        )
+        return RunResult(status="complete", cost_usd=0.0)
+
+
+def test_run_once_concurrency_serializes_shared_endpoint_arms(tmp_path):
+    # e1a + e1b share one (base_url, model) endpoint; e2 is a distinct endpoint.
+    e1 = '{"base_url": "http://e1:8000/v1"}'
+    e2 = '{"base_url": "http://e2:8000/v1"}'
+    comps = [
+        Competitor(name="e1a", model="shared", cost_model=e1),
+        Competitor(name="e1b", model="shared", cost_model=e1),
+        Competitor(name="e2", model="other", cost_model=e2),
+    ]
+    db = _seed_db(tmp_path, cases=[_case("A"), _case("B")], competitors=comps)
+    runner = _EndpointProbeRunner(db)
+    run_once(db, runner=runner, age_out=False, recency_filter=False, concurrency=3)
+    assert runner.same_endpoint_overlap is False  # the two e1 arms never collide
+    assert runner.max_inflight > 1  # but e1 and e2 ran in parallel
+
+
 def test_run_once_concurrency_is_idempotent(tmp_path):
     db = _seed_db(
         tmp_path, cases=[_case("A"), _case("B")], competitors=[_comp("a"), _comp("b")]

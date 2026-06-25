@@ -122,6 +122,43 @@ class MatrixCell:
     trial: int = 0
 
 
+# Sentinel target_file for repo-scope cells: one cell per (competitor, case, trial)
+# instead of the per-file fan-out. The model audits the whole mounted tree, so there
+# is no single "file under review"; this label keeps the run row + resume key
+# distinct from any file-scoped run of the same case. Scoring is target_file-agnostic
+# (the localization gate compares findings to the case's ground-truth hunks), so a
+# sentinel here is harmless downstream.
+REPO_SCOPE_TARGET = "<repo>"
+
+
+def competitor_repo_scope(competitor: Competitor) -> bool:
+    """Whether this competitor's ``cost_model`` opts it into repo-scope.
+
+    A per-competitor ``"repo_scope": true`` in the cost_model JSON lets a roster
+    carry both arms as distinct named competitors (file-scope control vs
+    repo-scope) in one DB/report — mirroring how the tool-profile experiments
+    name their arms. The global ``--repo-scope`` flag is the OR of this.
+    """
+    from .runtimes import parse_cost_model
+
+    return bool(parse_cost_model(competitor.cost_model).get("repo_scope"))
+
+
+def _rate_limit_key(competitor: Competitor) -> str:
+    """The endpoint a competitor's runs contend on, for concurrency grouping.
+
+    ``(base_url, model)`` when the cost_model names a base_url (API/self-hosted
+    runtimes), else the competitor name. Two competitors with the same key share
+    one worker (serialized); distinct keys run in parallel. This makes the
+    concurrency guard track the real endpoint rather than the competitor label,
+    so A/B arms on one server don't double-book it.
+    """
+    from .runtimes import parse_cost_model
+
+    base = parse_cost_model(competitor.cost_model).get("base_url")
+    return f"{base}\n{competitor.model}" if base else competitor.name
+
+
 RunStatusMap = dict[tuple[str, str, str | None, int], set[str]]
 
 
@@ -146,6 +183,7 @@ def plan_matrix(
     recency_filter: bool = True,
     retry_failed: bool = False,
     repeat: int = 1,
+    repo_scope: bool = False,
 ) -> list[MatrixCell]:
     """The (competitor x case x file x trial) cells that still need a run.
 
@@ -159,13 +197,21 @@ def plan_matrix(
     each trial is tracked separately, so a partial pass resumes to fill exactly
     the missing trials. Output is sorted (competitor, case, file, trial) for a
     deterministic, resumable pass.
+
+    ``repo_scope`` collapses the per-file fan-out: a case yields ONE cell (per
+    competitor, per trial) with the ``REPO_SCOPE_TARGET`` sentinel, since the model
+    audits the whole tree rather than a named file.
     """
     cells: list[MatrixCell] = []
     for comp in sorted(competitors, key=lambda c: c.name):
         for case in sorted(cases, key=lambda c: c.ext_id):
             if recency_filter and not case_is_fresh_for(case, comp):
                 continue
-            for target in vulnerable_files(case):
+            cell_repo_scope = repo_scope or competitor_repo_scope(comp)
+            targets = (
+                [REPO_SCOPE_TARGET] if cell_repo_scope else vulnerable_files(case)
+            )
+            for target in targets:
                 for trial in range(max(1, repeat)):
                     statuses = existing.get(
                         (comp.name, case.ext_id, target, trial), set()
@@ -316,6 +362,7 @@ def run_once(
     recency_filter: bool = True,
     retry_failed: bool = False,
     repeat: int = 1,
+    repo_scope: bool = False,
     max_runs: int | None = None,
     max_spend_usd: float | None = None,
     auth_fail_abort: int = 3,
@@ -384,6 +431,7 @@ def run_once(
             recency_filter=recency_filter,
             retry_failed=retry_failed,
             repeat=repeat,
+            repo_scope=repo_scope,
         )
         report.planned = len(plan)
         emit(f"planned {len(plan)} run(s)")
@@ -565,10 +613,19 @@ def _execute_runs_concurrent(
             with contextlib.suppress(Exception):
                 prewarm(cell.case)
 
-    # Group cells by competitor (order-preserving): one queue entry per model.
+    # Group cells by RATE-LIMIT ENDPOINT (order-preserving): one queue entry per
+    # distinct endpoint, so one worker owns it and never runs two of its cells at
+    # once. The endpoint is (base_url, model) when the cost_model carries a
+    # base_url, else the competitor name. Keying on the endpoint — not the
+    # competitor name — means two competitors that share a server+model (the two
+    # arms of an A/B roster, e.g. a self-hosted model's control vs experiment) are
+    # serialized onto one worker. That is the actual rate/throughput limit (and,
+    # for a single local llama-server, avoids two large contexts colliding into an
+    # OOM); distinct models on a shared host (an OpenRouter cohort) keep separate
+    # keys and so still run in parallel.
     groups: dict[str, list[MatrixCell]] = {}
     for cell in plan:
-        groups.setdefault(cell.competitor.name, []).append(cell)
+        groups.setdefault(_rate_limit_key(cell.competitor), []).append(cell)
     work: _queue.Queue[list[MatrixCell]] = _queue.Queue()
     for cells in groups.values():
         work.put(cells)

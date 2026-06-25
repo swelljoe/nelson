@@ -1734,6 +1734,13 @@ def _emit_loop_report(report) -> None:
     "('shape of the needle'). Cheats detection on purpose; use only on an "
     "experimental DB, never the baseline.",
 )
+@click.option(
+    "--repo-scope",
+    is_flag=True,
+    help="EXPERIMENT: audit the whole mounted tree per case (one cell, no per-file "
+    "fan-out) instead of file-by-file. Tests whether whole-repo navigation lifts "
+    "detection of cross-file bugs. Does not leak; use on an experimental DB.",
+)
 @click.option("--timeout", default=1800.0, type=float, help="Per-run wall-clock cap.")
 @click.option(
     "--max-budget-usd", default=0.50, type=float, help="Per-run cost backstop."
@@ -1770,6 +1777,7 @@ def bench_loop(
     fp_cache_dir: str | None,
     no_network: bool,
     oracle_cwe: bool,
+    repo_scope: bool,
     timeout: float,
     max_budget_usd: float,
     html_path: str | None,
@@ -1812,6 +1820,7 @@ def bench_loop(
         run_timeout=timeout,
         max_budget_usd=max_budget_usd or None,
         oracle_cwe=oracle_cwe,
+        repo_scope=repo_scope,
     )
 
     scorer = None
@@ -1859,6 +1868,7 @@ def bench_loop(
             recency_filter=recency_filter,
             retry_failed=retry_failed,
             repeat=repeat,
+            repo_scope=repo_scope,
             max_runs=max_runs or None,
             max_spend_usd=max_spend_usd or None,
             auth_fail_abort=auth_fail_abort,
