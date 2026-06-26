@@ -81,12 +81,14 @@ class Config:
     repeat: int
 
     @classmethod
-    def load(cls, path: str) -> "Config":
+    def load(cls, path: str) -> Config:
         raw = yaml.safe_load(Path(path).read_text())
         mode = raw.get("mode", "arms")
         if mode not in ("arms", "cwe-sweep"):
             raise SystemExit(f"unknown mode {mode!r} (arms | cwe-sweep)")
-        targets = {k: (v if isinstance(v, list) else [v]) for k, v in raw["targets"].items()}
+        targets = {
+            k: (v if isinstance(v, list) else [v]) for k, v in raw["targets"].items()
+        }
         return cls(
             mode=mode,
             competitors=raw["competitors"],

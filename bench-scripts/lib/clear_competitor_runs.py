@@ -41,7 +41,7 @@ def main() -> int:
     where = "comp.name = ?"
     params: list = [args.competitor]
     if args.status:
-        where += " AND r.status IN (%s)" % ",".join("?" * len(args.status))
+        where += f" AND r.status IN ({','.join('?' * len(args.status))})"
         params += args.status
 
     rids = [

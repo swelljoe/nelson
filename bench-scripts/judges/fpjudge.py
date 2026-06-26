@@ -70,8 +70,12 @@ def site_key(r: dict) -> tuple:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--db", action="append", required=True, help="experiment DB (repeatable)")
-    ap.add_argument("--label", action="append", default=[], help="tier label per --db (optional)")
+    ap.add_argument(
+        "--db", action="append", required=True, help="experiment DB (repeatable)"
+    )
+    ap.add_argument(
+        "--label", action="append", default=[], help="tier label per --db (optional)"
+    )
     ap.add_argument("--case", default=None, help="restrict to one case ext_id")
     ap.add_argument("--cases-dir", default="cases/")
     ap.add_argument("--tolerance", type=int, default=10)
@@ -96,7 +100,7 @@ def main() -> None:
     # the verdict can be written back to the exact row it came from.
     offtarget: list[tuple[str, str, dict]] = []  # (tier, db, row)
     ontarget_n = 0
-    for tier, db in zip(labels, dbs):
+    for tier, db in zip(labels, dbs, strict=True):
         c = sqlite3.connect(db)
         c.row_factory = sqlite3.Row
         sql = _FETCH + (" AND ca.ext_id = ?" if args.case else "")
@@ -104,7 +108,9 @@ def main() -> None:
         c.close()
         for r in rows:
             case = cases[r["ext"]]
-            if localize(r["file"], r["line_start"], case.gt_hunks, args.tolerance).matched:
+            if localize(
+                r["file"], r["line_start"], case.gt_hunks, args.tolerance
+            ).matched:
                 ontarget_n += 1
                 continue
             offtarget.append((tier, db, dict(r)))
@@ -140,7 +146,7 @@ def main() -> None:
         )
 
     # Persist (idempotent) the site verdict onto every off-target row, per DB.
-    for _tier, db in zip(labels, dbs):
+    for _tier, db in zip(labels, dbs, strict=True):
         c = sqlite3.connect(db)
         for _t2, d2, r in offtarget:
             if d2 != db:

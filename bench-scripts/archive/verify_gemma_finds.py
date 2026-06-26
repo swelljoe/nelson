@@ -17,13 +17,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import pathlib
 import time
 
-from nelson import corpus
+from nelson import corpus, score
 from nelson import raw_api_loop as ral
-from nelson import score
 from nelson.runner import (
     build_competitor_prompt,
     parse_competitor_findings,
@@ -92,7 +90,7 @@ def main():
             final_text, dur = run_one(
                 case, args.target, src_root, args.server, args.label, rep
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"  [{args.label}#{rep}] ERROR {type(e).__name__}: {e}", flush=True)
             continue
         findings = parse_competitor_findings(final_text)

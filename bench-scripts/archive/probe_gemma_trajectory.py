@@ -108,7 +108,7 @@ def main() -> None:
             post=timed_post,
             src_root=src_root,
         )
-    except Exception as e:  # noqa: BLE001 - diagnostic: report and exit
+    except Exception as e:
         print(
             f"[{lbl}] EXCEPTION after {time.monotonic() - run_t0:.1f}s: {type(e).__name__}: {e}",
             flush=True,

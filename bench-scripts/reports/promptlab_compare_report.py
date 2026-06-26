@@ -21,8 +21,9 @@ import sqlite3
 from statistics import mean
 
 from analyze_promptlab import ARMS, BASELINE, ORDER, load
-from nelson.report_style import THEME_HEAD, THEME_TOGGLE
 from promptlab_report import CASE_META, CSS, HARD, finding_counts
+
+from nelson.report_style import THEME_HEAD, THEME_TOGGLE
 
 # Precision columns, reference (full precision) first. (label, db path,
 # competitor-name suffix). The 8-bit roster has no suffix; the BF16/6/4-bit

@@ -39,14 +39,22 @@ ignore = [
 "nelson/review.py" = ["E501"] # Long prompt strings
 "nelson/html_report.py" = ["E501"] # Inline CSS and HTML strings
 "tests/*" = ["S101", "S105", "S106"]  # asserts + fake env-var-name fixtures
-# Untracked experiment-harness scripts at the repo root (orchestrators, analyzers,
-# HTML-report generators). They carry long inline CSS/HTML/SQL strings; waive only
-# the line-length rule so `ruff check .` stays green as experiments come and go —
-# real lints (F/B/S/SIM/RUF) still apply.
-"analyze_*.py" = ["E501"]
-"run_*_experiment.py" = ["E501"]
-"*_report.py" = ["E501"]
-"fpjudge_*.py" = ["E501"]
+# bench-scripts/: benchmark orchestrators, analyzers and HTML-report generators.
+# They carry long inline CSS/HTML/SQL strings, so waive line-length across the
+# tree; real lints (F/B/S/SIM/RUF) still apply to the active tools.
+"bench-scripts/**" = ["E501"]
+# Parameterized dynamic-IN SQL: only `?` placeholders are interpolated into the
+# query string, never user values, so the flagged construction is safe.
+"bench-scripts/lib/clear_competitor_runs.py" = ["E501", "S608"]
+# bench-scripts/archive/: frozen one-shot scripts kept for provenance only (already
+# applied to the baseline, not part of any workflow) — exempt from style lints.
+"bench-scripts/archive/*" = ["E501", "S112", "SIM115", "RUF059"]
+
+[tool.ty.src]
+# bench-scripts/archive/ holds frozen one-shot scripts kept for provenance only;
+# they are not maintained code, so exempt them from type checking (the active
+# bench-scripts tools are still checked).
+exclude = ["bench-scripts/archive"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
