@@ -1,0 +1,49 @@
+# Tree-sitter A/B, confirmation run on FREE OpenRouter Gemma 4 models (isolated DB
+# nelson-treesitter-gemma.db). Goal: test whether the mimo junrar 0/3->2/3
+# structure-tool assist (see deepseek/mimo run) reproduces on different models, or
+# was a fluke. Each Gemma appears twice — same model, differing ONLY in tool_profile.
+#
+# Pre-flighted on OpenRouter /endpoints: both expose native tool-calling (the MoE
+# only via the Google AI Studio provider, but OpenRouter routes tool requests only
+# to tools-capable providers). Both free (0/0) -> cost null. Gemma 4 is a capable
+# auditor here (self-hosted it hit 43%@7/9, see nelson-gemma-minimax-baseline), but
+# had runaway-trajectory trouble on the 2 hardest cases — those may fail; the junrar
+# case under test is not one of them.
+
+# ── Gemma 4 31B (dense) ──────────────────────────────────────────────────────
+- name: raw-api-loop/gemma-4-31b
+  model: google/gemma-4-31b-it:free
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1"}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/gemma-4-31b-treesitter
+  model: google/gemma-4-31b-it:free
+  runtime: raw-api-loop
+  tool_profile: read-grep-treesitter
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1"}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+# ── Gemma 4 26B-A4B (MoE) ────────────────────────────────────────────────────
+- name: raw-api-loop/gemma-4-26b-a4b
+  model: google/gemma-4-26b-a4b-it:free
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1"}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/gemma-4-26b-a4b-treesitter
+  model: google/gemma-4-26b-a4b-it:free
+  runtime: raw-api-loop
+  tool_profile: read-grep-treesitter
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1"}'
+  size_class: small
+  knowledge_cutoff: 2025-06

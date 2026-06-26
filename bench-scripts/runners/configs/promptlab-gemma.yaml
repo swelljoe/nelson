@@ -1,0 +1,34 @@
+# Gemma 4 QAT prompt-lab over the FULL 9-case corpus. Same three arms as the Qwen
+# probe, but every source file the 9-case baseline audited per case (multi-file
+# cases list all their files; a case is detected if ANY file hits) so detection is
+# directly comparable to the baseline. See memory: nelson-gemma-qat-experiment.
+mode: arms
+competitors: bench-scripts/rosters/competitors-gemma-promptlab-qat.yaml
+cases_dir: cases/
+repeat: 2
+arms: [open, plan, checklist]
+targets:
+  CVE-2026-5199:
+    - service/worker/batcher/activities.go
+  CVE-2026-7474:
+    - client/hostvolumemanager/host_volume_plugin.go
+    - nomad/host_volume_endpoint.go
+  GHSA-9f49-8x56-jmjc:
+    - src/parser_common.c
+  GHSA-cc7p-2j3x-x7xf:
+    - src/web/UrlManager.php
+    - src/web/Request.php
+    - src/web/Controller.php
+    - src/services/Tokens.php
+    - src/helpers/UrlHelper.php
+  GHSA-f26g-jm89-4g65:
+    - gix-submodule/src/access.rs
+  GHSA-j273-m5qq-6825:
+    - src/main/java/com/github/junrar/LocalFolderExtractor.java
+  GHSA-mpxh-8fq3-x8mh:
+    - libfreerdp/codec/planar.c
+  GHSA-w52v-v783-gw97:
+    - ghost/core/core/server/models/base/plugins/crud.js
+    - ghost/core/core/server/api/endpoints/utils/serializers/input/utils/slug-filter-order.js
+  GHSA-x9h5-r9v2-vcww:
+    - MagickCore/draw.c

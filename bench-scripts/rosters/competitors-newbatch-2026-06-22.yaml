@@ -1,0 +1,35 @@
+# Two more free OpenRouter models added to the baseline 9-vuln benchmark in
+# nelson.db (2026-06-22), one trial/case, surgically upserted — see run script
+# header. Both finish out a model family already partly in the field. Existence,
+# tool-calling, pricing, and context window verified live against the OpenRouter
+# /endpoints catalogue before the run.
+
+# Nemotron 3 Nano Omni 30B-A3B (reasoning) via OpenRouter, free endpoint. The
+# SMALLEST nemotron, completing the trio already in the field
+# (super-120b-a12b "small", ultra-550b-a55b "medium"). NO paid sibling exists in
+# the catalogue (only the :free endpoint) → cost stays null, same honest
+# "unpriced free" treatment as cohere/north-mini-code / nex-n2-pro / owl-alpha;
+# tokens still metered. Native tool-calling confirmed, 256k ctx.
+- name: raw-api-loop/nemotron-3-nano-omni
+  model: nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1"}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+# Poolside Laguna XS.2 33B-A3B MoE via OpenRouter, free endpoint. The smaller
+# sibling of laguna-m.1 (already in the field, scored poorly) — included for the
+# data point even though the family underperforms, as expected. A PAID sibling
+# exists (poolside/laguna-xs.2 at 0.10/0.20 USD/MTok, verified live), so — same
+# convention as the nemotron :free endpoints — we bill at the paid sibling's
+# price rather than null. Native tool-calling confirmed, 262k ctx.
+- name: raw-api-loop/laguna-xs.2
+  model: poolside/laguna-xs.2:free
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1", "input_usd_per_mtok": 0.10, "output_usd_per_mtok": 0.20}'
+  size_class: small
+  knowledge_cutoff: 2025-06

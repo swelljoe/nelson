@@ -1,0 +1,48 @@
+# Tree-sitter A/B (isolated DB nelson-treesitter-exp.db). Each cloud model appears
+# TWICE — same model, same uniform prompt, differing ONLY in tool_profile — so the
+# pair measures what structural (tree-sitter) context adds:
+#   read-grep           -> base 3 sandboxed tools (control, == baseline)
+#   read-grep-treesitter -> base 3 + outline + symbol (structure/AST, no bug rules)
+#
+# Models are the actual baseline pair, with EXPLICIT pro ids (the earlier semgrep
+# A/B accidentally used deepseek-v4-flash via an alias). Run with --repeat 3 to
+# separate a real effect from the run-to-run variance we saw at n=1. Pricing copied
+# from competitors-cheapfree.yaml.
+
+# ── deepseek-v4-pro ──────────────────────────────────────────────────────────
+- name: raw-api-loop/deepseek-pro
+  model: deepseek-v4-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: deepseek-api-key
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.435, "input_cache_hit_usd_per_mtok": 0.003625, "output_usd_per_mtok": 0.87}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/deepseek-pro-treesitter
+  model: deepseek-v4-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep-treesitter
+  auth_profile: deepseek-api-key
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.435, "input_cache_hit_usd_per_mtok": 0.003625, "output_usd_per_mtok": 0.87}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+# ── mimo-v2.5-pro ────────────────────────────────────────────────────────────
+- name: raw-api-loop/mimo
+  model: mimo-v2.5-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: mimo-api-key
+  cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1", "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/mimo-treesitter
+  model: mimo-v2.5-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep-treesitter
+  auth_profile: mimo-api-key
+  cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1", "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4}'
+  size_class: large
+  knowledge_cutoff: 2025-06

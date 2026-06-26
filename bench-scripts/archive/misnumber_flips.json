@@ -1,0 +1,15 @@
+[
+  {
+    "run_id": 416,
+    "case": "GHSA-f26g-jm89-4g65",
+    "cwe": "CWE-183, CWE-349, CWE-501, CWE-77",
+    "comp": "raw-api-loop/hy3-preview",
+    "file": "gix-submodule/src/access.rs",
+    "claimed_line": 115,
+    "true_line": 179,
+    "drift": 64,
+    "code": "let has_value_from_foreign_section = self",
+    "explanation": "The update() method attempts to prevent Command variant from being used in .gitmodules files by checking if the value came from a foreign section. However, the check only verifies if ANY foreign section exists with the same submodule name, not whether the foreign section actually contains the update value. This allows an attacker to bypass the check by ensuring there's a foreign section with the s",
+    "reported_cwe": "CWE-863"
+  }
+]

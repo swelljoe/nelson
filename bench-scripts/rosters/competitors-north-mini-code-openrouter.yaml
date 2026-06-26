@@ -1,0 +1,20 @@
+# North-Mini-Code 1.0 RE-POINTED to OpenRouter's free endpoint (2026-06-22).
+#
+# The original local run (10.20.30.1:8000, llama.cpp Q8) was crippled by a
+# model/llama.cpp bug — pathological ~1 tok/s collapse + HTTP-500 "peg-native
+# format" errors → 11/15 cells infra_error'd. This re-points the SAME competitor
+# (raw-api-loop/north-mini-code) at OpenRouter so it gets a fair, timeout-free
+# measurement. The run script deletes the 15 crippled local runs first so the
+# matrix re-plans all 15 cells fresh on the new endpoint.
+#
+# cohere/north-mini-code:free — native tool-calling, 256k ctx, no paid sibling
+# in the catalogue → cost stays null (same honest "unpriced free" treatment as
+# nex-n2-pro / owl-alpha), tokens still metered. Verified live 2026-06-22.
+- name: raw-api-loop/north-mini-code
+  model: cohere/north-mini-code:free
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1"}'
+  size_class: small
+  knowledge_cutoff: 2025-06

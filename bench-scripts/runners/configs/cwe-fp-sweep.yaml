@@ -1,0 +1,14 @@
+# CWE-sweep false-positive probe. For each case+file, run one oracle-CWE hint per
+# applicable weakness class for the file's language, plus a final open baseline.
+# Measures how many false positives the "many individual CWE prompts, union"
+# method produces (the wrong-CWE prompts' findings). Two single-file cases: Ghost's
+# real CWE-89 injection site and libyang's single C source. cwe-sweep does one
+# trial per CWE (repeat is ignored). See memory: nelson-cwe-sweep-fp-experiment.
+mode: cwe-sweep
+competitors: bench-scripts/rosters/competitors-local-qwen.yaml
+cases_dir: cases/
+targets:
+  GHSA-w52v-v783-gw97:
+    - ghost/core/core/server/api/endpoints/utils/serializers/input/utils/slug-filter-order.js
+  GHSA-9f49-8x56-jmjc:
+    - src/parser_common.c

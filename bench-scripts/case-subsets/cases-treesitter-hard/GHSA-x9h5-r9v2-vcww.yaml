@@ -1,0 +1,35 @@
+ext_id: GHSA-x9h5-r9v2-vcww
+source: cvd
+cve_id: CVE-2026-33901
+ghsa_id: GHSA-x9h5-r9v2-vcww
+ant_id: ANT-2026-T44WA684
+project: ImageMagick
+repo_url: https://github.com/ImageMagick/ImageMagick
+fix_commit: 4c72003e9e54a4ebaa938d239e75f5d285527ebe
+vuln_commit: d27b840a61b322419a66d0d192ff56d52498148d
+bug_class: heap-buffer-overflow
+cwe: CWE-122
+severity: high
+disclosure_date: '2026-05-20T07:40:37.681447Z'
+status: vetted
+vet_confidence: 0.82
+vet_notes: The advisory (heap overflow in MVG pattern rendering via CopyMagickString
+  lacking a bounds check) precisely matches the fix, which adds an upper-bound guard
+  `(q-p+4+1) > MagickPathExtent` to two parsing sites that previously only validated
+  the lower bound `(q-4) < p`; the missing length check on a MagickPathExtent-sized
+  destination buffer is a genuine, model-findable overflow rather than a hardening/version
+  bump. Confidence is slightly reduced because the diff shows only the guard, not
+  the CopyMagickString call/buffer declaration, so identifiability depends on the
+  model reading the surrounding function.
+description: Heap buffer overflow in MVG pattern rendering via CopyMagickString without
+  bounds check
+build_recipe: null
+gt_files:
+- MagickCore/draw.c
+gt_hunks:
+- file: MagickCore/draw.c
+  start: 3462
+  end: 3468
+- file: MagickCore/draw.c
+  start: 3577
+  end: 3583

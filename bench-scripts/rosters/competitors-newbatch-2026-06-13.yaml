@@ -1,0 +1,58 @@
+# Four new competitors added to the baseline 9-vuln benchmark in nelson.db
+# (2026-06-13), one trial/case, surgically upserted — see run script header.
+# Pricing/tool-calling verified live against the OpenRouter catalogue and the
+# local server on 2026-06-13.
+
+# Self-hosted VibeThinker 3B (F16) on the Strix Halo box (same server that hosts
+# qwen3.6-27b), reachable at http://10.20.30.2:8080/v1. A tiny 3B model included
+# as a curiosity — it advertises benchmark scores well above its size class, so
+# this tests whether that translates to real vuln-finding (expected: too small).
+# Self-hosted → no per-token price, cost stays null (tokens still metered).
+# 1800s per-call http_timeout to match the other slow-APU local competitor.
+- name: raw-api-loop/vibethinker-3b
+  model: mradermacher/VibeThinker-3B-GGUF:F16   # must match the server's loaded model id exactly
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key   # any non-empty value from $LMSTUDIO_API_KEY on the host
+  cost_model: '{"base_url": "http://10.20.30.2:8080/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+# GLM 5.2 (Zhipu) via OpenRouter — the successor to the glm-5.1 already in the
+# baseline. Pricing 1.40/4.40 USD/MTok, native tool-calling, 1M ctx (verified
+# 2026-06-13 against the OpenRouter catalogue).
+- name: raw-api-loop/glm-5.2
+  model: z-ai/glm-5.2
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1", "input_usd_per_mtok": 1.40, "output_usd_per_mtok": 4.40}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+# Kimi K2.7 Code (Moonshot) via OpenRouter — a code-specialized successor to the
+# kimi-k2.6 already in the baseline. Pricing 0.74/3.50 USD/MTok, native
+# tool-calling, 262k ctx (verified 2026-06-13).
+- name: raw-api-loop/kimi-k2.7-code
+  model: moonshotai/kimi-k2.7-code
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1", "input_usd_per_mtok": 0.74, "output_usd_per_mtok": 3.50}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+# Nex N2 Pro (Nex AGI) via OpenRouter, free endpoint — no paid sibling exists in
+# the catalogue, so (like owl-alpha / laguna-m.1) cost stays null, the honest
+# "unpriced free preview" treatment, with tokens still metered. Native
+# tool-calling, 262k ctx (verified 2026-06-13). The `:free` endpoint is
+# rate-limited; a hard daily cap surfaces as infra_error (never a miss) →
+# re-run with --retry-failed.
+- name: raw-api-loop/nex-n2-pro
+  model: nex-agi/nex-n2-pro:free
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1"}'
+  size_class: large
+  knowledge_cutoff: 2025-06

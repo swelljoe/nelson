@@ -34,6 +34,10 @@ eggs/
 .eggs/
 lib/
 lib64/
+# bench-scripts/lib/ is project source, not a Python build dir — re-include it
+# (the generic packaging `lib/` rule above would otherwise swallow it).
+!bench-scripts/lib/
+!bench-scripts/lib/**
 parts/
 sdist/
 var/
