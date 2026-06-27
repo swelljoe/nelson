@@ -1,0 +1,77 @@
+# Repo-scope vs file-scope A/B (isolated DB nelson-reposcope-exp.db). Question:
+# does letting a model audit the WHOLE mounted tree (navigating across files)
+# crack bugs it misses under the per-file blind audit? Motivated by the one
+# tree-sitter win (mimo cracked a multi-method bug via cross-file navigation) and
+# the hard-case audit (the 0/field cases — cross-file authz, UAF spanning
+# alloc/free — resist single-file reads). Target cases = the four NEITHER
+# DeepSeek V4 Pro NOR MiMo found at file scope (CVE-2026-5199, 9f49 libyang UAF,
+# cc7p CraftCMS authz, x9h5 ImageMagick heap).
+#
+# Each model appears TWICE — identical except the repo-scope arm carries
+# "repo_scope": true in cost_model, which (a) collapses the per-file fan-out to one
+# cell per case and (b) swaps the file-scoped intro for the whole-tree intro. The
+# distinct names keep the two arms separate in the leaderboard/report. The control
+# arm reproduces the (known-zero) file-scope baseline IN THIS harness/DB so the
+# comparison is apples-to-apples, not against a different run.
+#
+# Gemma 4 31B dense is self-hosted on the Strix Halo (10.20.30.2), free; include it
+# because it's free and can't hurt. NOTE: for repo-scope to be a fair test on the
+# large C repos (libyang, ImageMagick), bump that llama-server's context to the full
+# 256k (-c 262144) — at the default ~100k a whole-repo audit can overflow.
+
+# ── DeepSeek V4 Pro (api.deepseek.com) ───────────────────────────────────────
+- name: raw-api-loop/deepseek-pro
+  model: deepseek-v4-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: deepseek-api-key
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.435, "input_cache_hit_usd_per_mtok": 0.003625, "output_usd_per_mtok": 0.87}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/deepseek-pro-reposcope
+  model: deepseek-v4-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: deepseek-api-key
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.435, "input_cache_hit_usd_per_mtok": 0.003625, "output_usd_per_mtok": 0.87, "repo_scope": true}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+# ── MiMo 2.5 Pro (xiaomimimo) ────────────────────────────────────────────────
+- name: raw-api-loop/mimo
+  model: mimo-v2.5-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: mimo-api-key
+  cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1", "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/mimo-reposcope
+  model: mimo-v2.5-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: mimo-api-key
+  cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1", "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4, "repo_scope": true}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+# ── Gemma 4 31B dense (self-hosted, Strix Halo 10.20.30.2, free) ──────────────
+- name: raw-api-loop/gemma-4-31b
+  model: unsloth/gemma-4-31B-it-qat-GGUF:UD-Q4_K_XL
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key
+  cost_model: '{"base_url": "http://10.20.30.2:8000/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/gemma-4-31b-reposcope
+  model: unsloth/gemma-4-31B-it-qat-GGUF:UD-Q4_K_XL
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key
+  cost_model: '{"base_url": "http://10.20.30.2:8000/v1", "http_timeout": 1800, "repo_scope": true}'
+  size_class: small
+  knowledge_cutoff: 2025-06

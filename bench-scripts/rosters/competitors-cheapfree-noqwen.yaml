@@ -1,0 +1,73 @@
+# Cheap/free cohort WITHOUT local Qwen — for the --repeat noise study. Qwen is
+# dropped here (its first-call hangs + APU slowness make it a poor fit for a
+# multi-trial run; MTP work on the Strix Halo proceeds independently). Five
+# raw-api-loop competitors: deepseek + mimo (cheap direct APIs) and the three
+# free OpenRouter endpoints (nemotron :free, owl-alpha stealth, laguna :free).
+# Entries copied verbatim from competitors-cheapfree.yaml.
+
+# DeepSeek, pinned to explicit model ids. The `deepseek-chat` alias DeepSeek
+# routes to v4-pro OR v4-flash at its own discretion (pro 2026-05-30, flash
+# 2026-05-31) — silently mixing tiers — so we pin both as separate competitors
+# to compare them honestly. /models lists exactly: deepseek-v4-pro, -flash.
+# PRICING IS VERIFY-AT-WIRING: confirm both tiers against the DeepSeek portal.
+- name: raw-api-loop/deepseek-pro
+  model: deepseek-v4-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: deepseek-api-key  # value from $DEEPSEEK_API_KEY on the host
+  # DeepSeek pro PROMOTIONAL pricing (2026-05-31, until promo ends): cache-MISS
+  # input 0.435 / cache-HIT 0.003625 / output 0.87. input rate = MISS/list;
+  # compute_cost is cache-blind → overcounts. cache-hit stashed for the fix.
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.435, "input_cache_hit_usd_per_mtok": 0.003625, "output_usd_per_mtok": 0.87}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/deepseek-flash
+  model: deepseek-v4-flash
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: deepseek-api-key
+  # DeepSeek flash (verified 2026-05-31): cache-MISS input 0.14, cache-HIT 0.0028
+  # (50x cheaper), output 0.28. input_usd_per_mtok is the MISS/list rate; our
+  # compute_cost is cache-blind, so recorded cost OVERCOUNTS (most ReAct input is
+  # cache reads). input_cache_hit_usd_per_mtok is stashed for cache-aware costing.
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.14, "input_cache_hit_usd_per_mtok": 0.0028, "output_usd_per_mtok": 0.28}'
+  size_class: medium
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/mimo
+  model: mimo-v2.5-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: mimo-api-key       # value from $MIMO_API_KEY on the host
+  cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1", "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+# ── Free OpenRouter endpoints (one openrouter-api-key) ───────────────────────
+- name: raw-api-loop/nemotron-3-super-120b
+  model: nvidia/nemotron-3-super-120b-a12b:free
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1", "input_usd_per_mtok": 0.09, "output_usd_per_mtok": 0.45}'
+  size_class: small   # 120b-a12b: self-hostable, smaller class than the 550b-a55b "medium"
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/owl-alpha
+  model: openrouter/owl-alpha
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1"}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/laguna-m.1
+  model: poolside/laguna-m.1:free
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1"}'
+  size_class: medium
+  knowledge_cutoff: 2025-06

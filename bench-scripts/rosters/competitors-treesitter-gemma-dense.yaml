@@ -1,0 +1,26 @@
+# Dense-ONLY tree-sitter A/B (the MoE arm was dropped — it finds fewer bugs and
+# hallucinates far more; see nelson-gemma-qat-experiment). Just the 31B dense
+# model, control (read-grep) vs treesitter (read-grep-treesitter), concurrency 1.
+# Moved to the Strix Halo (10.20.30.2), which is the reliable host for this task;
+# the desktop (10.20.30.1) OOM-crashed mid-run. The model id must match the id
+# llama-server has loaded on 10.20.30.2 exactly. Resume DB nelson-treesitter-hard-dense.db.
+
+# ── Gemma 4 31B dense (10.20.30.2, Strix Halo) ───────────────────────────────
+- name: raw-api-loop/gemma-4-31b
+  model: unsloth/gemma-4-31B-it-qat-GGUF:UD-Q4_K_XL
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key
+  cost_model: '{"base_url": "http://10.20.30.2:8000/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/gemma-4-31b-treesitter
+  model: unsloth/gemma-4-31B-it-qat-GGUF:UD-Q4_K_XL
+  runtime: raw-api-loop
+  tool_profile: read-grep-treesitter
+  auth_profile: lmstudio-api-key
+  cost_model: '{"base_url": "http://10.20.30.2:8000/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+

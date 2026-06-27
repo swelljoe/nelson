@@ -1,0 +1,22 @@
+# Open-prompt strategy probe (Qwen 3.6). Three non-leaking prompting arms over six
+# single-file cases spanning a 18->0 baseline-detection range and five languages.
+# Used for the prompt-lab + quant-sweep experiments (8/6/4-bit/BF16 share this
+# config, only the roster/DB differ). See memory: nelson-promptlab-experiment.
+mode: arms
+competitors: bench-scripts/rosters/competitors-qwen-promptlab.yaml
+cases_dir: cases/
+repeat: 2
+arms: [open, plan, checklist]
+targets:
+  GHSA-w52v-v783-gw97:   # CWE-89  JS    18/20 (hit anchor / regression guard)
+    - ghost/core/core/server/api/endpoints/utils/serializers/input/utils/slug-filter-order.js
+  GHSA-j273-m5qq-6825:   # CWE-22  Java  17/20
+    - src/main/java/com/github/junrar/LocalFolderExtractor.java
+  GHSA-f26g-jm89-4g65:   # CWE-77  Rust  11/20
+    - gix-submodule/src/access.rs
+  GHSA-x9h5-r9v2-vcww:   # CWE-122 C      1/21 (hard miss)
+    - MagickCore/draw.c
+  GHSA-9f49-8x56-jmjc:   # CWE-416 C      1/21 (hard miss, primary target)
+    - src/parser_common.c
+  CVE-2026-5199:         # CWE-639 Go     0/21 (hardest miss)
+    - service/worker/batcher/activities.go

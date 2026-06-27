@@ -1,0 +1,25 @@
+# Prompt-lab experiment roster, 6-BIT build: the same two local Qwen 3.6 models
+# and endpoints as competitors-qwen-promptlab.yaml, but the servers now load the
+# UD-Q6_K_XL quant (vs UD-Q8_K_XL). Sampling temperature is held at 0.5 so the
+# --repeat trials explore different reasoning paths (at the default 0.1 the open
+# prompt is near-deterministic and repeats just re-bill the same answer);
+# llama-server's default seed=-1 then randomizes per request for real run-to-run
+# diversity. http_timeout stays at the known-good 1800. FREE (self-hosted). This
+# is the 6-bit counterpart used to A/B the quant against the 8-bit promptlab run.
+- name: raw-api-loop/qwen3.6-27b-q6-k-xl
+  model: unsloth/Qwen3.6-27B-MTP-GGUF:UD-Q6_K_XL # must match the server's loaded model id exactly
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key   # any non-empty value from $LMSTUDIO_API_KEY on the host
+  cost_model: '{"base_url": "http://10.20.30.1:8000/v1", "http_timeout": 1800, "temperature": 0.5}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/qwen3.6-35b-A3b-q6-k-xl
+  model: unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q6_K_XL # must match the server's loaded model id exactly
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key   # any non-empty value from $LMSTUDIO_API_KEY on the host
+  cost_model: '{"base_url": "http://10.20.30.2:8080/v1", "http_timeout": 1800, "temperature": 0.5}'
+  size_class: small
+  knowledge_cutoff: 2025-06

@@ -1,0 +1,34 @@
+# Two new competitors added to the baseline 9-vuln benchmark in nelson.db
+# (2026-06-21), one trial/case, surgically upserted — see run script header.
+# Pricing/tool-calling verified live against the OpenRouter catalogue and the
+# local server before the run.
+
+# Self-hosted North-Mini-Code 1.0 on the Strix Halo box at 10.20.30.1:8000
+# (same host that served the gemma 31b dense), reachable at
+# http://10.20.30.1:8000/v1. A small code-specialized model included as a
+# curiosity. Self-hosted → no per-token price, cost stays null (tokens still
+# metered). 1800s per-call http_timeout to match the other slow-APU locals.
+- name: raw-api-loop/north-mini-code
+  model: unsloth/North-Mini-Code-1.0-GGUF:UD-Q8_K_XL   # must match the server's loaded model id exactly (Q8 quant)
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key   # any non-empty value from $LMSTUDIO_API_KEY on the host
+  cost_model: '{"base_url": "http://10.20.30.1:8000/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+# Nemotron 3 Ultra 550B-A55B (NVIDIA) via OpenRouter, free endpoint. A PAID
+# sibling exists (nvidia/nemotron-3-ultra-550b-a55b at 0.50/2.20 USD/MTok,
+# verified live against the catalogue), so — exactly as the original
+# nemotron:free was handled — we bill the free endpoint at the paid sibling's
+# price rather than null. Native tool-calling confirmed. The `:free` endpoint is
+# rate-limited; a hard daily cap surfaces as infra_error (never a miss) → re-run
+# with --retry-failed.
+- name: raw-api-loop/nemotron-3-ultra
+  model: nvidia/nemotron-3-ultra-550b-a55b:free
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1", "input_usd_per_mtok": 0.50, "output_usd_per_mtok": 2.20}'
+  size_class: medium
+  knowledge_cutoff: 2025-06

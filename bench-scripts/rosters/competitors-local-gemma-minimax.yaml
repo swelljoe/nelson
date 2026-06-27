@@ -1,0 +1,27 @@
+- name: raw-api-loop/gemma4-31b
+  model: unsloth/gemma-4-31B-it-GGUF:UD-Q8_K_XL # must match the server's loaded model id exactly
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key   # any non-empty value from $LMSTUDIO_API_KEY on the host
+  cost_model: '{"base_url": "http://10.20.30.1:8000/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/gemma4-26b-a4b
+  model: unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q8_K_XL # must match the server's loaded model id exactly
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key   # any non-empty value from $LMSTUDIO_API_KEY on the host
+  cost_model: '{"base_url": "http://10.20.30.1:8000/v1", "http_timeout": 1800}'  # moved to the faster dual-V620 box to retry the 2 cells the Strix Halo APU couldn't finish; 30-min cap
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/minimax-m3
+  model: minimax/minimax-m3
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: openrouter-api-key
+  cost_model: '{"base_url": "https://openrouter.ai/api/v1", "input_usd_per_mtok": 0.30, "output_usd_per_mtok": 1.20}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+

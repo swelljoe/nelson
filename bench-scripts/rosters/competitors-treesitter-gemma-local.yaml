@@ -1,0 +1,54 @@
+# Tree-sitter A/B on SELF-HOSTED Gemma 4 (QAT 4-bit), the real confirmation: can
+# structure tools flip HARD cases Gemma never finds blind? (isolated DB
+# nelson-treesitter-hard.db). Each model appears twice — same model, differing ONLY
+# in tool_profile. Free (local), so the OpenRouter free-tier rate limit is moot.
+#
+# Cases under test (all hard: found by only 1-2 models in the field, never by Gemma,
+# and they resist single-file blind audit per the hard-case fairness audit):
+#   GHSA-cc7p (CraftCMS, CWE-863 authz, PHP, 5 files)  - multi-file authz
+#   GHSA-9f49 (libyang, CWE-416 use-after-free, C)     - lifetime across calls
+#   GHSA-x9h5 (ImageMagick, CWE-122 heap overflow, C)  - large draw.c
+# If tree-sitter (outline/symbol cross-reference) flips any miss->hit, that is the
+# "structure helps where navigation is the bottleneck" hypothesis confirmed.
+#
+# Servers: 31B dense on 10.20.30.1, 26B-A4B MoE on 10.20.30.2 (model ids must match
+# each llama-server's loaded id exactly). http_timeout 1800 (local Gemma can run a
+# long trajectory on big C files; a tight cap would false-fail it as infra_error).
+
+# ── Gemma 4 31B dense (10.20.30.1) ───────────────────────────────────────────
+- name: raw-api-loop/gemma-4-31b
+  model: unsloth/gemma-4-31B-it-qat-GGUF:UD-Q4_K_XL
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key
+  cost_model: '{"base_url": "http://10.20.30.1:8000/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/gemma-4-31b-treesitter
+  model: unsloth/gemma-4-31B-it-qat-GGUF:UD-Q4_K_XL
+  runtime: raw-api-loop
+  tool_profile: read-grep-treesitter
+  auth_profile: lmstudio-api-key
+  cost_model: '{"base_url": "http://10.20.30.1:8000/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+# ── Gemma 4 26B-A4B MoE (10.20.30.2) ─────────────────────────────────────────
+- name: raw-api-loop/gemma-4-26b-a4b
+  model: unsloth/gemma-4-26B-A4B-it-qat-GGUF:UD-Q4_K_XL
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key
+  cost_model: '{"base_url": "http://10.20.30.2:8000/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/gemma-4-26b-a4b-treesitter
+  model: unsloth/gemma-4-26B-A4B-it-qat-GGUF:UD-Q4_K_XL
+  runtime: raw-api-loop
+  tool_profile: read-grep-treesitter
+  auth_profile: lmstudio-api-key
+  cost_model: '{"base_url": "http://10.20.30.2:8000/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06

@@ -1,0 +1,20 @@
+# Qwen AgentWorld 35B-A3B (self-hosted, 8-bit MoE) added to the baseline 9-vuln
+# benchmark in nelson.db (2026-06-25). A small Qwen-series MoE trained for
+# agentic use; served via llama-server on the Strix Halo box at 10.20.30.2:8080
+# (same host that previously ran qwen3.6-35b-A3b — now loaded with AgentWorld).
+#
+# Model id must match the server's loaded id EXACTLY (verified live via
+# /v1/models): unsloth/Qwen-AgentWorld-35B-A3B-GGUF:UD-Q8_K_XL. Native
+# tool-calling confirmed (finish_reason=tool_calls on a probe). FREE (local).
+#
+# http_timeout 1800 — the known-good value for this hardware (per the prior
+# self-hosted Qwen run; raising it only lets a hung first-generation call burn an
+# hour before false-failing as infra_error).
+- name: raw-api-loop/qwen-agentworld-35b-a3b
+  model: unsloth/Qwen-AgentWorld-35B-A3B-GGUF:UD-Q8_K_XL # must match the server's loaded model id exactly
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key   # any non-empty value from $LMSTUDIO_API_KEY on the host
+  cost_model: '{"base_url": "http://10.20.30.2:8080/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06

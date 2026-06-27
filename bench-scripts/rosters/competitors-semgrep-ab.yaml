@@ -1,0 +1,51 @@
+# Semgrep A/B prototype roster (isolated DB nelson-semgrep-exp.db).
+#
+# Each cheap model appears TWICE — same model, same uniform prompt, differing
+# ONLY in tool_profile — so the pair is a clean head-to-head measuring what the
+# static-analysis tool adds:
+#   read-grep         -> the base 3 sandboxed tools (control, == the baseline)
+#   read-grep-semgrep -> base 3 + the semgrep tool (treatment)
+#
+# Two cheap models (deepseek-flash, mimo) hedge single-model noise; if semgrep
+# helps, the treatment side should out-detect the control on at least one. The
+# `-semgrep` container image bakes in semgrep + a 2026-04-01-pinned ruleset, so
+# the tool cannot encode any (2026-05-disclosed) corpus CVE. Pricing copied from
+# competitors-cheapfree.yaml.
+
+# ── deepseek-flash ───────────────────────────────────────────────────────────
+- name: raw-api-loop/deepseek-flash
+  model: deepseek-v4-flash
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: deepseek-api-key
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.14, "input_cache_hit_usd_per_mtok": 0.0028, "output_usd_per_mtok": 0.28}'
+  size_class: medium
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/deepseek-flash-semgrep
+  model: deepseek-v4-flash
+  runtime: raw-api-loop
+  tool_profile: read-grep-semgrep
+  auth_profile: deepseek-api-key
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.14, "input_cache_hit_usd_per_mtok": 0.0028, "output_usd_per_mtok": 0.28}'
+  size_class: medium
+  knowledge_cutoff: 2025-06
+
+# ── mimo ─────────────────────────────────────────────────────────────────────
+- name: raw-api-loop/mimo
+  model: mimo-v2.5-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: mimo-api-key
+  cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1", "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/mimo-semgrep
+  model: mimo-v2.5-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep-semgrep
+  auth_profile: mimo-api-key
+  cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1", "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4}'
+  size_class: large
+  knowledge_cutoff: 2025-06

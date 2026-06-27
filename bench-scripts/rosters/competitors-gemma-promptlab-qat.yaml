@@ -1,0 +1,35 @@
+# Prompt-lab experiment roster, GEMMA 4 QAT-4bit build. Same design as
+# competitors-qwen-promptlab-4bit.yaml (two local self-hosted models, raw-api-loop
+# read-grep harness, temperature 0.5 so the --repeat trials explore different
+# reasoning paths instead of re-billing one near-deterministic answer; llama-server
+# seed=-1 randomizes per request). FREE (self-hosted). This probes the new
+# Quantization-Aware-Training 4-bit Gemma 4 weights — the 26B-A4B MoE was a
+# surprise top performer at 8-bit (4/9 @ 100% precision, ties the field lead), so
+# we feel out its edges the way we did Qwen 3.6.
+#
+# Server assignment (dense on the faster dual-V620, MoE on the Strix Halo APU,
+# matching the baseline gemma layout):
+#   gemma4-31b-qat      (dense 31B)     -> http://10.20.30.1:8000/v1  (dual V620)
+#   gemma4-26b-a4b-qat  (MoE 26B-A4B)   -> http://10.20.30.2:8080/v1  (Strix Halo)
+#
+# NOTE: `model:` must match each server's loaded id EXACTLY — verify against
+# `curl http://HOST:8080/v1/models` once the weights finish downloading and adjust
+# if llama-server/lm-studio reports a different tag (esp. the 31B, given here
+# without an explicit quant suffix).
+- name: raw-api-loop/gemma4-31b-qat
+  model: unsloth/gemma-4-31B-it-qat-GGUF # must match the server's loaded model id exactly
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key   # any non-empty value from $LMSTUDIO_API_KEY on the host
+  cost_model: '{"base_url": "http://10.20.30.1:8000/v1", "http_timeout": 1800, "temperature": 0.5}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/gemma4-26b-a4b-qat
+  model: unsloth/gemma-4-26B-A4B-it-qat-GGUF # must match the server's loaded model id exactly
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key   # any non-empty value from $LMSTUDIO_API_KEY on the host
+  cost_model: '{"base_url": "http://10.20.30.2:8080/v1", "http_timeout": 1800, "temperature": 0.5}'
+  size_class: small
+  knowledge_cutoff: 2025-06

@@ -1,0 +1,95 @@
+# Big-budget repo-scope re-run (same DB nelson-reposcope-exp.db). The first
+# repo-scope pass was starved: 11/11 DeepSeek & MiMo whole-repo runs blew the
+# file-scope 500k-token / 40-step budget mid-navigation (DeepSeek force-answered
+# []). This roster re-runs repo-scope with NELSON_TOKEN_BUDGET=2M / MAX_STEPS=80
+# (set in run_reposcope_bigbudget.sh) so the whole-repo audit has room to converge.
+#
+# NON-DESTRUCTIVE: all SIX original arms are listed so sync_competitors retires
+# nothing (they stay active, their banked runs intact as the comparison baseline).
+# Only the THREE new "-2m" arms have gap cells, so only they run. The "-2m" suffix
+# keeps the fair repo-scope arms distinct from the starved "-reposcope" arms in the
+# leaderboard. Endpoint-grouped concurrency still serializes each model's arms onto
+# its one server (the two Gemma arms never double-book the Strix Halo).
+
+# ── ORIGINAL ARMS (kept active, not re-run — already complete) ────────────────
+- name: raw-api-loop/deepseek-pro
+  model: deepseek-v4-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: deepseek-api-key
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.435, "input_cache_hit_usd_per_mtok": 0.003625, "output_usd_per_mtok": 0.87}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/deepseek-pro-reposcope
+  model: deepseek-v4-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: deepseek-api-key
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.435, "input_cache_hit_usd_per_mtok": 0.003625, "output_usd_per_mtok": 0.87, "repo_scope": true}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/mimo
+  model: mimo-v2.5-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: mimo-api-key
+  cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1", "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/mimo-reposcope
+  model: mimo-v2.5-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: mimo-api-key
+  cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1", "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4, "repo_scope": true}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/gemma-4-31b
+  model: unsloth/gemma-4-31B-it-qat-GGUF:UD-Q4_K_XL
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key
+  cost_model: '{"base_url": "http://10.20.30.2:8000/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/gemma-4-31b-reposcope
+  model: unsloth/gemma-4-31B-it-qat-GGUF:UD-Q4_K_XL
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key
+  cost_model: '{"base_url": "http://10.20.30.2:8000/v1", "http_timeout": 1800, "repo_scope": true}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+# ── NEW: big-budget repo-scope arms (the only ones that run) ──────────────────
+- name: raw-api-loop/deepseek-pro-reposcope-2m
+  model: deepseek-v4-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: deepseek-api-key
+  cost_model: '{"base_url": "https://api.deepseek.com", "input_usd_per_mtok": 0.435, "input_cache_hit_usd_per_mtok": 0.003625, "output_usd_per_mtok": 0.87, "repo_scope": true}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/mimo-reposcope-2m
+  model: mimo-v2.5-pro
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: mimo-api-key
+  cost_model: '{"base_url": "https://token-plan-sgp.xiaomimimo.com/v1", "input_usd_per_mtok": 0.2, "output_usd_per_mtok": 0.4, "repo_scope": true}'
+  size_class: large
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/gemma-4-31b-reposcope-2m
+  model: unsloth/gemma-4-31B-it-qat-GGUF:UD-Q4_K_XL
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key
+  cost_model: '{"base_url": "http://10.20.30.2:8000/v1", "http_timeout": 3600, "repo_scope": true}'
+  size_class: small
+  knowledge_cutoff: 2025-06

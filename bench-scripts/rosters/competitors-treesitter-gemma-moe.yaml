@@ -1,0 +1,21 @@
+# MoE-only split of competitors-treesitter-gemma-local.yaml — run as its own
+# job (concurrency 1) on server 10.20.30.2, in parallel with the dense job.
+
+# ── Gemma 4 26B-A4B MoE (10.20.30.2) ─────────────────────────────────────────
+- name: raw-api-loop/gemma-4-26b-a4b
+  model: unsloth/gemma-4-26B-A4B-it-qat-GGUF:UD-Q4_K_XL
+  runtime: raw-api-loop
+  tool_profile: read-grep
+  auth_profile: lmstudio-api-key
+  cost_model: '{"base_url": "http://10.20.30.2:8000/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06
+
+- name: raw-api-loop/gemma-4-26b-a4b-treesitter
+  model: unsloth/gemma-4-26B-A4B-it-qat-GGUF:UD-Q4_K_XL
+  runtime: raw-api-loop
+  tool_profile: read-grep-treesitter
+  auth_profile: lmstudio-api-key
+  cost_model: '{"base_url": "http://10.20.30.2:8000/v1", "http_timeout": 1800}'
+  size_class: small
+  knowledge_cutoff: 2025-06

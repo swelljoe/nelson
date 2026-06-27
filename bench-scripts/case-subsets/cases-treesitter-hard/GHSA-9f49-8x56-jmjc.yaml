@@ -1,0 +1,32 @@
+ext_id: GHSA-9f49-8x56-jmjc
+source: cvd
+cve_id: null
+ghsa_id: GHSA-9f49-8x56-jmjc
+ant_id: ANT-2026-TZQ1KH7E
+project: libyang
+repo_url: https://github.com/CESNET/libyang
+fix_commit: 54c3276d871023da266d4ed3ceaee7e8d71d0b04
+vuln_commit: a4e3a89f441abcbd216285835e4a89e8f441017f
+bug_class: use-after-free
+cwe: CWE-416
+severity: medium
+disclosure_date: '2026-05-20T07:40:37.681447Z'
+status: vetted
+vet_confidence: 0.82
+vet_notes: The pre-patch code unconditionally does `*meta = (*meta)->next` whenever
+  `meta != &node->meta`, without checking that the freed node `meta2` is actually
+  the current head `*meta`, corrupting the list head and leading to a heap use-after-free
+  write consistent with the CWE-416 advisory; the fix is a genuine logic correction
+  (adding the `meta2 == *meta` guard), not a version bump or hardening. The flaw is
+  subtle but a careful model reasoning about list-head invariants around the adjacent
+  `lyd_free_meta_single` could plausibly spot the missing guard.
+description: Heap use-after-free write in metadata list management during XML data
+  parsing due to incorrect list head pointer update
+build_recipe: null
+gt_files:
+- src/parser_common.c
+- tests/fuzz/corpus/lyd_parse_mem_xml/advisory2026_03_26
+gt_hunks:
+- file: src/parser_common.c
+  start: 313
+  end: 320
