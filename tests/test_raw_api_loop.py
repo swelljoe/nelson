@@ -15,6 +15,7 @@ import nelson.raw_api_loop as ral
 from nelson.raw_api_loop import (
     MAX_HTTP_RETRIES,
     SEMGREP_TOOLS,
+    SHELL_TOOLS,
     TOOLS,
     TREESITTER_TOOLS,
     _format_semgrep,
@@ -26,6 +27,7 @@ from nelson.raw_api_loop import (
     run_loop,
     select_system_prompt,
     select_tools,
+    tool_bash,
     tool_grep,
     tool_list_dir,
     tool_outline,
@@ -443,6 +445,54 @@ def test_semgrep_dispatches_and_parses(tmp_path, monkeypatch):
     assert "1 finding" in out
     assert "q.py:12" in out and "python.lang.security.sqli" in out
     assert "dataflow: source q.py:3 -> sink q.py:12" in out
+
+
+# -- shell tool + profile selection -----------------------------------------
+
+
+def test_select_tools_shell_profile_adds_bash(monkeypatch):
+    monkeypatch.setenv("NELSON_TOOL_PROFILE", "read-grep-shell")
+    tools = select_tools()
+    assert tools == SHELL_TOOLS
+    names = {t["function"]["name"] for t in tools}
+    assert "bash" in names and {"read_file", "grep", "list_dir"} <= names
+    assert "semgrep" not in names  # profiles don't bleed into each other
+
+
+def test_select_system_prompt_shell_adds_note(monkeypatch):
+    monkeypatch.setenv("NELSON_TOOL_PROFILE", "read-grep-shell")
+    prompt = select_system_prompt()
+    assert prompt.startswith(ral.SYSTEM_PROMPT)
+    assert "bash" in prompt and "no network access" in prompt.lower()
+
+
+def test_bash_runs_command_with_cwd_at_src(tmp_path):
+    (tmp_path / "hello.c").write_text("int main(){return 0;}\n")
+    out = tool_bash({"command": "ls"}, str(tmp_path))
+    assert "hello.c" in out
+
+
+def test_bash_empty_command_is_error():
+    assert "empty command" in tool_bash({"command": "  "}, None)
+
+
+def test_bash_reports_nonzero_exit_and_stderr(tmp_path):
+    out = tool_bash({"command": "echo oops >&2; exit 3"}, str(tmp_path))
+    assert "(exit 3)" in out and "oops" in out
+
+
+def test_bash_truncates_large_output(tmp_path):
+    out = tool_bash({"command": "yes x | head -n 100000"}, str(tmp_path))
+    assert len(out) <= ral.MAX_TOOL_OUTPUT
+
+
+def test_bash_timeout_is_caught(tmp_path, monkeypatch):
+    def _raise(*a, **k):
+        raise ral.subprocess.TimeoutExpired(cmd="bash", timeout=ral.SHELL_WALL_TIMEOUT)
+
+    monkeypatch.setattr(ral.subprocess, "run", _raise)
+    out = tool_bash({"command": "sleep 999"}, str(tmp_path))
+    assert "timed out" in out
 
 
 # -- tree-sitter tools + profile selection ----------------------------------

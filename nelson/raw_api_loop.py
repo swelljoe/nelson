@@ -46,6 +46,7 @@ MAX_TOOL_OUTPUT = 20_000  # chars; keep a single tool result from blowing contex
 # Scanned offline via `--config <dir>` so no newer rule is fetched at run time.
 SEMGREP_RULES_DIR = os.environ.get("NELSON_SEMGREP_RULES", "/opt/semgrep-rules")
 SEMGREP_WALL_TIMEOUT = 240  # whole-scan subprocess cap (per-rule cap is --timeout)
+SHELL_WALL_TIMEOUT = 120  # per-command subprocess cap for the bash tool
 
 # tree-sitter (read-grep-treesitter profile): map a file extension to the grammar
 # name (and its baked-in per-language module). Covers the corpus languages.
@@ -175,6 +176,25 @@ TREESITTER_SYSTEM_NOTE = (
     "alone. They describe structure only; they do not judge security."
 )
 
+# Appended to the system prompt ONLY on a `shell` tool profile. The bash tool is a
+# real shell, so this announces the toolbelt (models will not reach for a tool they
+# were not told about) and the read-only/no-network sandbox shape. Like the other
+# notes it leaks nothing about the planted bug, and — as with semgrep — it stresses
+# that a clean command result is not proof of safety so the model does not
+# rubber-stamp a file. The control profile's prompt stays byte-identical.
+SHELL_SYSTEM_NOTE = (
+    " In addition to reading and grepping, you have a `bash` tool that runs shell "
+    "commands in the sandbox. The source tree is at /src (read-only); your home "
+    "directory and /tmp are writable for scratch work. You have a full Unix "
+    "toolbelt — coreutils, find, awk, sed, diff, file, jq, ctags, binutils "
+    "(objdump/nm/strings/readelf), hexdump/od — and python3 (with tree-sitter) for "
+    "writing and running small analysis scripts. There is no network access. Use "
+    "the shell freely to navigate, search, cross-reference, and analyze the code "
+    "however you find most effective; it complements the read and grep tools rather "
+    "than replacing them. A clean result from any command does NOT prove the file "
+    "is safe — you must still judge real exploitability yourself."
+)
+
 # OpenAI function-calling schema for the three sandboxed tools.
 TOOLS: list[dict[str, Any]] = [
     {
@@ -257,6 +277,43 @@ SEMGREP_TOOL: dict[str, Any] = {
 
 # read-grep-semgrep profile = the three base tools plus semgrep.
 SEMGREP_TOOLS: list[dict[str, Any]] = [*TOOLS, SEMGREP_TOOL]
+
+# The shell tool, advertised ONLY to competitors on a tool profile whose name
+# contains "shell" (see select_tools / NELSON_TOOL_PROFILE). Unlike the read tools
+# it is NOT path-confined — a real shell is the whole point — so confinement is the
+# container: /src is mounted read-only, the network is disabled, all capabilities
+# are dropped, and the container is ephemeral. The experiment it serves asks whether
+# a general toolbelt (the kind a tool-trained model is built to exploit) lifts
+# detection over the read-only baseline.
+SHELL_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": (
+            "Run a shell command in the sandbox. The source tree is at /src "
+            "(read-only); your home directory and /tmp are writable for scratch "
+            "work. A general toolbelt is available — coreutils, grep/ripgrep, find, "
+            "awk, sed, diff, file, jq, ctags, binutils (objdump/nm/strings/"
+            "readelf), hexdump/od — plus python3 (with tree-sitter). There is NO "
+            "network access. Output is truncated, so prefer targeted commands. Use "
+            "it to navigate, search, extract, and run small analysis scripts as you "
+            "would in a terminal."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "shell command, run via `bash -c` with cwd /src",
+                },
+            },
+            "required": ["command"],
+        },
+    },
+}
+
+# read-grep-shell profile = the three base tools plus a full bash shell.
+SHELL_TOOLS: list[dict[str, Any]] = [*TOOLS, SHELL_TOOL]
 
 # The tree-sitter tools, advertised ONLY to competitors on a profile whose name
 # contains "treesitter". They give STRUCTURE (definitions, signatures, cross-file
@@ -387,6 +444,41 @@ def tool_list_dir(args: dict[str, Any], src_root: str | None = None) -> str:
     except OSError as e:
         return f"error: {e}"
     return "\n".join(entries)[:MAX_TOOL_OUTPUT]
+
+
+def tool_bash(args: dict[str, Any], src_root: str | None = None) -> str:
+    """Run a shell command in the sandbox (read-grep-shell profile).
+
+    Deliberately NOT confined by ``_resolve_in_src`` — a real shell is the point.
+    Confinement is the container itself (see runner.py): /src is mounted read-only,
+    ``--network none`` blocks egress, ``--cap-drop ALL`` + ``no-new-privileges``
+    strip privilege, memory/cpu/pids are capped, and the container is ephemeral.
+    The command runs with cwd at the source root; scratch writes must target $HOME
+    or /tmp (the /src mount rejects writes). Output is merged stdout+stderr,
+    truncated to keep one result from blowing the context budget.
+    """
+    command = str(args.get("command", "")).strip()
+    if not command:
+        return "error: empty command"
+    cwd = src_root or SRC_ROOT
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", command],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=SHELL_WALL_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return f"error: command timed out after {SHELL_WALL_TIMEOUT}s"
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"error: {e}"
+    out = proc.stdout or ""
+    if proc.stderr:
+        out += ("\n" if out else "") + "[stderr] " + proc.stderr
+    if proc.returncode != 0:
+        out = f"(exit {proc.returncode})\n" + out
+    return (out or "(no output)")[:MAX_TOOL_OUTPUT]
 
 
 def _format_semgrep(data: dict[str, Any], rel: str) -> str:
@@ -649,6 +741,7 @@ TOOL_FUNCS: dict[str, Callable[[dict[str, Any], str | None], str]] = {
     "semgrep": tool_semgrep,
     "outline": tool_outline,
     "symbol": tool_symbol,
+    "bash": tool_bash,
 }
 
 
@@ -998,6 +1091,8 @@ def select_tools() -> list[dict[str, Any]]:
         return SEMGREP_TOOLS
     if "treesitter" in profile:
         return TREESITTER_TOOLS
+    if "shell" in profile:
+        return SHELL_TOOLS
     return TOOLS
 
 
@@ -1008,6 +1103,8 @@ def select_system_prompt() -> str:
         return SYSTEM_PROMPT + SEMGREP_SYSTEM_NOTE
     if "treesitter" in profile:
         return SYSTEM_PROMPT + TREESITTER_SYSTEM_NOTE
+    if "shell" in profile:
+        return SYSTEM_PROMPT + SHELL_SYSTEM_NOTE
     return SYSTEM_PROMPT
 
 

@@ -44,46 +44,42 @@ if TYPE_CHECKING:
 # no pip for the harness itself). The tag suffix forces `ensure_image` to rebuild
 # rather than reuse an older image cached under a previous tag.
 #
-# This "tools" image additionally carries optional static-analysis helpers used by
-# extended tool profiles — each tool is only *advertised* to competitors on its
-# profile; plain read-grep competitors run in the same image but never see them,
-# so those controls stay clean:
-#   - Semgrep + a DATE-PINNED community ruleset  -> read-grep-semgrep
+# This "tools" image additionally carries optional helpers used by extended tool
+# profiles — each tool is only *advertised* to competitors on its profile; plain
+# read-grep competitors run in the same image but never see them, so those controls
+# stay clean:
 #   - tree-sitter (structure/AST, no bug rules)  -> read-grep-treesitter
+#   - a full Unix shell toolbelt + python3        -> read-grep-shell
 #
-# Contamination guard (semgrep only): every corpus CVE was disclosed 2026-05-20/21,
-# so a semgrep-rules snapshot pinned to the last commit on/before SEMGREP_RULES_CUTOFF
-# (strictly before any disclosure) CANNOT contain a rule that encodes a planted bug.
-# Generic pattern rules (e.g. tainted-input-to-SQL) survive — that is the honest tool
-# capability we mean to measure; per-CVE rules are excluded by date. Rules are baked
-# in (.git stripped) so scans run fully offline at run time. tree-sitter needs no such
-# guard — it is a pure parser with no notion of vulnerabilities.
-IMAGE_TAG = "nelson-bench:fedora-tools"
+# The read-grep-shell profile exposes a `bash` tool, which can invoke ANY binary in
+# the image. That is why semgrep is deliberately absent here: keeping it out of the
+# image is the only way to keep it out of the shell experiment (an unadvertised
+# binary is still reachable from a shell). The earlier read-grep-semgrep experiment
+# is concluded and its results are frozen in nelson.db; to rebuild that image, check
+# out the Containerfile from before this change (it baked semgrep + a DATE-PINNED
+# offline ruleset). tree-sitter needs no contamination guard — it is a pure parser
+# with no notion of vulnerabilities. The shell has no network (--network none) so it
+# cannot reach an advisory, and the /src mount is git-archived (no .git) so it cannot
+# read the fix history.
+IMAGE_TAG = "nelson-bench:fedora-tools2"
 CONTAINERFILE = """\
 FROM registry.fedoraproject.org/fedora-minimal:41
-RUN microdnf install -y git ripgrep ca-certificates findutils shadow-utils python3 \\
-        python3-pip gcc python3-devel \\
+# Base harness deps + the read-grep-shell toolbelt. coreutils/grep/sed/gawk are
+# spelled out because fedora-minimal does not guarantee them; the rest is a
+# security-analysis kit: file (libmagic typing), binutils (objdump/nm/strings/
+# readelf), util-linux (hexdump), xxd, jq, ctags, diffutils, plus less/which/tar/gzip.
+RUN microdnf install -y git ripgrep ca-certificates findutils shadow-utils \\
+        coreutils grep sed gawk diffutils util-linux file binutils xxd jq ctags \\
+        less which tar gzip python3 python3-pip gcc python3-devel \\
     && microdnf clean all
-# Semgrep OSS engine (read-grep-semgrep) + tree-sitter grammars (read-grep-treesitter).
-# gcc/python3-devel are present so any grammar without a cp313 wheel builds from source.
-# Per-language grammar packages bake the compiled parser INTO the image (each wheel
-# ships its grammar) so scans are fully offline — unlike tree-sitter-language-pack,
-# which fetches grammars from GitHub at runtime and breaks with no network.
-RUN pip3 install --no-cache-dir semgrep tree-sitter \\
+# tree-sitter grammars (read-grep-treesitter, and usable from the shell's python3).
+# gcc/python3-devel are present so any grammar without a cp313 wheel builds from
+# source. Per-language grammar packages bake the compiled parser INTO the image
+# (each wheel ships its grammar) so it is fully offline — unlike
+# tree-sitter-language-pack, which fetches grammars from GitHub at runtime.
+RUN pip3 install --no-cache-dir tree-sitter \\
         tree-sitter-c tree-sitter-cpp tree-sitter-go tree-sitter-java \\
         tree-sitter-javascript tree-sitter-python tree-sitter-rust tree-sitter-php
-# Date-pinned community ruleset, baked in for offline contamination-free scans.
-ARG SEMGREP_RULES_CUTOFF=2026-04-01
-RUN git clone --filter=blob:none \\
-        https://github.com/semgrep/semgrep-rules /opt/semgrep-rules
-RUN cd /opt/semgrep-rules \\
-    && git checkout "$(git rev-list -1 --before=${SEMGREP_RULES_CUTOFF} HEAD)" \\
-    && rm -rf .git
-# Keep only real rule files. The repo also ships CI workflows, test fixtures, and
-# dev configs as .yaml; semgrep ABORTS the whole scan if any loaded config lacks a
-# top-level `rules:` key, so strip every non-rule yaml (leaves ~2050 rule files).
-RUN find /opt/semgrep-rules \\( -name '*.yaml' -o -name '*.yml' \\) \\
-        ! -exec grep -qE '^rules:' {} \\; -delete
 # A real passwd entry so the agent's getpwuid() works and HOME is writable.
 RUN useradd -u 1000 -m -s /bin/bash agent
 USER agent
