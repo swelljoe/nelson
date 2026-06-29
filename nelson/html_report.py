@@ -50,7 +50,6 @@ def generate_scan_report(db: Database, scan_id: int) -> str:
         raise ValueError(f"Scan {scan_id} not found")
 
     config = json.loads(s["config"]) if s["config"] else {}
-    mode = config.get("mode", "focused")
     models = ", ".join(config.get("models", []))
     findings = db.findings_for_scan(scan_id)
     counts = db.job_counts(scan_id)
@@ -82,7 +81,7 @@ def generate_scan_report(db: Database, scan_id: int) -> str:
 </head>
 <body>{THEME_TOGGLE}
 <h1>Nelson Scan Report</h1>
-<p class="subtitle">Scan {scan_id} — {escape(mode)} mode — {escape(s["target_dir"])}</p>
+<p class="subtitle">Scan {scan_id} — {escape(s["target_dir"])}</p>
 """)
 
     # Overview stats
@@ -105,7 +104,6 @@ def generate_scan_report(db: Database, scan_id: int) -> str:
     parts.append("<table>")
     parts.append(f"<tr><th>Target</th><td>{escape(s['target_dir'])}</td></tr>")
     parts.append(f"<tr><th>Commit</th><td>{escape(s['commit_sha'] or 'N/A')}</td></tr>")
-    parts.append(f"<tr><th>Mode</th><td>{escape(mode)}</td></tr>")
     parts.append(f"<tr><th>Models</th><td>{escape(models)}</td></tr>")
     parts.append(f"<tr><th>Started</th><td>{escape(s['started_at'] or '')}</td></tr>")
     parts.append(
@@ -218,7 +216,6 @@ def generate_summary_report(db: Database) -> str:
     for s in scans:
         scan_id = s["id"]
         config = json.loads(s["config"]) if s["config"] else {}
-        mode = config.get("mode", "focused")
         models = ", ".join(config.get("models", []))
         findings = db.findings_for_scan(scan_id)
         counts = db.job_counts(scan_id)
@@ -252,7 +249,6 @@ def generate_summary_report(db: Database) -> str:
                 "id": scan_id,
                 "target": s["target_dir"],
                 "commit": s["commit_sha"] or "",
-                "mode": mode,
                 "models": models,
                 "status": status,
                 "started": s["started_at"] or "",
@@ -300,7 +296,7 @@ def generate_summary_report(db: Database) -> str:
         parts.append("<h2>All Scans</h2>")
         parts.append(
             "<table><tr>"
-            "<th>ID</th><th>Target</th><th>Mode</th>"
+            "<th>ID</th><th>Target</th>"
             "<th>Models</th><th>Status</th><th>Jobs</th>"
             "<th>Findings</th><th>Confirmed</th>"
             "<th>False Pos</th><th>Needs Review</th>"
@@ -313,7 +309,6 @@ def generate_summary_report(db: Database) -> str:
                 f"<tr>"
                 f"<td>{r['id']}</td>"
                 f"<td>{escape(_short_path(r['target']))}</td>"
-                f"<td>{escape(r['mode'])}</td>"
                 f"<td>{escape(r['models'])}</td>"
                 f"<td>{_badge(r['status'])}</td>"
                 f"<td>{r['total_jobs']}</td>"
@@ -332,8 +327,7 @@ def generate_summary_report(db: Database) -> str:
         for r in scan_rows:
             parts.append('<div class="card">')
             parts.append(
-                f"<h3>Scan {r['id']} — {escape(r['mode'])} — "
-                f"{escape(_short_path(r['target']))}</h3>"
+                f"<h3>Scan {r['id']} — {escape(_short_path(r['target']))}</h3>"
             )
             parts.append(
                 f"<p>Models: {escape(r['models'])} · "

@@ -7,7 +7,7 @@ import threading
 from pathlib import Path
 
 from .agents import AgentAdapter, FailureKind, create_adapter
-from .cwe import CWE_OPEN, CWE_TOP_25, applicable_cwes, build_open_prompt, build_prompt
+from .cwe import build_open_prompt
 from .db import Database
 from .inventory import LANGUAGE_MAP, SourceFile, discover_files
 
@@ -31,26 +31,21 @@ def get_commit_sha(target_dir: str) -> str | None:
 def build_job_matrix(
     files: list[SourceFile],
     models: list[str],
-    cwe_ids: list[str] | None = None,
-    mode: str = "open",
-) -> list[tuple[str, str, str]]:
-    """Build (file_path, cwe_id, model_id) tuples.
+    repeat: int = 1,
+) -> list[tuple[str, str, str, int]]:
+    """Build (file_path, cwe_id, model_id, pass) tuples.
 
-    mode="open": one job per (file, model) with cwe_id="OPEN"
-    mode="focused": one job per (file, applicable CWE, model)
+    One open-ended job per (file, model, pass), with cwe_id="OPEN". ``repeat``
+    runs the whole matrix N times (passes 0..repeat-1); repetition is what
+    actually surfaces vulnerabilities, and duplicate findings across passes are
+    de-duplicated later, at review time.
     """
+    names = {spec: create_adapter(spec).name for spec in models}
     jobs = []
     for f in files:
         for model_spec in models:
-            adapter = create_adapter(model_spec)
-            if mode == "open":
-                jobs.append((f.path, "OPEN", adapter.name))
-            else:
-                cwes = applicable_cwes(f.language)
-                if cwe_ids:
-                    cwes = [c for c in cwes if c.id in cwe_ids]
-                for cwe in cwes:
-                    jobs.append((f.path, cwe.id, adapter.name))
+            for p in range(repeat):
+                jobs.append((f.path, "OPEN", names[model_spec], p))
     return jobs
 
 
@@ -58,8 +53,7 @@ def create_scan(
     db: Database,
     target_dir: str,
     models: list[str],
-    cwe_ids: list[str] | None = None,
-    mode: str = "open",
+    repeat: int = 1,
     files: list[SourceFile] | None = None,
 ) -> tuple[int, list[SourceFile]]:
     """Discover files, build matrix, create scan and jobs in DB.
@@ -76,19 +70,19 @@ def create_scan(
         raise ValueError(f"No source files found in {target}")
 
     commit_sha = get_commit_sha(target)
-    config = {"models": models, "cwe_ids": cwe_ids, "mode": mode}
+    config = {"models": models, "repeat": repeat}
     scan_id = db.create_scan(target, commit_sha=commit_sha, config=config)
 
-    matrix = build_job_matrix(files, models, cwe_ids=cwe_ids, mode=mode)
+    matrix = build_job_matrix(files, models, repeat=repeat)
     db.create_jobs_batch(scan_id, matrix)
 
     log.info(
-        "Scan %d (%s): %d files, %d jobs across %d models",
+        "Scan %d: %d files, %d jobs across %d models x %d passes",
         scan_id,
-        mode,
         len(files),
         len(matrix),
         len(models),
+        repeat,
     )
     return scan_id, files
 
@@ -114,7 +108,6 @@ def _process_one_job(
     job,
     adapter: AgentAdapter,
     target: Path,
-    cwe_lookup: dict,
     cancel_event: threading.Event,
 ) -> tuple[bool, bool]:
     """Run a single claimed job to completion.
@@ -122,11 +115,6 @@ def _process_one_job(
     Returns (rate_limited, ok). On rate_limited, the caller should release
     the job and back off. On ok=False, the job has already been failed.
     """
-    cwe = cwe_lookup.get(job["cwe_id"])
-    if cwe is None:
-        db.fail_job(job["id"], f"Unknown CWE '{job['cwe_id']}'")
-        return False, False
-
     language = _language_for(job["file_path"])
     if language is None:
         db.fail_job(job["id"], f"Unknown file type: {job['file_path']}")
@@ -139,17 +127,14 @@ def _process_one_job(
         db.fail_job(job["id"], f"Cannot read file: {e}")
         return False, False
 
-    if job["cwe_id"] == "OPEN":
-        prompt = build_open_prompt(job["file_path"], content, language)
-    else:
-        prompt = build_prompt(job["file_path"], content, language, cwe)
+    prompt = build_open_prompt(job["file_path"], content, language)
 
     log.info(
-        "Job %d: %s x %s x %s",
+        "Job %d: %s x %s (pass %s)",
         job["id"],
         job["file_path"],
-        job["cwe_id"],
         adapter.name,
+        job["pass"],
     )
 
     result = adapter.run(prompt, cancel_event=cancel_event)
@@ -179,7 +164,7 @@ def _process_one_job(
     )
     for f in result.findings:
         explanation = f.explanation
-        if job["cwe_id"] == "OPEN" and f.cwe_id:
+        if f.cwe_id:
             explanation = f"[{f.cwe_id}] {explanation}"
         db.add_finding(
             job["id"],
@@ -205,8 +190,6 @@ def _model_worker(
     """Drain pending jobs for a single model. Owns its own DB connection
     so it can run concurrently with other workers under SQLite WAL."""
     target = Path(target_dir).resolve()
-    cwe_lookup = {c.id: c for c in CWE_TOP_25}
-    cwe_lookup["OPEN"] = CWE_OPEN
 
     # Tools let an OpenAI-compatible model read sibling files; root them at the
     # scanned tree. No-op for the CLI runtimes, which already have file access.
@@ -227,7 +210,7 @@ def _model_worker(
             current_job_id = job["id"]
             try:
                 rate_limited, _ok = _process_one_job(
-                    db, job, adapter, target, cwe_lookup, cancel_event
+                    db, job, adapter, target, cancel_event
                 )
             except KeyboardInterrupt:
                 _release_job(db, job["id"])

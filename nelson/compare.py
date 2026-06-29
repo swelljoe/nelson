@@ -5,9 +5,10 @@ A cluster is a maximal set of findings sharing the same file_path and
 effective CWE, grouped by single-link line proximity: when ordered by
 line number, each successive finding in the cluster is within
 ``line_tolerance`` of the previous finding. The voter denominator for a
-cluster is the set of distinct models that ran a *completed* job
-covering that (file, cwe) — either as a focused per-CWE job or as an
-OPEN-mode job on that file.
+cluster is the set of distinct models that ran a *completed* (open) job
+on that file. This same clustering also drives review-time de-duplication
+(one judge call per cluster), so a bug found by many models or many passes
+is reviewed once.
 """
 
 from __future__ import annotations
@@ -65,8 +66,12 @@ class Cluster:
 
 
 def _row_to_dict(row) -> dict:
-    """sqlite3.Row -> plain dict, with the effective CWE attached."""
-    d = {k: row[k] for k in row}
+    """sqlite3.Row (or dict) -> plain dict, with the effective CWE attached.
+
+    Uses ``keys()`` because iterating a sqlite3.Row yields its values, not its
+    column names.
+    """
+    d = {k: row[k] for k in row.keys()}  # noqa: SIM118 — Row needs .keys()
     d["effective_cwe"] = effective_cwe(row)
     return d
 
@@ -112,29 +117,25 @@ def cluster_findings(
 
 def annotate_clusters(
     clusters: list[Cluster],
-    focused_coverage: dict[tuple[str, str], set[str]],
-    open_coverage: dict[str, set[str]],
+    coverage: dict[str, set[str]],
 ) -> None:
-    """Fill in models_flagged and models_missed on each cluster."""
+    """Fill in models_flagged and models_missed on each cluster.
+
+    ``coverage`` maps file -> {model_id} for models that completed an open job on
+    that file (the eligible-voter denominator).
+    """
     for c in clusters:
         flagged = {f["model_id"] for f in c.findings}
-        eligible = set()
-        eligible |= focused_coverage.get((c.file_path, c.cwe_id), set())
-        eligible |= open_coverage.get(c.file_path, set())
+        eligible = set(coverage.get(c.file_path, set()))
         # Defensive: any model that flagged is by definition eligible.
         eligible |= flagged
         c.models_flagged = sorted(flagged)
         c.models_missed = sorted(eligible - flagged)
 
 
-def all_models(
-    focused_coverage: dict[tuple[str, str], set[str]],
-    open_coverage: dict[str, set[str]],
-) -> list[str]:
+def all_models(coverage: dict[str, set[str]]) -> list[str]:
     seen: set[str] = set()
-    for s in focused_coverage.values():
-        seen |= s
-    for s in open_coverage.values():
+    for s in coverage.values():
         seen |= s
     return sorted(seen)
 

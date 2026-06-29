@@ -202,7 +202,7 @@ def test_run_review_with_tools_reads_other_files(tmp_path, monkeypatch):
 
     db = Database(str(tmp_path / "nelson.db"))
     scan_id = db.create_scan(str(tmp_path))
-    db.create_jobs_batch(scan_id, [("app.py", "OPEN", "h/m")])
+    db.create_jobs_batch(scan_id, [("app.py", "OPEN", "h/m", 0)])
     job = db.next_pending_job(scan_id, model_id="h/m")
     assert job is not None
     finding_id = db.add_finding(

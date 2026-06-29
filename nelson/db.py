@@ -11,10 +11,14 @@ from typing import Any
 # Bumped to 5: v2 added the benchmark corpus (`cases`); v3 added the run layer
 # (`competitors`, `runs`, `run_findings`); v4 added `judgments`, the P3/P4 scoring
 # ledger; v5 adds `runs.target_file` — a run now audits one file of a case (the
-# file-scoped harness), so the unit is (competitor, case, file). New tables/columns
-# go in MIGRATIONS keyed by their target version; _apply_migrations walks a stored
-# DB up to SCHEMA_VERSION, so old databases upgrade in place.
-SCHEMA_VERSION = 6
+# file-scoped harness), so the unit is (competitor, case, file). v6 adds
+# `runs.trial` (benchmark repeated runs). v7 adds the scanner-side `jobs.pass`
+# repeat dimension: a scan now runs its (file, model) matrix N times, so the unit
+# is (file, model, pass) — this requires widening the jobs UNIQUE constraint, which
+# SQLite can only do via a table rebuild. New tables/columns go in MIGRATIONS keyed
+# by their target version; _apply_migrations walks a stored DB up to SCHEMA_VERSION,
+# so old databases upgrade in place.
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -40,6 +44,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     file_path TEXT NOT NULL,
     cwe_id TEXT NOT NULL,
     model_id TEXT NOT NULL,
+    -- 0-based repeat index: a scan runs its (file, model) matrix `repeat` times
+    -- because repetition is what actually surfaces vulnerabilities. Duplicates
+    -- across passes are de-duplicated at review time, not here.
+    pass INTEGER NOT NULL DEFAULT 0,
     -- pending, running, complete, skipped, error (genuine task error, e.g.
     -- unreadable file), and the integrity statuses auth_failed / infra_error.
     -- The integrity statuses mean the model never got a fair look at the code,
@@ -51,7 +59,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     tokens_out INTEGER,
     cost_usd REAL,
     error_msg TEXT,
-    UNIQUE(scan_id, file_path, cwe_id, model_id)
+    UNIQUE(scan_id, file_path, cwe_id, model_id, pass)
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(scan_id, status);
@@ -196,6 +204,44 @@ MIGRATIONS: dict[int, str] = {
     ALTER TABLE runs ADD COLUMN trial INTEGER NOT NULL DEFAULT 0;
     CREATE INDEX IF NOT EXISTS idx_runs_trial
         ON runs(case_id, competitor_id, target_file, trial);
+    """,
+    7: """
+    -- Scanner repeat dimension: a scan runs its (file, model) matrix N times
+    -- (`--repeat`), so the unit becomes (file, model, pass). SQLite cannot widen
+    -- the inline UNIQUE(scan_id, file_path, cwe_id, model_id) in place, so rebuild
+    -- the table, copying row ids verbatim so findings.job_id FKs stay valid.
+    -- foreign_keys is toggled off for the swap (the connection restores it via the
+    -- PRAGMA in _open). DROP IF EXISTS jobs_new clears any half-applied prior run,
+    -- making the whole rebuild idempotent.
+    PRAGMA foreign_keys=OFF;
+    DROP TABLE IF EXISTS jobs_new;
+    CREATE TABLE jobs_new (
+        id INTEGER PRIMARY KEY,
+        scan_id INTEGER NOT NULL REFERENCES scans(id),
+        file_path TEXT NOT NULL,
+        cwe_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        pass INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        started_at TEXT,
+        completed_at TEXT,
+        tokens_in INTEGER,
+        tokens_out INTEGER,
+        cost_usd REAL,
+        error_msg TEXT,
+        UNIQUE(scan_id, file_path, cwe_id, model_id, pass)
+    );
+    INSERT INTO jobs_new
+        (id, scan_id, file_path, cwe_id, model_id, pass, status, started_at,
+         completed_at, tokens_in, tokens_out, cost_usd, error_msg)
+    SELECT id, scan_id, file_path, cwe_id, model_id, 0, status, started_at,
+           completed_at, tokens_in, tokens_out, cost_usd, error_msg
+    FROM jobs;
+    DROP TABLE jobs;
+    ALTER TABLE jobs_new RENAME TO jobs;
+    CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(scan_id, status);
+    CREATE INDEX IF NOT EXISTS idx_jobs_file ON jobs(scan_id, file_path);
+    PRAGMA foreign_keys=ON;
     """,
 }
 
@@ -389,11 +435,12 @@ class Database:
 
     # -- Jobs --
 
-    def create_jobs_batch(self, scan_id: int, jobs: list[tuple[str, str, str]]):
-        """Insert a batch of (file_path, cwe_id, model_id) jobs."""
+    def create_jobs_batch(self, scan_id: int, jobs: list[tuple[str, str, str, int]]):
+        """Insert a batch of (file_path, cwe_id, model_id, pass) jobs."""
         self.conn.executemany(
-            "INSERT OR IGNORE INTO jobs(scan_id, file_path, cwe_id, model_id) VALUES(?, ?, ?, ?)",
-            [(scan_id, f, c, m) for f, c, m in jobs],
+            "INSERT OR IGNORE INTO jobs(scan_id, file_path, cwe_id, model_id, pass) "
+            "VALUES(?, ?, ?, ?, ?)",
+            [(scan_id, f, c, m, p) for f, c, m, p in jobs],
         )
         self.conn.commit()
 
@@ -552,34 +599,27 @@ class Database:
             scan_ids,
         ).fetchall()
 
-    def coverage_for_scans(
-        self, scan_ids: list[int]
-    ) -> tuple[dict[tuple[str, str], set[str]], dict[str, set[str]]]:
-        """Distinct models that ran a *completed* job for each (file, cwe).
+    def coverage_for_scans(self, scan_ids: list[int]) -> dict[str, set[str]]:
+        """Distinct models that ran a *completed* job on each file.
 
-        Returns (focused, open) where focused maps (file, cwe) -> {model_id}
-        and open maps file -> {model_id} for OPEN-mode jobs. A model that
-        errored out on a job isn't counted as having 'voted no'.
+        Returns file -> {model_id}. Every scan is open-mode, so coverage is keyed
+        on file alone (the eligible-voter denominator for a cluster). A model that
+        errored out on a job isn't counted as having 'voted no'. Passes collapse:
+        a model is eligible for a file if it completed at least one pass on it.
         """
         if not scan_ids:
-            return {}, {}
+            return {}
         ph = ",".join("?" * len(scan_ids))
         rows = self.conn.execute(
-            f"""SELECT DISTINCT file_path, cwe_id, model_id
+            f"""SELECT DISTINCT file_path, model_id
                FROM jobs
                WHERE scan_id IN ({ph}) AND status = 'complete'""",  # noqa: S608
             scan_ids,
         ).fetchall()
-        focused: dict[tuple[str, str], set[str]] = {}
-        open_: dict[str, set[str]] = {}
+        coverage: dict[str, set[str]] = {}
         for r in rows:
-            if r["cwe_id"] == "OPEN":
-                open_.setdefault(r["file_path"], set()).add(r["model_id"])
-            else:
-                focused.setdefault((r["file_path"], r["cwe_id"]), set()).add(
-                    r["model_id"]
-                )
-        return focused, open_
+            coverage.setdefault(r["file_path"], set()).add(r["model_id"])
+        return coverage
 
     def findings_summary(self, scan_id: int) -> list[sqlite3.Row]:
         return self.conn.execute(
