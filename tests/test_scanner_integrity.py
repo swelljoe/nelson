@@ -49,9 +49,7 @@ def test_auth_failure_marks_auth_failed_not_error(tmp_path):
         )
     )
 
-    rate_limited, ok = _process_one_job(
-        db, job, adapter, tmp_path, threading.Event()
-    )
+    rate_limited, ok = _process_one_job(db, job, adapter, tmp_path, threading.Event())
 
     assert (rate_limited, ok) == (False, False)
     assert _status(db, job["id"]) == "auth_failed"
@@ -78,9 +76,7 @@ def test_rate_limit_signals_retry_and_leaves_job_running(tmp_path):
         AgentResult(findings=[], raw_output="", failure_kind=FailureKind.RATE_LIMIT)
     )
 
-    rate_limited, ok = _process_one_job(
-        db, job, adapter, tmp_path, threading.Event()
-    )
+    rate_limited, ok = _process_one_job(db, job, adapter, tmp_path, threading.Event())
 
     # Caller (the worker) is responsible for releasing+backing off; the job is
     # not marked terminal here.

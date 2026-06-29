@@ -39,9 +39,7 @@ def build_review_prompt(
     """Build a prompt asking a model to verify a reported vulnerability."""
     cwe_id = finding.get("effective_cwe") or finding.get("cwe_id") or "OPEN"
     cwe_label = (
-        cwe_id
-        if cwe_id not in ("OPEN", "UNKNOWN")
-        else "general vulnerability scan"
+        cwe_id if cwe_id not in ("OPEN", "UNKNOWN") else "general vulnerability scan"
     )
 
     return f"""You are a senior security engineer reviewing a vulnerability report. A scanning tool has flagged the following potential vulnerability. Your job is to determine whether this is a real, exploitable vulnerability by analyzing the actual code and execution flow.

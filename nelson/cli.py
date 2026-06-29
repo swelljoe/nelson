@@ -845,9 +845,7 @@ def html_compare(
     "scan_models",
     multiple=True,
     default=(),
-    help=(
-        "Scan model spec; repeatable. At least 2 required (or config scan_models)."
-    ),
+    help=("Scan model spec; repeatable. At least 2 required (or config scan_models)."),
 )
 @click.option(
     "--review-model",
@@ -917,8 +915,7 @@ def haha(
         sys.exit(1)
     if not review_model:
         click.echo(
-            "Error: haha needs a review model "
-            "(--review-model or config review_model).",
+            "Error: haha needs a review model (--review-model or config review_model).",
             err=True,
         )
         sys.exit(1)
@@ -945,8 +942,7 @@ def haha(
     )
     total = sum(db.job_counts(scan_id).values())
     click.echo(
-        f"Scan {scan_id}: {len(files)} files, {total} jobs "
-        f"({', '.join(scan_specs)})"
+        f"Scan {scan_id}: {len(files)} files, {total} jobs ({', '.join(scan_specs)})"
     )
 
     def on_scan_progress(counts):
