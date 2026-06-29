@@ -134,6 +134,7 @@ def test_review_dedups_cluster_judges_once_propagates(tmp_path, monkeypatch):
         for p in (0, 1):
             db.create_jobs_batch(scan_id, [("a.py", "OPEN", model, p)])
             job = db.next_pending_job(scan_id, model_id=model)
+            assert job is not None
             db.claim_job(job["id"])
             db.complete_job(job["id"])
             finding_ids.append(
@@ -174,6 +175,7 @@ def test_review_separate_bugs_judged_separately(tmp_path, monkeypatch):
     for line in (2, 30):
         db.create_jobs_batch(scan_id, [("a.py", "OPEN", "m1", line)])
         job = db.next_pending_job(scan_id, model_id="m1")
+        assert job is not None
         db.claim_job(job["id"])
         db.complete_job(job["id"])
         db.add_finding(
