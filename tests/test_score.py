@@ -1134,3 +1134,72 @@ def test_claude_refusal_judge_is_a_refusaljudge():
     from nelson.score import RefusalJudge
 
     assert isinstance(ClaudeRefusalJudge(), RefusalJudge)
+
+
+# -- Judge de-duplication (same bug class, same place, same model = one bug) ----
+
+
+def test_score_run_dedups_truth_judge_for_same_bug_cluster(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    # Three restatements of one bug: same file, adjacent lines inside the hunk.
+    run_id = _complete_run(
+        db, case_id, findings=[("Foo.java", 75), ("Foo.java", 76), ("Foo.java", 77)]
+    )
+    judge = FakeJudge(TruthVerdict(True, reasoning="zip slip", cost_usd=0.05))
+
+    rs = Scorer(db, judge).score_run(run_id)
+
+    assert rs.outcome == "hit"
+    assert judge.calls == 1  # one cluster -> one judge call (was 3)
+    assert rs.judge_cost == 0.05  # counted once, not x3
+    # Every member still carries the derived verdict.
+    for f in db.run_findings(run_id):
+        assert f["matches_ground_truth"] == 1
+        assert f["judge_truth_verdict"] == "same_bug"
+    # The ledger records exactly the one real call.
+    assert len(db.judgments(target_kind="truth")) == 1
+
+
+def test_score_run_does_not_dedup_distant_findings(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    # Both localize (hunk 73-79) but are >cluster_tolerance apart -> two clusters.
+    run_id = _complete_run(db, case_id, findings=[("Foo.java", 73), ("Foo.java", 79)])
+    judge = FakeJudge(TruthVerdict(True, cost_usd=0.05))
+
+    Scorer(db, judge).score_run(run_id)
+
+    assert judge.calls == 2
+
+
+def test_score_run_cluster_tolerance_zero_judges_each_distinct_line(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Foo.java", 75), ("Foo.java", 76)])
+    judge = FakeJudge(TruthVerdict(True, cost_usd=0.05))
+
+    Scorer(db, judge, cluster_tolerance=0).score_run(run_id)
+
+    assert judge.calls == 2  # de-dup off: adjacent-but-distinct lines judged apart
+
+
+def test_score_run_dedups_fp_judge_for_same_bug_cluster(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    # Two restatements of one off-target finding (far from the hunk, adjacent).
+    run_id = _complete_run(
+        db, case_id, findings=[("Other.java", 10), ("Other.java", 11)]
+    )
+    truth = FakeJudge(TruthVerdict(True))  # never reached (not localized)
+    fp = FakeFPJudge(FPVerdict(False, reasoning="safe", cost_usd=0.02))
+    code = FakeCode()
+
+    rs = Scorer(db, truth, fp_judge=fp, code=code).score_run(run_id)
+
+    assert truth.calls == 0
+    assert fp.calls == 1  # one cluster -> one FP call (was 2)
+    assert code.calls == 1  # one source read for the cluster
+    assert rs.fp_cost == 0.02
+    for f in db.run_findings(run_id):
+        assert f["judge_fp_verdict"] == "false_positive"

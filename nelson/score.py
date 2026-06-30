@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from . import compare as _compare
 from .agents import _run_cli, classify_failure
 
 # The judge-reply JSON repair/unwrap logic is shared with pre-vet; reuse the one
@@ -48,6 +49,58 @@ if TYPE_CHECKING:
 # The competitor reads the pre-patch tree, so gt_hunks are its own line numbers;
 # this only absorbs off-by-a-few reporting, not whole-function slack.
 DEFAULT_LINE_TOLERANCE = 10
+
+# How close two findings (same file + CWE) must be to count as the *same bug* for
+# judge de-duplication. Matches the review pass's clustering window so "same bug
+# in the same place from the same model" is judged once, not once per restatement.
+DEFAULT_CLUSTER_TOLERANCE = 2
+
+# Lower rank sorts first when picking a cluster's delegate finding.
+_CONF_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
+def _cluster_representative(members: list[dict]) -> dict:
+    """Deterministic cluster delegate: highest confidence, earliest line, lowest id."""
+
+    def key(m: dict) -> tuple[int, int, int]:
+        conf = (m.get("confidence") or "").lower()
+        line = m["line_number"] if m.get("line_number") is not None else 10**9
+        return (_CONF_RANK.get(conf, 3), line, m["id"])
+
+    return min(members, key=key)
+
+
+def _cluster_finding_rows(rows: Iterable[Any], tolerance: int) -> list[list[dict]]:
+    """Group a run's findings into same-bug clusters so the judge is asked once
+    per cluster instead of once per finding.
+
+    A model that reports the same bug several times in one audit (the same CWE in
+    the same file within ``tolerance`` lines) yields one cluster; we judge a single
+    representative and stamp that verdict on every member. Returns each cluster as
+    a list of plain dicts carrying the original ``run_findings`` columns plus the
+    aliases ``compare.cluster_findings`` / ``effective_cwe`` expect.
+    """
+    adapted: list[dict] = []
+    for r in rows:
+        adapted.append(
+            {
+                "id": r["id"],
+                "file": r["file"],
+                "line_start": r["line_start"],
+                "description": r["description"],
+                "cwe": r["cwe"],
+                "confidence": r["confidence"],
+                # Aliases consumed by compare.cluster_findings + effective_cwe.
+                "file_path": r["file"],
+                "line_number": r["line_start"],
+                "cwe_id": r["cwe"],
+                "explanation": r["description"],
+            }
+        )
+    return [
+        c.findings for c in _compare.cluster_findings(adapted, line_tolerance=tolerance)
+    ]
+
 
 # Weight a ``partial`` (right place, wrong bug) carries in the informational
 # half-credit rate. A finding localized to within tolerance still points a human
@@ -946,6 +999,7 @@ class Scorer:
         judge: TruthJudge,
         *,
         tolerance: int = DEFAULT_LINE_TOLERANCE,
+        cluster_tolerance: int = DEFAULT_CLUSTER_TOLERANCE,
         fp_judge: FPJudge | None = None,
         code: CodeProvider | None = None,
         refusal_judge: RefusalJudge | None = None,
@@ -953,6 +1007,9 @@ class Scorer:
         self.db = db
         self.judge = judge
         self.tolerance = tolerance
+        # Line window for treating two same-file/same-CWE findings as the same bug
+        # (judge once per cluster). 0 merges only findings on the identical line.
+        self.cluster_tolerance = cluster_tolerance
         self.fp_judge = fp_judge
         self.code = code
         # Optional: detects a policy/safety *refusal* (a zero-finding,
@@ -1025,65 +1082,96 @@ class Scorer:
         scores: list[FindingScore] = []
         judge_cost = 0.0
         fp_cost = 0.0
-        for row in self.db.run_findings(run_id):
-            reported = ReportedFinding.from_row(row)
-            loc = localize(
-                row["file"], row["line_start"], case.gt_hunks, self.tolerance
-            )
-            truth: TruthVerdict | None = None
-            if loc.matched:
-                truth = self.judge.judge(case, reported)
-                judge_cost += truth.cost_usd or 0.0
+        # De-duplicate before judging: the same bug class in the same place from
+        # the same model is one bug. We cluster the run's findings, judge a single
+        # representative per cluster, and stamp that verdict on every member — so
+        # a model that restates a finding doesn't multiply judge calls/cost. The
+        # judgments ledger records the actual (deduped) calls; every finding still
+        # carries its own derived verdict. cluster_tolerance=0 keeps the old
+        # judge-every-finding behavior.
+        for members in _cluster_finding_rows(
+            self.db.run_findings(run_id), self.cluster_tolerance
+        ):
+            locs = {
+                m["id"]: localize(
+                    m["file"], m["line_start"], case.gt_hunks, self.tolerance
+                )
+                for m in members
+            }
+            localized = [m for m in members if locs[m["id"]].matched]
+
+            # Truth: one call per cluster, shared across its localized members.
+            cluster_truth: TruthVerdict | None = None
+            if localized:
+                rep = _cluster_representative(localized)
+                cluster_truth = self.judge.judge(case, ReportedFinding.from_row(rep))
+                judge_cost += cluster_truth.cost_usd or 0.0
                 self.db.add_judgment(
                     target_kind="truth",
-                    target_id=row["id"],
+                    target_id=rep["id"],
                     judge_model=self.judge.name,
-                    verdict=truth.label,
-                    reasoning=truth.reasoning,
-                    tokens_in=truth.tokens_in,
-                    tokens_out=truth.tokens_out,
-                    cost_usd=truth.cost_usd,
+                    verdict=cluster_truth.label,
+                    reasoning=cluster_truth.reasoning,
+                    tokens_in=cluster_truth.tokens_in,
+                    tokens_out=cluster_truth.tokens_out,
+                    cost_usd=cluster_truth.cost_usd,
                 )
-            self.db.record_finding_score(
-                row["id"],
-                matches_ground_truth=loc.matched,
-                judge_truth_verdict=truth.label if truth is not None else None,
-                judge_reasoning=truth.reasoning if truth is not None else None,
-            )
+            for m in members:
+                matched = locs[m["id"]].matched
+                v = cluster_truth if matched else None
+                self.db.record_finding_score(
+                    m["id"],
+                    matches_ground_truth=matched,
+                    judge_truth_verdict=v.label if v is not None else None,
+                    judge_reasoning=v.reasoning if v is not None else None,
+                )
 
-            # Precision: every finding that isn't the target hit (and isn't a
-            # localized-but-undetermined candidate) is FP-judged against the code.
-            fp: FPVerdict | None = None
-            if (
-                self.fp_judge is not None
-                and self.code is not None
-                and _fp_eligible(loc.matched, truth)
-            ):
-                source = self.code.source(case, row["file"])
-                fp = self.fp_judge.judge(reported, source)
-                fp_cost += fp.cost_usd or 0.0
-                self.db.add_judgment(
-                    target_kind="fp",
-                    target_id=row["id"],
-                    judge_model=self.fp_judge.name,
-                    verdict=fp.label,
-                    reasoning=fp.reasoning,
-                    tokens_in=fp.tokens_in,
-                    tokens_out=fp.tokens_out,
-                    cost_usd=fp.cost_usd,
-                )
-                self.db.record_fp_verdict(row["id"], verdict=fp.label)
+            # Precision: one FP call per cluster, shared across its FP-eligible
+            # members (non-localized findings, or localized ones judged a
+            # different bug). The whole cluster shares a file, so one source read.
+            cluster_fp: FPVerdict | None = None
+            fp_ids: set[int] = set()
+            if self.fp_judge is not None and self.code is not None:
+                fp_members = [
+                    m
+                    for m in members
+                    if _fp_eligible(
+                        locs[m["id"]].matched,
+                        cluster_truth if locs[m["id"]].matched else None,
+                    )
+                ]
+                if fp_members:
+                    rep = _cluster_representative(fp_members)
+                    source = self.code.source(case, rep["file"])
+                    cluster_fp = self.fp_judge.judge(
+                        ReportedFinding.from_row(rep), source
+                    )
+                    fp_cost += cluster_fp.cost_usd or 0.0
+                    self.db.add_judgment(
+                        target_kind="fp",
+                        target_id=rep["id"],
+                        judge_model=self.fp_judge.name,
+                        verdict=cluster_fp.label,
+                        reasoning=cluster_fp.reasoning,
+                        tokens_in=cluster_fp.tokens_in,
+                        tokens_out=cluster_fp.tokens_out,
+                        cost_usd=cluster_fp.cost_usd,
+                    )
+                    for m in fp_members:
+                        self.db.record_fp_verdict(m["id"], verdict=cluster_fp.label)
+                    fp_ids = {m["id"] for m in fp_members}
 
-            scores.append(
-                FindingScore(
-                    finding_id=row["id"],
-                    file=row["file"],
-                    line=row["line_start"],
-                    localized=loc.matched,
-                    truth=truth,
-                    fp=fp,
+            for m in members:
+                scores.append(
+                    FindingScore(
+                        finding_id=m["id"],
+                        file=m["file"],
+                        line=m["line_start"],
+                        localized=locs[m["id"]].matched,
+                        truth=cluster_truth if locs[m["id"]].matched else None,
+                        fp=cluster_fp if m["id"] in fp_ids else None,
+                    )
                 )
-            )
 
         outcome = _outcome_from_findings(scores)
         if (
