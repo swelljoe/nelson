@@ -8,6 +8,8 @@ from pathlib import Path
 import click
 
 from . import compare as compare_mod
+from . import config as config_mod
+from .config import ConfigError
 from .db import Database
 from .html_report import (
     generate_compare_report,
@@ -47,6 +49,15 @@ def _resolve_paths(paths: tuple[str, ...]):
         target_dir = str(root)
 
     return target_dir, files
+
+
+def _load_config() -> dict:
+    """Load ./nelson.yaml + ~/.nelson.yaml, exiting cleanly if malformed."""
+    try:
+        return config_mod.load_config()
+    except ConfigError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
 
 @click.group()
@@ -105,33 +116,32 @@ def inventory(paths: tuple[str, ...]):
     "--model",
     "models",
     multiple=True,
-    default=["claude:haiku"],
-    help="Model spec, e.g. 'claude:haiku', 'openai:qwen3.5'. Repeatable.",
+    default=(),
+    help=(
+        "Model spec, e.g. 'claude:haiku', 'openai:qwen3.5'. Repeatable. "
+        "Default: config scan_models, else claude:haiku."
+    ),
 )
 @click.option(
-    "--cwe",
-    "cwe_ids",
-    multiple=True,
+    "--repeat",
     default=None,
-    help="Limit to specific CWE IDs (e.g. --cwe CWE-89). Default: all.",
+    type=int,
+    help=(
+        "Run the whole file x model matrix N times. Repetition is what surfaces "
+        "vulnerabilities; duplicates are merged at review. Default: 3 (or config)."
+    ),
 )
 @click.option(
     "--delay",
-    default=2.0,
+    default=None,
     type=float,
-    help="Seconds between jobs (pacing). Default: 2.0",
+    help="Seconds between jobs (pacing). Default: 2.0 (or config).",
 )
 @click.option(
     "--resume",
     type=int,
     default=None,
     help="Resume a previous scan by ID instead of creating a new one.",
-)
-@click.option(
-    "--mode",
-    type=click.Choice(["open", "focused"]),
-    default="open",
-    help="'open': find any vuln per file (default). 'focused': per-CWE.",
 )
 @click.option(
     "--parallel/--no-parallel",
@@ -154,28 +164,37 @@ def inventory(paths: tuple[str, ...]):
 @click.option(
     "--db",
     "db_path",
-    default="nelson.db",
-    help="Path to SQLite database. Default: nelson.db",
+    default=None,
+    help="Path to SQLite database. Default: nelson.db (or config).",
 )
 def scan(
     paths: tuple[str, ...],
     models: tuple[str],
-    cwe_ids: tuple[str],
-    delay: float,
+    repeat: int | None,
+    delay: float | None,
     resume: int | None,
-    mode: str,
     parallel: bool,
     tools: bool,
-    db_path: str,
+    db_path: str | None,
 ):
     """Scan PATHS for vulnerabilities.
+
+    Each named model audits each file for any vulnerability (open-ended). With
+    --repeat N the whole matrix runs N times: repetition, not per-CWE targeting,
+    is what surfaces bugs. Duplicate findings are merged at review time.
 
     PATHS can be a single directory (the default — every source file
     under it is scanned, with the usual filters), a single file, or
     multiple files (e.g. from a shell glob like ``src/*.py``).
     """
+    cfg = _load_config()
+    db_path = config_mod.resolve(db_path, "db", cfg, "nelson.db")
+    model_specs: list[str] = list(
+        config_mod.resolve(tuple(models), "scan_models", cfg, ["claude:haiku"])
+    )
+    repeat = config_mod.resolve(repeat, "repeat", cfg, 3)
+    delay = config_mod.resolve(delay, "delay", cfg, 2.0)
     db = Database(db_path)
-    cwe_list = list(cwe_ids) if cwe_ids else None
 
     if resume:
         scan_id = resume
@@ -185,9 +204,8 @@ def scan(
             sys.exit(1)
         target_dir = s["target_dir"]
         config = json.loads(s["config"]) if s["config"] else {}
-        models = tuple(config.get("models", models))
-        mode = config.get("mode", mode)
-        click.echo(f"Resuming scan {scan_id} ({mode} mode) on {target_dir}")
+        model_specs = list(config.get("models", model_specs))
+        click.echo(f"Resuming scan {scan_id} on {target_dir}")
     else:
         if not paths:
             click.echo(
@@ -195,10 +213,6 @@ def scan(
                 err=True,
             )
             sys.exit(1)
-
-        if mode == "open" and cwe_ids:
-            click.echo("Warning: --cwe flags are ignored in open mode.", err=True)
-            cwe_list = None
 
         target_dir, files = _resolve_paths(paths)
 
@@ -209,14 +223,15 @@ def scan(
         scan_id, files = create_scan(
             db,
             target_dir,
-            list(models),
-            cwe_ids=cwe_list,
-            mode=mode,
+            model_specs,
+            repeat=repeat,
             files=files,
         )
         counts = db.job_counts(scan_id)
         total = sum(counts.values())
-        click.echo(f"Scan {scan_id} ({mode} mode): {len(files)} files, {total} jobs")
+        click.echo(
+            f"Scan {scan_id}: {len(files)} files, {total} jobs ({repeat}x passes)"
+        )
 
     def on_progress(counts):
         done = counts.get("complete", 0) + counts.get("error", 0)
@@ -228,14 +243,14 @@ def scan(
             err=True,
         )
 
-    if parallel and len(models) > 1:
-        click.echo(f"Starting scan ({len(models)} models in parallel)...")
+    if parallel and len(model_specs) > 1:
+        click.echo(f"Starting scan ({len(model_specs)} models in parallel)...")
     else:
         click.echo("Starting scan...")
     run_scan(
         db,
         scan_id,
-        list(models),
+        model_specs,
         target_dir,
         delay=delay,
         on_progress=on_progress,
@@ -264,14 +279,20 @@ def scan(
     "-m",
     "--model",
     "model_spec",
-    default="claude:sonnet",
-    help="Model to use for review. Default: claude:sonnet",
+    default=None,
+    help="Model to use for review. Default: config review_model, else claude:sonnet.",
+)
+@click.option(
+    "--line-tolerance",
+    default=2,
+    type=int,
+    help="Line window for treating findings as the same bug when de-duplicating.",
 )
 @click.option(
     "--delay",
-    default=2.0,
+    default=None,
     type=float,
-    help="Seconds between reviews (for CLI pacing). Default: 2.0",
+    help="Seconds between reviews (for CLI pacing). Default: 2.0 (or config).",
 )
 @click.option(
     "--tools",
@@ -282,11 +303,26 @@ def scan(
         "into other files. No-op for claude:/gemini: (already agentic)."
     ),
 )
-@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+@click.option("--db", "db_path", default=None, help="Path to SQLite database.")
 def review(
-    scan_id: int | None, model_spec: str, delay: float, tools: bool, db_path: str
+    scan_id: int | None,
+    model_spec: str | None,
+    line_tolerance: int,
+    delay: float | None,
+    tools: bool,
+    db_path: str | None,
 ):
-    """Review findings from a scan with a (usually smarter) model."""
+    """Review findings from a scan with a (usually smarter) model.
+
+    Findings are first de-duplicated into clusters (same file/CWE within
+    --line-tolerance lines): each cluster is judged once and the verdict is
+    applied to every member, so repeated passes and multiple models don't each
+    pay for the same bug.
+    """
+    cfg = _load_config()
+    db_path = config_mod.resolve(db_path, "db", cfg, "nelson.db")
+    model_spec = config_mod.resolve(model_spec, "review_model", cfg, "claude:sonnet")
+    delay = config_mod.resolve(delay, "delay", cfg, 2.0)
     db = Database(db_path)
     if scan_id is None:
         s = db.latest_scan()
@@ -307,8 +343,12 @@ def review(
         click.echo(f"Scan {scan_id}: no unreviewed findings.")
         return
 
+    n_clusters = len(
+        compare_mod.cluster_findings(unreviewed, line_tolerance=line_tolerance)
+    )
     click.echo(
-        f"Reviewing {len(unreviewed)} findings from scan {scan_id} with {model_spec}..."
+        f"Reviewing {len(unreviewed)} findings ({n_clusters} unique after dedup) "
+        f"from scan {scan_id} with {model_spec}..."
     )
 
     def on_progress(reviewed, total):
@@ -320,6 +360,7 @@ def review(
         model_spec,
         target_dir,
         delay=delay,
+        line_tolerance=line_tolerance,
         on_progress=on_progress,
         tools=tools,
     )
@@ -341,11 +382,11 @@ def list_scans(db_path: str):
         return
 
     hdr = (
-        f"{'ID':>4}  {'Status':<11}  {'Mode':<8}"
+        f"{'ID':>4}  {'Status':<11}  {'Pass':>4}"
         f"  {'Findings':>8}  {'Jobs':>6}  {'Model':<35}  {'Target'}"
     )
     sep = (
-        f"{'─' * 4}  {'─' * 11}  {'─' * 8}"
+        f"{'─' * 4}  {'─' * 11}  {'─' * 4}"
         f"  {'─' * 8}  {'─' * 6}  {'─' * 35}  {'─' * 30}"
     )
     click.echo(hdr)
@@ -359,9 +400,9 @@ def list_scans(db_path: str):
         target = s["target_dir"]
         config = json.loads(s["config"]) if s["config"] else {}
         models = ", ".join(config.get("models", []))
-        mode = config.get("mode", "focused")
+        passes = config.get("repeat", 1)
         click.echo(
-            f"{scan_id:>4}  {status:<11}  {mode:<8}"
+            f"{scan_id:>4}  {status:<11}  {passes:>4}"
             f"  {len(findings):>8}  {total_jobs:>6}"
             f"  {models:<35}  {target}"
         )
@@ -673,14 +714,14 @@ def _build_comparison(
     min_agreement: int | None,
 ):
     findings = db.findings_for_scans(scan_ids)
-    focused_cov, open_cov = db.coverage_for_scans(scan_ids)
+    coverage = db.coverage_for_scans(scan_ids)
     clusters = compare_mod.cluster_findings(findings, line_tolerance=line_tolerance)
-    compare_mod.annotate_clusters(clusters, focused_cov, open_cov)
+    compare_mod.annotate_clusters(clusters, coverage)
     clusters = compare_mod.filter_clusters(
         clusters, cwe=cwe, confidence=confidence, min_agreement=min_agreement
     )
     clusters = compare_mod.sort_clusters(clusters)
-    models = compare_mod.all_models(focused_cov, open_cov)
+    models = compare_mod.all_models(coverage)
     return clusters, models
 
 
@@ -800,127 +841,138 @@ def html_compare(
 @main.command()
 @click.argument("paths", type=click.Path(exists=True), nargs=-1)
 @click.option(
-    "--focused-model",
-    default="claude:haiku",
-    help="Model for focused CWE scan. Default: claude:haiku",
-)
-@click.option(
-    "--open-model",
-    default="claude:sonnet",
-    help="Model for open scan. Default: claude:sonnet",
+    "--scan-model",
+    "scan_models",
+    multiple=True,
+    default=(),
+    help=("Scan model spec; repeatable. At least 2 required (or config scan_models)."),
 )
 @click.option(
     "--review-model",
-    default="claude:sonnet",
-    help="Model for review pass. Default: claude:sonnet",
+    default=None,
+    help="Model for the review/judge pass. Required (or config review_model).",
+)
+@click.option(
+    "--repeat",
+    default=None,
+    type=int,
+    help="Passes per scan model. Default: 3 (or config).",
+)
+@click.option(
+    "--line-tolerance",
+    default=2,
+    type=int,
+    help="Line window for de-duplicating findings before judging. Default: 2",
 )
 @click.option(
     "--delay",
-    default=2.0,
+    default=None,
     type=float,
-    help="Seconds between jobs (pacing). Default: 2.0",
+    help="Seconds between jobs (pacing). Default: 2.0 (or config).",
 )
 @click.option(
     "--db",
     "db_path",
-    default="nelson.db",
-    help="Path to SQLite database. Default: nelson.db",
+    default=None,
+    help="Path to SQLite database. Default: nelson.db (or config).",
 )
 def haha(
     paths: tuple[str, ...],
-    focused_model: str,
-    open_model: str,
-    review_model: str,
-    delay: float,
-    db_path: str,
+    scan_models: tuple[str],
+    review_model: str | None,
+    repeat: int | None,
+    line_tolerance: int,
+    delay: float | None,
+    db_path: str | None,
 ):
-    """Run the full pipeline: focused scan, open scan, review, report.
+    """Throw everything at the code: many models x many passes -> dedup -> judge.
+
+    Nelson's catchphrase command. Several scan models each audit every file
+    --repeat times; the combined findings are de-duplicated into unique bugs and
+    each is judged once by a single strong review model. Requires at least two
+    scan models and one review model (from --scan-model/--review-model or a
+    nelson.yaml config); it exits if they're missing. Convenient but
+    token-intensive on large projects.
 
     PATHS can be a single directory, a single file, or multiple files
     (e.g. from a shell glob like ``src/*.py``).
-
-    This runs both scan modes, reviews all findings, and prints a
-    final report. It's convenient but token-intensive on large projects.
     """
-    db = Database(db_path)
+    cfg = _load_config()
+    db_path = config_mod.resolve(db_path, "db", cfg, "nelson.db")
+    scan_specs: list[str] = list(
+        config_mod.resolve(tuple(scan_models), "scan_models", cfg, [])
+    )
+    review_model = config_mod.resolve(review_model, "review_model", cfg, None)
+    repeat = config_mod.resolve(repeat, "repeat", cfg, 3)
+    delay = config_mod.resolve(delay, "delay", cfg, 2.0)
 
+    if len(scan_specs) < 2:
+        click.echo(
+            "Error: haha needs at least 2 scan models "
+            "(--scan-model, repeatable, or config scan_models).",
+            err=True,
+        )
+        sys.exit(1)
+    if not review_model:
+        click.echo(
+            "Error: haha needs a review model (--review-model or config review_model).",
+            err=True,
+        )
+        sys.exit(1)
+
+    db = Database(db_path)
     target_dir, files = _resolve_paths(paths)
     if not files:
         click.echo("No source files found.", err=True)
         sys.exit(1)
 
-    click.echo(f"Found {len(files)} source files.\n")
+    click.echo(
+        f"Found {len(files)} source files. Scanning with {len(scan_specs)} "
+        f"models x {repeat} passes, judging with {review_model}.\n"
+    )
 
-    # -- Step 1: Focused scan --
-    click.echo(click.style("=== Focused scan ===", bold=True))
-    focused_id, _ = create_scan(
+    # -- Step 1: Scan (many models x many passes) --
+    click.echo(click.style("=== Scan ===", bold=True))
+    scan_id, _ = create_scan(
         db,
         target_dir,
-        [focused_model],
-        mode="focused",
+        scan_specs,
+        repeat=repeat,
         files=files,
     )
-    focused_counts = db.job_counts(focused_id)
-    focused_total = sum(focused_counts.values())
+    total = sum(db.job_counts(scan_id).values())
     click.echo(
-        f"Scan {focused_id}: {len(files)} files,"
-        f" {focused_total} jobs with {focused_model}"
+        f"Scan {scan_id}: {len(files)} files, {total} jobs ({', '.join(scan_specs)})"
     )
 
     def on_scan_progress(counts):
         done = counts.get("complete", 0) + counts.get("error", 0)
-        total = sum(counts.values())
-        click.echo(f"  {done}/{total}", err=True)
+        click.echo(f"  {done}/{sum(counts.values())}", err=True)
 
     run_scan(
         db,
-        focused_id,
-        [focused_model],
+        scan_id,
+        scan_specs,
         target_dir,
         delay=delay,
         on_progress=on_scan_progress,
         db_path=db_path,
     )
-    focused_findings = db.findings_for_scan(focused_id)
-    click.echo(f"  {len(focused_findings)} findings\n")
+    raw_findings = db.findings_for_scan(scan_id)
+    click.echo(f"  {len(raw_findings)} raw findings\n")
 
-    # -- Step 2: Open scan --
-    click.echo(click.style("=== Open scan ===", bold=True))
-    open_id, _ = create_scan(
-        db,
-        target_dir,
-        [open_model],
-        mode="open",
-        files=files,
-    )
-    open_counts = db.job_counts(open_id)
-    open_total = sum(open_counts.values())
-    click.echo(
-        f"Scan {open_id}: {len(files)} files, {open_total} jobs with {open_model}"
-    )
-
-    run_scan(
-        db,
-        open_id,
-        [open_model],
-        target_dir,
-        delay=delay,
-        on_progress=on_scan_progress,
-        db_path=db_path,
-    )
-    open_findings = db.findings_for_scan(open_id)
-    click.echo(f"  {len(open_findings)} findings\n")
-
-    # -- Step 3: Review both scans --
-    click.echo(click.style("=== Review ===", bold=True))
-    for sid, label in [(focused_id, "focused"), (open_id, "open")]:
-        unreviewed = db.unreviewed_findings(sid)
-        if not unreviewed:
-            click.echo(f"  {label} scan {sid}: nothing to review")
-            continue
+    # -- Step 2: Dedup + review --
+    click.echo(click.style("=== Dedup + review ===", bold=True))
+    unreviewed = db.unreviewed_findings(scan_id)
+    if not unreviewed:
+        click.echo("  nothing to review")
+    else:
+        n_clusters = len(
+            compare_mod.cluster_findings(unreviewed, line_tolerance=line_tolerance)
+        )
         click.echo(
-            f"  Reviewing {len(unreviewed)} findings"
-            f" from {label} scan {sid} with {review_model}..."
+            f"  {len(unreviewed)} findings → {n_clusters} unique after dedup; "
+            f"judging with {review_model}..."
         )
 
         def on_review_progress(reviewed, total):
@@ -928,34 +980,32 @@ def haha(
 
         run_review(
             db,
-            sid,
+            scan_id,
             review_model,
             target_dir,
             delay=delay,
+            line_tolerance=line_tolerance,
             on_progress=on_review_progress,
         )
 
     click.echo()
 
-    # -- Step 4: Summary --
+    # -- Step 3: Summary --
     click.echo(click.style("=== Results ===", bold=True))
-    for sid, label in [(focused_id, "focused"), (open_id, "open")]:
-        review_sum = db.review_summary(sid)
-        confirmed = review_sum.get("confirmed", 0)
-        false_pos = review_sum.get("false_positive", 0)
-        needs = review_sum.get("needs_review", 0)
-        total_findings = sum(review_sum.values())
-        click.echo(
-            f"  {label} scan {sid}: {total_findings} findings"
-            f" — {confirmed} confirmed,"
-            f" {false_pos} false positive,"
-            f" {needs} needs review"
-        )
-
+    review_sum = db.review_summary(scan_id)
+    confirmed = review_sum.get("confirmed", 0)
+    false_pos = review_sum.get("false_positive", 0)
+    needs = review_sum.get("needs_review", 0)
+    total_findings = sum(review_sum.values())
     click.echo(
-        f"\nRun 'nelson report {focused_id} --verdict confirmed'"
-        f" or 'nelson report {open_id} --verdict confirmed'"
-        " for details."
+        f"  scan {scan_id}: {total_findings} findings"
+        f" — {confirmed} confirmed,"
+        f" {false_pos} false positive,"
+        f" {needs} needs review"
+    )
+    click.echo(
+        f"\nRun 'nelson report {scan_id} --verdict confirmed' "
+        f"or 'nelson html-report {scan_id}' for details."
     )
 
 

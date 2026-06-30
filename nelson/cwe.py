@@ -470,54 +470,6 @@ def applicable_cwes(language: str) -> list[CWEEntry]:
     return [cwe for cwe in CWE_TOP_25 if not cwe.languages or language in cwe.languages]
 
 
-def build_prompt(
-    file_path: str, file_content: str, language: str, cwe: CWEEntry
-) -> str:
-    """Build the analysis prompt for a specific file and CWE."""
-    # Pick language-specific example or fall back to python or first available
-    vuln_example = (
-        cwe.example_vulnerable.get(language)
-        or cwe.example_vulnerable.get("python")
-        or next(iter(cwe.example_vulnerable.values()), "N/A")
-    )
-    safe_example = (
-        cwe.example_safe.get(language)
-        or cwe.example_safe.get("python")
-        or next(iter(cwe.example_safe.values()), "N/A")
-    )
-
-    return f"""You are a security auditor. Analyze the following {language} file for exactly one type of vulnerability:
-
-{cwe.id} ({cwe.name}): {cwe.description}
-
-Example of VULNERABLE code in {language}:
-```
-{vuln_example}
-```
-
-Example of SAFE code in {language}:
-```
-{safe_example}
-```
-
-IMPORTANT INSTRUCTIONS:
-- Only look for {cwe.id} ({cwe.name}). Do not report other vulnerability types.
-- If you find NO instances of this vulnerability, you MUST return exactly: []
-- If you find instances, return a JSON array of objects with these fields:
-  - "line": the line number (integer)
-  - "code": the vulnerable code snippet (string, just the relevant lines)
-  - "explanation": why this is vulnerable to {cwe.id} (string)
-  - "confidence": "high", "medium", or "low" (string)
-- Return ONLY the JSON array, no other text, no markdown fences, no explanation outside the JSON.
-- Be precise. Only report actual vulnerabilities, not theoretical ones.
-- Do not report vulnerabilities in comments or dead code.
-
-File: {file_path}
-```{language}
-{file_content}
-```"""
-
-
 # Sentinel CWE entry for open-ended scanning
 CWE_OPEN = CWEEntry(
     id="OPEN",

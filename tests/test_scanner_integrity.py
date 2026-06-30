@@ -7,7 +7,6 @@ terminal job status, with no subprocess or network — the adapter is faked.
 import threading
 
 from nelson.agents import AgentAdapter, AgentResult, FailureKind, Finding
-from nelson.cwe import CWE_OPEN
 from nelson.db import Database
 from nelson.scanner import _process_one_job
 
@@ -29,7 +28,7 @@ def _setup(tmp_path):
     (tmp_path / "a.py").write_text("import os\nos.system(input())\n")
     db = Database(tmp_path / "t.db")
     scan_id = db.create_scan(str(tmp_path))
-    db.create_jobs_batch(scan_id, [("a.py", "OPEN", "fake-model")])
+    db.create_jobs_batch(scan_id, [("a.py", "OPEN", "fake-model", 0)])
     job = db.next_pending_job(scan_id)
     assert job is not None
     db.claim_job(job["id"])
@@ -50,9 +49,7 @@ def test_auth_failure_marks_auth_failed_not_error(tmp_path):
         )
     )
 
-    rate_limited, ok = _process_one_job(
-        db, job, adapter, tmp_path, {"OPEN": CWE_OPEN}, threading.Event()
-    )
+    rate_limited, ok = _process_one_job(db, job, adapter, tmp_path, threading.Event())
 
     assert (rate_limited, ok) == (False, False)
     assert _status(db, job["id"]) == "auth_failed"
@@ -67,7 +64,7 @@ def test_infra_failure_marks_infra_error(tmp_path):
         )
     )
 
-    _process_one_job(db, job, adapter, tmp_path, {"OPEN": CWE_OPEN}, threading.Event())
+    _process_one_job(db, job, adapter, tmp_path, threading.Event())
 
     assert _status(db, job["id"]) == "infra_error"
     db.close()
@@ -79,9 +76,7 @@ def test_rate_limit_signals_retry_and_leaves_job_running(tmp_path):
         AgentResult(findings=[], raw_output="", failure_kind=FailureKind.RATE_LIMIT)
     )
 
-    rate_limited, ok = _process_one_job(
-        db, job, adapter, tmp_path, {"OPEN": CWE_OPEN}, threading.Event()
-    )
+    rate_limited, ok = _process_one_job(db, job, adapter, tmp_path, threading.Event())
 
     # Caller (the worker) is responsible for releasing+backing off; the job is
     # not marked terminal here.
@@ -108,7 +103,7 @@ def test_clean_run_completes_and_records_finding(tmp_path):
         )
     )
 
-    _process_one_job(db, job, adapter, tmp_path, {"OPEN": CWE_OPEN}, threading.Event())
+    _process_one_job(db, job, adapter, tmp_path, threading.Event())
 
     assert _status(db, job["id"]) == "complete"
     findings = db.findings_for_scan(scan_id)
