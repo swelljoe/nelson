@@ -1,0 +1,42 @@
+ext_id: GHSA-chgx-jx3p-rf73
+source: cvd
+cve_id: null
+ghsa_id: GHSA-chgx-jx3p-rf73
+ant_id: ANT-2026-P2DWB2SK
+project: mastodon
+repo_url: https://github.com/mastodon/mastodon
+fix_commit: 0786c1e57af3dd96d45e3f0512e3a6211599bcef
+vuln_commit: ec2a99341cbaa4e970eac0d20ec95f21a9b090d9
+bug_class: signature-bypass
+cwe: null
+severity: high
+disclosure_date: '2026-05-20T18:00:21.829005Z'
+status: vetted
+vet_confidence: 0.55
+vet_notes: 'Sound and real: the advisory (LD-Signature bypass via JSON-LD named-graph
+  restructuring) matches the fix exactly, and the vulnerability is genuinely present
+  in the pre-patch code, which verifies the signature and compacts the document without
+  rejecting @graph/@included/@reverse keywords that allow an attacker to restructure
+  the signed graph. However, findability is only moderate—identifying it requires
+  fairly specialized knowledge of JSON-LD compaction/normalization semantics to realize
+  that named-graph restructuring lets the verified content diverge from the processed
+  content, rather than a locally-visible coding flaw.'
+description: LD-Signature bypass via JSON-LD named-graph restructuring
+build_recipe: null
+gt_files:
+- app/helpers/json_ld_helper.rb
+- app/lib/activitypub/linked_data_signature.rb
+- app/services/activitypub/process_collection_service.rb
+gt_hunks:
+- file: app/helpers/json_ld_helper.rb
+  start: 3
+  end: 8
+- file: app/helpers/json_ld_helper.rb
+  start: 110
+  end: 115
+- file: app/lib/activitypub/linked_data_signature.rb
+  start: 12
+  end: 17
+- file: app/services/activitypub/process_collection_service.rb
+  start: 13
+  end: 18
