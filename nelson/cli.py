@@ -1327,6 +1327,248 @@ def bench_show_run(run_id: int, db_path: str):
             click.echo(f"      {f['description']}")
 
 
+def _parse_ts(ts: str | None):
+    """Parse a stored UTC timestamp (``%Y-%m-%dT%H:%M:%SZ``) to an aware dt."""
+    from datetime import UTC, datetime
+
+    if not ts:
+        return None
+    try:
+        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _fmt_dur(seconds: float | None) -> str:
+    if seconds is None:
+        return "-"
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
+def _bar(frac: float, width: int = 26) -> str:
+    frac = max(0.0, min(1.0, frac))
+    filled = round(frac * width)
+    return "█" * filled + "░" * (width - filled)
+
+
+def _render_status(
+    db,
+    repeat: int,
+    recency_filter: bool,
+    retry_failed: bool,
+    window: int,
+    stale_min: int,
+) -> None:
+    from datetime import UTC, datetime
+
+    from .automate import existing_run_status_map, plan_matrix
+    from .corpus import Case
+    from .runner import Competitor
+
+    now = datetime.now(UTC)
+    competitors = [
+        Competitor.from_row(r)
+        for r in db.list_competitors()
+        if r["status"] == "active"
+    ]
+    cases = [Case.from_row(r) for r in db.list_cases(status="vetted")]
+    runs = db.list_runs()
+    existing = existing_run_status_map(runs)
+
+    # The full planned matrix (empty existing => every cell), then bucket each
+    # cell by its real DB status. This mirrors the loop's own planner exactly.
+    full = plan_matrix(
+        competitors, cases, {}, recency_filter=recency_filter, repeat=repeat
+    )
+    _RETRYABLE = frozenset({"auth_failed", "infra_error"})
+    per_comp: dict[str, dict[str, int]] = {}
+    tot = {"done": 0, "running": 0, "pending": 0, "failed": 0, "todo": 0}
+    for cell in full:
+        key = (cell.competitor.name, cell.case.ext_id, cell.target_file, cell.trial)
+        statuses = existing.get(key, set())
+        if "complete" in statuses:
+            bucket = "done"
+        elif "running" in statuses:
+            bucket = "running"
+        elif "pending" in statuses:
+            bucket = "pending"
+        elif statuses and statuses <= _RETRYABLE:
+            bucket = "failed"
+        else:
+            bucket = "todo"
+        tot[bucket] += 1
+        c = per_comp.setdefault(
+            cell.competitor.name,
+            {"done": 0, "running": 0, "pending": 0, "failed": 0, "todo": 0, "total": 0},
+        )
+        c[bucket] += 1
+        c["total"] += 1
+
+    total_cells = len(full)
+    done = tot["done"]
+    frac = done / total_cells if total_cells else 1.0
+
+    click.echo(f"DB {db_path_of(db)}   {now.strftime('%Y-%m-%d %H:%M:%SZ')}")
+    click.echo(
+        f"cells {done}/{total_cells}  {_bar(frac)} {frac:>4.0%}   "
+        f"[run {tot['running']} · todo {tot['todo']} · fail {tot['failed']}"
+        + (f" · pend {tot['pending']}" if tot["pending"] else "")
+        + f"]   {len(competitors)} competitors x {len(cases)} cases x {repeat} trials"
+    )
+
+    # Per-competitor progress.
+    click.echo(
+        f"\n{'COMPETITOR':<28} {'DONE':>9} {'':>4} {'RUN':>4} {'FAIL':>5} {'TODO':>5}"
+    )
+    for name in sorted(per_comp):
+        c = per_comp[name]
+        cf = c["done"] / c["total"] if c["total"] else 1.0
+        click.echo(
+            f"{name:<28} {c['done']:>4}/{c['total']:<4} {cf:>4.0%} "
+            f"{c['running']:>4} {c['failed']:>5} {c['todo']:>5}"
+        )
+
+    # Live: what's running right now (longest-elapsed first → surfaces wedges).
+    retired = {
+        r["name"] for r in db.list_competitors() if r["status"] == "retired"
+    }
+    live = []
+    for r in runs:
+        if r["status"] != "running":
+            continue
+        started = _parse_ts(r["started_at"])
+        elapsed = (now - started).total_seconds() if started else None
+        live.append((elapsed, r))
+    live.sort(key=lambda t: (t[0] is None, -(t[0] or 0)))
+    if live:
+        click.echo(f"\nrunning now ({len(live)}):")
+        for elapsed, r in live:
+            tgt = r["target_file"] or "(repo)"
+            tgt = tgt if len(tgt) <= 30 else "…" + tgt[-29:]
+            if r["competitor_name"] in retired:
+                flag = "  ⚑ orphan (retired competitor — reset me)"
+            elif elapsed is not None and elapsed >= stale_min * 60:
+                flag = "  ⚠ possibly wedged"
+            else:
+                flag = ""
+            click.echo(
+                f"  {_fmt_dur(elapsed):>7}  {r['competitor_name']:<26} "
+                f"{r['case_ext_id']:<20} {tgt}{flag}"
+            )
+
+    # Throughput + ETA from terminal completions inside the recent window.
+    cutoff = now.timestamp() - window * 60
+    recent_done = recent_cost = 0.0
+    recent_tok = 0
+    for r in runs:
+        if r["status"] not in ("complete", "infra_error", "auth_failed"):
+            continue
+        cts = _parse_ts(r["completed_at"])
+        if cts is None or cts.timestamp() < cutoff:
+            continue
+        recent_done += 1
+        recent_cost += r["cost_usd"] or 0.0
+        recent_tok += r["tokens_out"] or 0
+    remaining = tot["todo"] + tot["pending"] + tot["running"]
+    if retry_failed:
+        remaining += tot["failed"]
+    click.echo("")
+    if recent_done:
+        rate_hr = recent_done / (window / 60)
+        eta = remaining / (recent_done / (window * 60)) if remaining else 0
+        click.echo(
+            f"last {window}m: {int(recent_done)} finished "
+            f"(~{rate_hr:.0f}/hr, ${recent_cost:.2f}, {recent_tok:,} out-tok)   "
+            f"ETA ~{_fmt_dur(eta)} for {remaining} left"
+        )
+    else:
+        click.echo(
+            f"last {window}m: no completions — ETA unknown ({remaining} cells left)"
+        )
+
+
+def db_path_of(db) -> str:
+    return str(getattr(db, "path", "nelson.db"))
+
+
+@bench.command(name="status")
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+@click.option(
+    "--repeat",
+    default=3,
+    type=click.IntRange(min=1),
+    help="Trials per cell the run targets (sizes the matrix denominator). Default 3.",
+)
+@click.option(
+    "--recency/--no-recency",
+    "recency_filter",
+    default=True,
+    help="Match the loop's recency filter when sizing the matrix. On by default.",
+)
+@click.option(
+    "--retry-failed",
+    is_flag=True,
+    help="Count auth/infra-only cells as still-to-do (matches a --retry-failed loop).",
+)
+@click.option(
+    "--window",
+    default=30,
+    type=int,
+    help="Minutes of recent history for the throughput/ETA estimate. Default 30.",
+)
+@click.option(
+    "--stale-min",
+    default=25,
+    type=int,
+    help="Flag a running cell as possibly wedged past this many minutes. Default 25.",
+)
+@click.option(
+    "--watch",
+    default=0,
+    type=int,
+    help="Refresh every N seconds until interrupted (0 = print once).",
+)
+def bench_status(
+    db_path: str,
+    repeat: int,
+    recency_filter: bool,
+    retry_failed: bool,
+    window: int,
+    stale_min: int,
+    watch: int,
+):
+    """Live progress of a benchmark run: matrix completion, running cells, ETA."""
+    import time
+
+    def render() -> None:
+        db = Database(db_path)
+        try:
+            _render_status(
+                db, repeat, recency_filter, retry_failed, window, stale_min
+            )
+        finally:
+            db.close()
+
+    if watch <= 0:
+        render()
+        return
+    try:
+        while True:
+            click.clear()
+            render()
+            click.echo(f"\n(refreshing every {watch}s — Ctrl-C to stop)")
+            time.sleep(watch)
+    except KeyboardInterrupt:
+        click.echo("")
+
+
 def _emit_run_score(rs) -> None:
     """Verbose per-run scoring output (one run)."""
     click.echo(

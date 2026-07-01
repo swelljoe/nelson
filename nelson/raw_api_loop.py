@@ -18,6 +18,12 @@ and ``EnvKeyAuth``):
 - ``NELSON_MAX_STEPS``    tool-use turn cap (default 40)
 - ``NELSON_TOKEN_BUDGET`` cumulative token cap (default 500000)
 - ``NELSON_INPUT_USD_PER_MTOK`` / ``NELSON_OUTPUT_USD_PER_MTOK`` optional pricing
+- ``NELSON_TEMPERATURE``  sampling temperature (default 0.1)
+- ``NELSON_TOP_P`` / ``NELSON_MIN_P`` / ``NELSON_FREQUENCY_PENALTY`` /
+  ``NELSON_PRESENCE_PENALTY`` / ``NELSON_REPEAT_PENALTY``  optional sampling knobs,
+  injected into the request only when set
+- ``NELSON_EXTRA_BODY``   optional JSON dict merged verbatim into each request
+  (e.g. ``{"chat_template_kwargs": {"enable_thinking": false}}``)
 
 Integrity: an auth/transport failure exits non-zero and prints the provider error
 to stderr, so the runner's ``classify_failure`` maps it to ``auth_failed`` /
@@ -916,6 +922,7 @@ def run_loop(
     max_steps: int = 40,
     token_budget: int = 500_000,
     temperature: float = 0.1,
+    extra_sampling: dict[str, Any] | None = None,
     post: Callable[[str, dict[str, Any], str], dict[str, Any]] = _post_chat,
     src_root: str | None = None,
     system_prompt: str | None = None,
@@ -983,6 +990,11 @@ def run_loop(
             "messages": messages,
             "temperature": temperature,
         }
+        # Optional anti-repetition / nucleus knobs (frequency_penalty, min_p,
+        # repeat_penalty, …). Only present when the competitor's cost_model sets
+        # them, so strict OpenAI-compat endpoints never see an unknown field.
+        if extra_sampling:
+            payload.update(extra_sampling)
         if want_cost:
             payload["usage"] = {"include": True}
         if not force_final:
@@ -1121,6 +1133,32 @@ def main() -> None:
     out_price = _float_env("NELSON_OUTPUT_USD_PER_MTOK")
     # 0.0 is a legitimate (greedy) temperature, so test for None rather than falsiness.
     temperature = _float_env("NELSON_TEMPERATURE")
+    # Optional sampling knobs — each injected into the request only when set on the
+    # competitor's cost_model. Used to tame the repetition-spiral timeout some local
+    # models (e.g. Gemma 4) fall into: frequency/presence/repeat penalties discourage
+    # the degenerate loop, and top_p/min_p tighten the nucleus.
+    extra_sampling: dict[str, Any] = {}
+    for env_key, field in (
+        ("NELSON_TOP_P", "top_p"),
+        ("NELSON_MIN_P", "min_p"),
+        ("NELSON_FREQUENCY_PENALTY", "frequency_penalty"),
+        ("NELSON_PRESENCE_PENALTY", "presence_penalty"),
+        ("NELSON_REPEAT_PENALTY", "repeat_penalty"),
+    ):
+        val = _float_env(env_key)
+        if val is not None:
+            extra_sampling[field] = val
+    # Arbitrary structured request fields (e.g. ``chat_template_kwargs`` to disable a
+    # model's runaway "thinking" phase) that don't fit the float knobs above. Merged
+    # verbatim into every request payload; set from the competitor's cost_model.
+    raw_extra = os.environ.get("NELSON_EXTRA_BODY")
+    if raw_extra:
+        try:
+            parsed = json.loads(raw_extra)
+            if isinstance(parsed, dict):
+                extra_sampling.update(parsed)
+        except (ValueError, TypeError):
+            print("ignoring malformed NELSON_EXTRA_BODY", file=sys.stderr)
     try:
         final_text, tin, tout, steps, provider_cost = run_loop(
             prompt,
@@ -1130,6 +1168,7 @@ def main() -> None:
             max_steps=_int_env("NELSON_MAX_STEPS", 40),
             token_budget=_int_env("NELSON_TOKEN_BUDGET", 500_000),
             temperature=0.1 if temperature is None else temperature,
+            extra_sampling=extra_sampling or None,
             tools=select_tools(),
             system_prompt=select_system_prompt(),
         )
