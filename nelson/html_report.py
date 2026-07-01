@@ -632,6 +632,7 @@ _LEADERBOARD_EXTRA_CSS = """\
 .matrix th.comp, .matrix td.comp { text-align: left; font-family: monospace; }
 .cell-hit { color: var(--green); font-weight: 700; }
 .cell-partial { color: var(--amber); font-weight: 700; }
+.cell-fp { color: var(--red); font-weight: 700; }
 .cell-miss { color: var(--text-muted); }
 .cell-jerr { color: var(--yellow); }
 .cell-refu { color: var(--cyan); font-style: italic; }
@@ -955,21 +956,23 @@ def generate_leaderboard_report(
     parts.append(
         "<table><tr>"
         '<th class="lead-rank">#</th><th>Competitor</th><th>Size</th>'
-        '<th class="num">Detect</th>'
+        '<th class="num" title="De-duped multipass detection: distinct cases HIT in '
+        "any --repeat pass / eligible cases. Repeated passes are pooled to distinct "
+        'cases, never triple-counted.">Detect</th>'
         '<th class="num" title="Informational only (not the ranking key): hits plus '
-        "half credit for partials — (hits + 0.5*partials) / eligible. Pooled across "
-        'trials.">det+&frac12;</th>'
-        '<th class="num" title="Single run: case hits / eligible (hits + partials + '
-        "genuine misses). Repeated runs (--repeat): per-trial detection range "
-        '(min-max); hover a cell for the best-of-N pooled count and the spread.">'
-        "Hits/Elig</th>"
-        '<th class="num" title="Cases localized to the right spot (within tolerance) '
-        "but judged a different bug — half credit, never counted as a hit. Pooled "
-        'across trials.">Partial</th>'
+        'half credit for partials — (hits + 0.5*partials) / eligible.">det+&frac12;</th>'
+        '<th class="num" title="Distinct cases hit in any pass / eligible (hits + '
+        'partials + genuine misses). Hover for the per-trial spread.">Hits/Elig</th>'
+        '<th class="num" title="Distinct cases localized to the right spot (within '
+        "tolerance) but judged a different bug — right place, wrong bug. A non-hit, "
+        'but still points a human at the line. De-duped across passes.">Partial</th>'
+        '<th class="num" title="Absolute count of distinct confirmed false positives, '
+        "de-duped across passes — the same bogus finding restated in several passes "
+        'counts once. The human-time-wasted number.">False pos</th>'
         '<th class="num">Precision</th><th class="num">FP/case</th>'
         '<th class="num" title="Confirmed real bugs the model found that are not '
         "the known target CVE — credited capability, but does not count toward "
-        'detection">Other real</th>'
+        'detection. De-duped across passes.">Other real</th>'
         '<th class="num">Cost/case</th><th class="num">Latency</th>'
         '<th class="num" title="Mean total tokens (prompt + completion) reported '
         "per audited case — only as honest as the provider's usage metering "
@@ -993,24 +996,25 @@ def generate_leaderboard_report(
             if full_n and e.cases < full_n
             else ""
         )
-        # With repeated trials the headline is the mean across trials and the
-        # Hits/Elig cell becomes a per-trial range (best-of-N kept in the tooltip).
-        if e.n_trials > 1:
-            detect = (
-                (
-                    f"{_pct(e.detection_rate)}"
-                    f'<div class="trials-note">mean of {e.n_trials} trials</div>'
-                )
-                if e.eligible
-                else "—"
+        # Headline detection is the de-duped union across passes (best-of-N pooled);
+        # with repeated trials we annotate the pass count and keep the per-trial
+        # spread in the Hits/Elig tooltip so variance is still visible.
+        if e.eligible:
+            note = (
+                f'<div class="trials-note">{e.n_trials} passes, de-duped</div>'
+                if e.n_trials > 1
+                else ""
             )
-            hits_elig = (
-                f'<span title="best-of-{e.n_trials} pooled = {e.hits}/{e.eligible}; '
-                f'spread {_pct(e.trial_spread)}">'
-                f"{_pct(e.trial_min_rate)}&ndash;{_pct(e.trial_max_rate)}</span>"
+            detect = f"{_pct(e.detection_rate)}{note}"
+            spread = (
+                f' title="per-trial {_pct(e.trial_min_rate)}&ndash;'
+                f'{_pct(e.trial_max_rate)}, spread {_pct(e.trial_spread)}"'
+                if e.n_trials > 1
+                else ""
             )
+            hits_elig = f"<span{spread}>{e.hits}/{e.eligible}</span>"
         else:
-            detect = _pct(e.detection_rate) if e.eligible else "—"
+            detect = "—"
             hits_elig = f"{e.hits}/{e.eligible}"
         parts.append(
             f'<tr><td class="lead-rank">{i}</td>'
@@ -1020,6 +1024,7 @@ def generate_leaderboard_report(
             f'<td class="num">{_pct(e.half_credit_rate) if e.eligible else "—"}</td>'
             f'<td class="num">{hits_elig}</td>'
             f'<td class="num cell-partial">{e.partials if e.partials else "—"}</td>'
+            f'<td class="num cell-fp">{e.false_positives if e.false_positives else "—"}</td>'
             f'<td class="num">{_pct(e.precision)}</td>'
             f'<td class="num">{f"{e.fp_per_case:.2f}" if e.fp_per_case is not None else "—"}</td>'
             f'<td class="num">{e.real_others if e.real_others else "—"}</td>'
@@ -1030,31 +1035,33 @@ def generate_leaderboard_report(
         )
     parts.append("</table>")
     parts.append(
-        '<p class="muted">Detect = case hits / eligible (hits + partials + genuine '
-        "misses); undetermined, refused, and auth/infra-excluded cases are not in "
-        "the denominator. Partial = cases localized to the right spot but judged a "
-        "<em>different</em> bug — right place, wrong bug. It is an eligible non-hit "
-        "(it sits in the denominator where it would otherwise be a miss), so it "
-        "never moves Detect or the ranking; det+&frac12; "
-        "(= (hits + 0.5&middot;partials) / eligible) shows its half-credit value "
-        "informationally. "
-        "Precision = true findings / (true + false positives). Other real = "
-        "confirmed real bugs the model found that are not the planted target CVE "
-        "(extra capability, but not counted as detection). Cost/latency are "
-        "the competitor's own spend per audited case. ★ = on a Pareto "
-        "frontier below.</p>"
+        '<p class="muted"><strong>Every count below is de-duped across the '
+        "<code>--repeat</code> passes</strong> — the same bug (or the same false "
+        "positive) reported in several passes is counted once, never once per pass. "
+        "This is the point of multipass scanning: more bites at the apple to find a "
+        "bug, without inflating the tally. <strong>Detect</strong> = distinct cases "
+        "HIT in <em>any</em> pass / eligible cases (hits + partials + genuine "
+        "misses); undetermined, refused and auth/infra-excluded cases are out of the "
+        "denominator. <strong>Partial</strong> = distinct cases localized to the "
+        "right spot but judged a <em>different</em> bug — right place, wrong bug; an "
+        "eligible non-hit that never moves Detect or the ranking, but still points a "
+        "human at the vulnerable line. <strong>False pos</strong> = absolute distinct "
+        "confirmed false positives — the human-time-wasted number, to weigh against "
+        "the bugs found. Precision = true / (true + false positives). Other real = "
+        "confirmed real bugs that are not the planted target CVE (extra capability, "
+        "not counted as detection). det+&frac12; = (hits + 0.5&middot;partials) / "
+        "eligible, informational. Cost/latency are the competitor's own spend per "
+        "audited case. ★ = on a Pareto frontier below.</p>"
     )
     if any(e.n_trials > 1 for e in entries):
         parts.append(
             '<p class="muted">This run used repeated trials '
-            "(<code>--repeat</code>). <strong>Detect is the mean detection rate "
-            "across trials</strong> — each trial is scored on its own and the "
-            "rates averaged, so it reflects a typical single run, <em>not</em> "
-            "best-of-N. The ranking is by that mean. Hits/Elig shows the per-trial "
-            "detection <strong>range</strong> (min to max); hover it for the "
-            "best-of-N pooled count and the spread. In the per-case matrix, a HIT "
-            "marked <code>n/N</code> was found in only n of N trials (flaky). See "
-            "<code>bench noise</code> for the full per-trial breakdown.</p>"
+            "(<code>--repeat</code>). Detect and every finding count are the "
+            "<strong>de-duped union across passes</strong> (best-of-N pooled), not a "
+            "per-trial mean — hover a Hits/Elig cell for the per-trial spread. In the "
+            "per-case matrix, a HIT marked <code>n/N</code> was found in only n of N "
+            "trials (flaky). See <code>bench noise</code> for the full per-trial "
+            "breakdown.</p>"
         )
     if any(full_n and e.cases < full_n for e in entries):
         parts.append(

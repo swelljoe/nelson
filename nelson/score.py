@@ -883,6 +883,7 @@ class FindingScore:
     localized: bool
     truth: TruthVerdict | None = None  # None unless the finding reached the judge
     fp: FPVerdict | None = None  # None unless the finding reached the FP judge
+    cwe: str | None = None  # for de-duping the same finding across repeated trials
 
     @property
     def is_target_hit(self) -> bool:
@@ -1170,6 +1171,7 @@ class Scorer:
                         localized=locs[m["id"]].matched,
                         truth=cluster_truth if locs[m["id"]].matched else None,
                         fp=cluster_fp if m["id"] in fp_ids else None,
+                        cwe=m["cwe"],
                     )
                 )
 
@@ -1248,6 +1250,7 @@ class Scorer:
                     localized=localized,
                     truth=truth,
                     fp=fp,
+                    cwe=row["cwe"],
                 )
             )
 
@@ -1664,6 +1667,91 @@ def precision_report(run_scores: list[RunScore]) -> list[CompetitorPrecision]:
     return [by_name[name] for name in sorted(by_name)]
 
 
+@dataclass
+class DedupedFindingCounts:
+    """Distinct findings for one competitor, de-duped across repeated trials.
+
+    Repeated (``--repeat``) passes are meant to give a model several bites at the
+    apple *without* triple-counting the same finding. Here every finding a
+    competitor reported for a case — across all its trials and files — is clustered
+    (same file + CWE within ``tolerance`` lines, the same window Nelson's review
+    de-dup uses), and each cluster is counted once by its best member verdict. So
+    the same real bug found in three passes is one ``target_hit``/``real_other``,
+    and the same spurious finding restated in three passes is one
+    ``false_positive`` — the honest "distinct bugs" tallies, not per-pass volume.
+    """
+
+    competitor_name: str
+    target_hits: int = 0
+    real_others: int = 0
+    false_positives: int = 0
+    undetermined: int = 0
+
+    @property
+    def true_findings(self) -> int:
+        return self.target_hits + self.real_others
+
+    @property
+    def precision(self) -> float | None:
+        decided = self.true_findings + self.false_positives
+        return self.true_findings / decided if decided else None
+
+
+def _deduped_cluster_category(members: list[FindingScore]) -> str | None:
+    """Category of a same-bug cluster, most-favorable member wins.
+
+    A confirmed target hit anywhere in the cluster makes it a target; else a
+    confirmed real (different) bug beats a false positive beats undetermined.
+    None (every member is a candidate-undetermined target — not a precision item)
+    means the cluster is not counted, mirroring :func:`precision_report`.
+    """
+    if any(m.is_target_hit for m in members):
+        return "target_hits"
+    cats = {m.fp_category for m in members}
+    if "real_other" in cats:
+        return "real_others"
+    if "false_positive" in cats:
+        return "false_positives"
+    if "undetermined" in cats:
+        return "undetermined"
+    return None
+
+
+def deduped_finding_counts(
+    run_scores: list[RunScore], tolerance: int = DEFAULT_CLUSTER_TOLERANCE
+) -> dict[str, DedupedFindingCounts]:
+    """Per-competitor distinct-finding tallies, de-duped across trials + files.
+
+    Findings are pooled per (competitor, case) — so restatements across repeated
+    trials collapse — then clustered and counted once each. Returns a map keyed by
+    competitor name.
+    """
+    by_cc: dict[tuple[str, str], list[FindingScore]] = {}
+    for rs in run_scores:
+        for f in rs.findings:
+            by_cc.setdefault((rs.competitor_name, rs.case_ext_id), []).append(f)
+    out: dict[str, DedupedFindingCounts] = {}
+    for (comp, _case), findings in by_cc.items():
+        counts = out.setdefault(comp, DedupedFindingCounts(comp))
+        adapted = [
+            {
+                "id": i,
+                "file_path": f.file,
+                "line_number": f.line,
+                "cwe_id": f.cwe,
+                "explanation": "",
+                "_fs": f,
+            }
+            for i, f in enumerate(findings)
+        ]
+        for cluster in _compare.cluster_findings(adapted, line_tolerance=tolerance):
+            members = [m["_fs"] for m in cluster.findings]
+            category = _deduped_cluster_category(members)
+            if category is not None:
+                setattr(counts, category, getattr(counts, category) + 1)
+    return out
+
+
 # -- Leaderboard + Pareto (P5) -----------------------------------------------
 #
 # The leaderboard fuses the three views a competitor is judged on — detection
@@ -1678,10 +1766,12 @@ def precision_report(run_scores: list[RunScore]) -> list[CompetitorPrecision]:
 class LeaderboardEntry:
     """One competitor's combined detection / precision / economics row.
 
-    Detection counts are over **cases** (file-runs rolled up); precision counts
-    are over **findings**; cost and latency are summed over the competitor's
-    **complete** runs and normalized by the cases it audited. ``size_class`` and
-    ``knowledge_cutoff`` are denormalized competitor metadata for display.
+    Detection counts are over **cases** (file-runs *and* repeated trials rolled up
+    to distinct cases); precision counts are over **distinct de-duped findings**
+    (the same bug or false positive restated across passes is counted once); cost
+    and latency are summed over the competitor's **complete** runs and normalized
+    by the cases it audited. ``size_class`` and ``knowledge_cutoff`` are
+    denormalized competitor metadata for display.
     """
 
     competitor_name: str
@@ -1725,18 +1815,26 @@ class LeaderboardEntry:
 
     @property
     def detection_rate(self) -> float:
-        """Detection rate (confirmed hits over eligible cases).
+        """De-duped detection rate: distinct cases hit over eligible cases.
 
-        A ``partial`` is an eligible non-hit, so it never lifts this number — the
-        strict standings are unaffected by the half-credit tier. For repeated runs
-        this is the **mean across trials** (each trial scored on its own, then
-        averaged) — a typical single run, not best-of-N. Trials with zero eligible
-        cases count as 0.0 so the mean is truly across trials.
+        A case counts as a hit if the model found the bug in **any** trial or file
+        — repeated (``--repeat``) passes are de-duped to distinct cases, not
+        triple-counted, so this is the union across passes (best-of-N pooled), the
+        real "does multipass find the bug" number. A ``partial`` is an eligible
+        non-hit and never lifts this. Per-trial variance lives in ``trial_spread``
+        / :func:`noise_report`, kept out of the headline on purpose.
         """
-        if self.trial_rates:
-            denom = max(self.n_trials, len(self.trial_rates))
-            return sum(self.trial_rates) / denom if denom else 0.0
         return self.hits / self.eligible if self.eligible else 0.0
+
+    @property
+    def partial_rate(self) -> float:
+        """De-duped partial rate: distinct cases localized right / eligible cases.
+
+        Right place, wrong bug — found in any pass, counted once. Informational and
+        genuinely useful (it still points a human at the vulnerable line), but never
+        part of the strict detection standings.
+        """
+        return self.partials / self.eligible if self.eligible else 0.0
 
     @property
     def half_credit_rate(self) -> float:
@@ -1839,7 +1937,11 @@ def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
     """
     det = {d.competitor_name: d for d in detection_report(run_scores)}
     prec = {p.competitor_name: p for p in precision_report(run_scores)}
-    # Per-trial variance, so the rate is the mean over trials (not best-of-N).
+    # Distinct-finding tallies de-duped across trials/files — so a model that
+    # restates the same bug (or the same false positive) every pass is counted
+    # once, not once per pass. This is what feeds the leaderboard's precision/FP.
+    deduped = deduped_finding_counts(run_scores)
+    # Per-trial variance, kept only for the informational spread (not the rate).
     noise = {n.competitor_name: n for n in noise_report(run_scores)}
 
     cost: dict[str, float] = {}
@@ -1871,6 +1973,7 @@ def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
     for name in set(det) | set(prec):
         d = det.get(name)
         p = prec.get(name)
+        dd = deduped.get(name)
         entries.append(
             LeaderboardEntry(
                 competitor_name=name,
@@ -1882,10 +1985,11 @@ def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
                 judge_error=d.judge_error if d else 0,
                 refused=d.refused if d else 0,
                 excluded=d.excluded if d else 0,
-                target_hits=p.target_hits if p else 0,
-                real_others=p.real_others if p else 0,
-                false_positives=p.false_positives if p else 0,
-                undetermined=p.undetermined if p else 0,
+                # De-duped across trials (distinct bugs), not per-pass finding volume.
+                target_hits=dd.target_hits if dd else 0,
+                real_others=dd.real_others if dd else 0,
+                false_positives=dd.false_positives if dd else 0,
+                undetermined=dd.undetermined if dd else 0,
                 cases=len(cases_seen.get(name, set())),
                 competitor_cost=cost.get(name, 0.0),
                 judge_cost=d.judge_cost if d else 0.0,

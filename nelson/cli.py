@@ -1733,14 +1733,15 @@ def bench_score(
 def _emit_leaderboard(entries) -> None:
     """Per-competitor leaderboard table (detection + precision + economics)."""
     click.echo(
-        f"\n{'#':>2} {'COMPETITOR':<26} {'SIZE':<8} {'DET':>5} {'DET+½':>6} "
-        f"{'PART':>4} {'PREC':>5} {'FP/C':>5} {'OTHER':>5} {'COST/C':>8} "
+        f"\n{'#':>2} {'COMPETITOR':<26} {'SIZE':<8} {'DET':>5} {'HIT':>4} "
+        f"{'PART':>4} {'FP':>4} {'PREC':>5} {'FP/C':>5} {'OTHER':>5} {'COST/C':>8} "
         f"{'LAT':>6} {'TOK/C':>7} {'CASES':>5}"
     )
     for i, e in enumerate(entries, 1):
         det = f"{e.detection_rate:.0%}" if e.eligible else "-"
-        dethalf = f"{e.half_credit_rate:.0%}" if e.eligible else "-"
+        hit = str(e.hits) if e.hits else "-"
         part = str(e.partials) if e.partials else "-"
+        fp = str(e.false_positives) if e.false_positives else "-"
         prec = f"{e.precision:.0%}" if e.precision is not None else "-"
         fpc = f"{e.fp_per_case:.2f}" if e.fp_per_case is not None else "-"
         other = str(e.real_others) if e.real_others else "-"
@@ -1750,18 +1751,19 @@ def _emit_leaderboard(entries) -> None:
         tok = _fmt_tokens(tpc) if tpc is not None else "-"
         click.echo(
             f"{i:>2} {e.competitor_name:<26} {(e.size_class or '-'):<8} "
-            f"{det:>5} {dethalf:>6} {part:>4} {prec:>5} {fpc:>5} {other:>5} "
+            f"{det:>5} {hit:>4} {part:>4} {fp:>4} {prec:>5} {fpc:>5} {other:>5} "
             f"{cpc:>8} {lat:>6} {tok:>7} {e.cases:>5}"
         )
     click.echo(
-        "\nRanked by detection, then precision, then cost/case. DET+½ (= (hits + "
-        "0.5*partials)/eligible) and PART (cases localized to the right spot but "
-        "judged a different bug) are informational — a partial is an eligible "
-        "non-hit and never moves DET or the rank. OTHER = confirmed real bugs found "
-        "that are not the known target CVE. COST/C, LAT and TOK/C are the "
-        "competitor's own spend/time/tokens per audited case (judge spend "
-        "excluded). TOK/C reflects provider-reported usage — under-reporting compat "
-        "endpoints understate it."
+        "\nAll counts de-duped across trials — the same bug (or false positive) "
+        "found in several of the --repeat passes counts once, never N times. "
+        "Ranked by detection, then precision, then cost/case. DET = distinct cases "
+        "HIT in any pass / eligible cases (the multipass detection rate). HIT / "
+        "PART / FP are absolute distinct-finding counts: real target bugs, "
+        "right-place-wrong-bug partials (a non-hit, still useful), and confirmed "
+        "false positives. PREC = true / (true + FP). OTHER = confirmed real bugs "
+        "that are not the target CVE. COST/C, LAT, TOK/C are the competitor's own "
+        "spend/time/tokens per audited case (judge spend excluded)."
     )
 
 
