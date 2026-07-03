@@ -287,9 +287,7 @@ def test_loop_injects_extra_sampling_into_every_payload(tmp_path):
         src_root=str(tmp_path),
     )
     assert seen and all(p["frequency_penalty"] == 0.5 for p in seen)
-    assert all(
-        p["chat_template_kwargs"] == {"enable_thinking": False} for p in seen
-    )
+    assert all(p["chat_template_kwargs"] == {"enable_thinking": False} for p in seen)
 
 
 def test_loop_no_extra_sampling_by_default(tmp_path):

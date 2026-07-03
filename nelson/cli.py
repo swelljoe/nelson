@@ -1374,9 +1374,7 @@ def _render_status(
 
     now = datetime.now(UTC)
     competitors = [
-        Competitor.from_row(r)
-        for r in db.list_competitors()
-        if r["status"] == "active"
+        Competitor.from_row(r) for r in db.list_competitors() if r["status"] == "active"
     ]
     cases = [Case.from_row(r) for r in db.list_cases(status="vetted")]
     runs = db.list_runs()
@@ -1436,9 +1434,7 @@ def _render_status(
         )
 
     # Live: what's running right now (longest-elapsed first → surfaces wedges).
-    retired = {
-        r["name"] for r in db.list_competitors() if r["status"] == "retired"
-    }
+    retired = {r["name"] for r in db.list_competitors() if r["status"] == "retired"}
     live = []
     for r in runs:
         if r["status"] != "running":
@@ -1550,9 +1546,7 @@ def bench_status(
     def render() -> None:
         db = Database(db_path)
         try:
-            _render_status(
-                db, repeat, recency_filter, retry_failed, window, stale_min
-            )
+            _render_status(db, repeat, recency_filter, retry_failed, window, stale_min)
         finally:
             db.close()
 

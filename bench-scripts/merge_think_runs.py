@@ -39,13 +39,33 @@ DEST_COMP = 40
 DROP_COMP = 41  # temp -b row, removed after fold
 
 RUN_COLS = [
-    "case_id", "competitor_id", "container_id", "status", "started_at",
-    "completed_at", "tokens_in", "tokens_out", "cost_usd", "wall_clock_s",
-    "transcript_path", "raw_output", "error_msg", "target_file", "trial",
+    "case_id",
+    "competitor_id",
+    "container_id",
+    "status",
+    "started_at",
+    "completed_at",
+    "tokens_in",
+    "tokens_out",
+    "cost_usd",
+    "wall_clock_s",
+    "transcript_path",
+    "raw_output",
+    "error_msg",
+    "target_file",
+    "trial",
 ]
 FIND_COLS = [
-    "run_id", "file", "line_start", "line_end", "description", "confidence",
-    "cwe", "matches_ground_truth", "judge_truth_verdict", "judge_fp_verdict",
+    "run_id",
+    "file",
+    "line_start",
+    "line_end",
+    "description",
+    "confidence",
+    "cwe",
+    "matches_ground_truth",
+    "judge_truth_verdict",
+    "judge_fp_verdict",
     "judge_reasoning",
 ]
 
@@ -106,8 +126,10 @@ def main() -> int:
             status_counts[run["status"]] = status_counts.get(run["status"], 0) + 1
             if args.commit:
                 vals = [
-                    new_case_id if c == "case_id"
-                    else dest_comp if c == "competitor_id"
+                    new_case_id
+                    if c == "case_id"
+                    else dest_comp
+                    if c == "competitor_id"
                     else run[c]
                     for c in RUN_COLS
                 ]
@@ -141,7 +163,9 @@ def main() -> int:
         total_finds += n_finds
         src.close()
 
-    print(f"{'COMMIT' if args.commit else 'DRY-RUN'} — fold into competitor {DEST_COMP}")
+    print(
+        f"{'COMMIT' if args.commit else 'DRY-RUN'} — fold into competitor {DEST_COMP}"
+    )
     for db_path, src_comp, n_runs, n_finds, sc in per_source:
         print(f"  {db_path} (comp {src_comp}): {n_runs} runs, {n_finds} findings  {sc}")
     print(f"  TOTAL: {total_runs} runs, {total_finds} findings")
