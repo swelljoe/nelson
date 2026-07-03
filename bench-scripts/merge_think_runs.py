@@ -111,8 +111,10 @@ def main() -> int:
                     else run[c]
                     for c in RUN_COLS
                 ]
+                # S608 suppressed below: interpolated names are the trusted module-level
+                # RUN_COLS constant (never user input); all values are bound via ?.
                 cur = base.execute(
-                    f"INSERT INTO runs ({','.join(RUN_COLS)}) "
+                    f"INSERT INTO runs ({','.join(RUN_COLS)}) "  # noqa: S608
                     f"VALUES ({','.join('?' * len(RUN_COLS))})",
                     vals,
                 )
@@ -122,8 +124,9 @@ def main() -> int:
                 ).fetchall()
                 for f in finds:
                     fvals = [new_run_id if c == "run_id" else f[c] for c in FIND_COLS]
+                    # S608 suppressed below: names are the trusted FIND_COLS constant; ? binds.
                     base.execute(
-                        f"INSERT INTO run_findings ({','.join(FIND_COLS)}) "
+                        f"INSERT INTO run_findings ({','.join(FIND_COLS)}) "  # noqa: S608
                         f"VALUES ({','.join('?' * len(FIND_COLS))})",
                         fvals,
                     )
