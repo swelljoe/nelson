@@ -288,6 +288,39 @@ def test_raw_api_loop_build_spec_passes_temperature(tmp_path):
     assert spec.env["NELSON_TEMPERATURE"] == "0.5"
 
 
+def test_raw_api_loop_build_spec_passes_sampling_knobs_and_extra_body(tmp_path):
+    comp = Competitor(
+        name="raw/gemma",
+        model="gemma",
+        runtime="raw-api-loop",
+        cost_model=json.dumps(
+            {
+                "base_url": "http://10.20.30.1:8000/v1",
+                "frequency_penalty": 0.5,
+                "min_p": 0.05,
+                "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+            }
+        ),
+    )
+    ctx = RuntimeContext(
+        competitor=comp,
+        prompt="audit a.c",
+        src_dir=tmp_path / "src",
+        auth=AuthMaterial(env={"NELSON_API_KEY": "x"}, mounts=[]),
+        name="r1",
+        network=True,
+    )
+    spec = RawApiLoopRuntime().build_spec(ctx)
+    assert spec.env["NELSON_FREQUENCY_PENALTY"] == "0.5"
+    assert spec.env["NELSON_MIN_P"] == "0.05"
+    assert json.loads(spec.env["NELSON_EXTRA_BODY"]) == {
+        "chat_template_kwargs": {"enable_thinking": False}
+    }
+    # Knobs not set are left unset so strict OpenAI endpoints see no unknown field.
+    assert "NELSON_PRESENCE_PENALTY" not in spec.env
+    assert "NELSON_REPEAT_PENALTY" not in spec.env
+
+
 def test_raw_api_loop_default_auth_requires_profile(tmp_path):
     with pytest.raises(RunnerError):
         RawApiLoopRuntime().default_auth().prepare(tmp_path)

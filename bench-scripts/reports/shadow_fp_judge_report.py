@@ -26,7 +26,7 @@ from pathlib import Path
 
 from nelson.report_style import BASE_CSS, THEME_HEAD, THEME_TOGGLE, THEME_VARS
 
-MODELS_ORDER = ["deepseek", "mimo", "gemma31b"]
+MODELS_ORDER = ["deepseek", "mimo", "glm52", "gemma31b"]
 
 
 def _kappa(pairs: list[tuple[int, int]]) -> float | None:

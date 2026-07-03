@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from . import compare as _compare
 from .agents import _run_cli, classify_failure
 
 # The judge-reply JSON repair/unwrap logic is shared with pre-vet; reuse the one
@@ -48,6 +49,58 @@ if TYPE_CHECKING:
 # The competitor reads the pre-patch tree, so gt_hunks are its own line numbers;
 # this only absorbs off-by-a-few reporting, not whole-function slack.
 DEFAULT_LINE_TOLERANCE = 10
+
+# How close two findings (same file + CWE) must be to count as the *same bug* for
+# judge de-duplication. Matches the review pass's clustering window so "same bug
+# in the same place from the same model" is judged once, not once per restatement.
+DEFAULT_CLUSTER_TOLERANCE = 2
+
+# Lower rank sorts first when picking a cluster's delegate finding.
+_CONF_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
+def _cluster_representative(members: list[dict]) -> dict:
+    """Deterministic cluster delegate: highest confidence, earliest line, lowest id."""
+
+    def key(m: dict) -> tuple[int, int, int]:
+        conf = (m.get("confidence") or "").lower()
+        line = m["line_number"] if m.get("line_number") is not None else 10**9
+        return (_CONF_RANK.get(conf, 3), line, m["id"])
+
+    return min(members, key=key)
+
+
+def _cluster_finding_rows(rows: Iterable[Any], tolerance: int) -> list[list[dict]]:
+    """Group a run's findings into same-bug clusters so the judge is asked once
+    per cluster instead of once per finding.
+
+    A model that reports the same bug several times in one audit (the same CWE in
+    the same file within ``tolerance`` lines) yields one cluster; we judge a single
+    representative and stamp that verdict on every member. Returns each cluster as
+    a list of plain dicts carrying the original ``run_findings`` columns plus the
+    aliases ``compare.cluster_findings`` / ``effective_cwe`` expect.
+    """
+    adapted: list[dict] = []
+    for r in rows:
+        adapted.append(
+            {
+                "id": r["id"],
+                "file": r["file"],
+                "line_start": r["line_start"],
+                "description": r["description"],
+                "cwe": r["cwe"],
+                "confidence": r["confidence"],
+                # Aliases consumed by compare.cluster_findings + effective_cwe.
+                "file_path": r["file"],
+                "line_number": r["line_start"],
+                "cwe_id": r["cwe"],
+                "explanation": r["description"],
+            }
+        )
+    return [
+        c.findings for c in _compare.cluster_findings(adapted, line_tolerance=tolerance)
+    ]
+
 
 # Weight a ``partial`` (right place, wrong bug) carries in the informational
 # half-credit rate. A finding localized to within tolerance still points a human
@@ -830,6 +883,7 @@ class FindingScore:
     localized: bool
     truth: TruthVerdict | None = None  # None unless the finding reached the judge
     fp: FPVerdict | None = None  # None unless the finding reached the FP judge
+    cwe: str | None = None  # for de-duping the same finding across repeated trials
 
     @property
     def is_target_hit(self) -> bool:
@@ -946,6 +1000,7 @@ class Scorer:
         judge: TruthJudge,
         *,
         tolerance: int = DEFAULT_LINE_TOLERANCE,
+        cluster_tolerance: int = DEFAULT_CLUSTER_TOLERANCE,
         fp_judge: FPJudge | None = None,
         code: CodeProvider | None = None,
         refusal_judge: RefusalJudge | None = None,
@@ -953,6 +1008,9 @@ class Scorer:
         self.db = db
         self.judge = judge
         self.tolerance = tolerance
+        # Line window for treating two same-file/same-CWE findings as the same bug
+        # (judge once per cluster). 0 merges only findings on the identical line.
+        self.cluster_tolerance = cluster_tolerance
         self.fp_judge = fp_judge
         self.code = code
         # Optional: detects a policy/safety *refusal* (a zero-finding,
@@ -1025,65 +1083,97 @@ class Scorer:
         scores: list[FindingScore] = []
         judge_cost = 0.0
         fp_cost = 0.0
-        for row in self.db.run_findings(run_id):
-            reported = ReportedFinding.from_row(row)
-            loc = localize(
-                row["file"], row["line_start"], case.gt_hunks, self.tolerance
-            )
-            truth: TruthVerdict | None = None
-            if loc.matched:
-                truth = self.judge.judge(case, reported)
-                judge_cost += truth.cost_usd or 0.0
+        # De-duplicate before judging: the same bug class in the same place from
+        # the same model is one bug. We cluster the run's findings, judge a single
+        # representative per cluster, and stamp that verdict on every member — so
+        # a model that restates a finding doesn't multiply judge calls/cost. The
+        # judgments ledger records the actual (deduped) calls; every finding still
+        # carries its own derived verdict. cluster_tolerance=0 keeps the old
+        # judge-every-finding behavior.
+        for members in _cluster_finding_rows(
+            self.db.run_findings(run_id), self.cluster_tolerance
+        ):
+            locs = {
+                m["id"]: localize(
+                    m["file"], m["line_start"], case.gt_hunks, self.tolerance
+                )
+                for m in members
+            }
+            localized = [m for m in members if locs[m["id"]].matched]
+
+            # Truth: one call per cluster, shared across its localized members.
+            cluster_truth: TruthVerdict | None = None
+            if localized:
+                rep = _cluster_representative(localized)
+                cluster_truth = self.judge.judge(case, ReportedFinding.from_row(rep))
+                judge_cost += cluster_truth.cost_usd or 0.0
                 self.db.add_judgment(
                     target_kind="truth",
-                    target_id=row["id"],
+                    target_id=rep["id"],
                     judge_model=self.judge.name,
-                    verdict=truth.label,
-                    reasoning=truth.reasoning,
-                    tokens_in=truth.tokens_in,
-                    tokens_out=truth.tokens_out,
-                    cost_usd=truth.cost_usd,
+                    verdict=cluster_truth.label,
+                    reasoning=cluster_truth.reasoning,
+                    tokens_in=cluster_truth.tokens_in,
+                    tokens_out=cluster_truth.tokens_out,
+                    cost_usd=cluster_truth.cost_usd,
                 )
-            self.db.record_finding_score(
-                row["id"],
-                matches_ground_truth=loc.matched,
-                judge_truth_verdict=truth.label if truth is not None else None,
-                judge_reasoning=truth.reasoning if truth is not None else None,
-            )
+            for m in members:
+                matched = locs[m["id"]].matched
+                v = cluster_truth if matched else None
+                self.db.record_finding_score(
+                    m["id"],
+                    matches_ground_truth=matched,
+                    judge_truth_verdict=v.label if v is not None else None,
+                    judge_reasoning=v.reasoning if v is not None else None,
+                )
 
-            # Precision: every finding that isn't the target hit (and isn't a
-            # localized-but-undetermined candidate) is FP-judged against the code.
-            fp: FPVerdict | None = None
-            if (
-                self.fp_judge is not None
-                and self.code is not None
-                and _fp_eligible(loc.matched, truth)
-            ):
-                source = self.code.source(case, row["file"])
-                fp = self.fp_judge.judge(reported, source)
-                fp_cost += fp.cost_usd or 0.0
-                self.db.add_judgment(
-                    target_kind="fp",
-                    target_id=row["id"],
-                    judge_model=self.fp_judge.name,
-                    verdict=fp.label,
-                    reasoning=fp.reasoning,
-                    tokens_in=fp.tokens_in,
-                    tokens_out=fp.tokens_out,
-                    cost_usd=fp.cost_usd,
-                )
-                self.db.record_fp_verdict(row["id"], verdict=fp.label)
+            # Precision: one FP call per cluster, shared across its FP-eligible
+            # members (non-localized findings, or localized ones judged a
+            # different bug). The whole cluster shares a file, so one source read.
+            cluster_fp: FPVerdict | None = None
+            fp_ids: set[int] = set()
+            if self.fp_judge is not None and self.code is not None:
+                fp_members = [
+                    m
+                    for m in members
+                    if _fp_eligible(
+                        locs[m["id"]].matched,
+                        cluster_truth if locs[m["id"]].matched else None,
+                    )
+                ]
+                if fp_members:
+                    rep = _cluster_representative(fp_members)
+                    source = self.code.source(case, rep["file"])
+                    cluster_fp = self.fp_judge.judge(
+                        ReportedFinding.from_row(rep), source
+                    )
+                    fp_cost += cluster_fp.cost_usd or 0.0
+                    self.db.add_judgment(
+                        target_kind="fp",
+                        target_id=rep["id"],
+                        judge_model=self.fp_judge.name,
+                        verdict=cluster_fp.label,
+                        reasoning=cluster_fp.reasoning,
+                        tokens_in=cluster_fp.tokens_in,
+                        tokens_out=cluster_fp.tokens_out,
+                        cost_usd=cluster_fp.cost_usd,
+                    )
+                    for m in fp_members:
+                        self.db.record_fp_verdict(m["id"], verdict=cluster_fp.label)
+                    fp_ids = {m["id"] for m in fp_members}
 
-            scores.append(
-                FindingScore(
-                    finding_id=row["id"],
-                    file=row["file"],
-                    line=row["line_start"],
-                    localized=loc.matched,
-                    truth=truth,
-                    fp=fp,
+            for m in members:
+                scores.append(
+                    FindingScore(
+                        finding_id=m["id"],
+                        file=m["file"],
+                        line=m["line_start"],
+                        localized=locs[m["id"]].matched,
+                        truth=cluster_truth if locs[m["id"]].matched else None,
+                        fp=cluster_fp if m["id"] in fp_ids else None,
+                        cwe=m["cwe"],
+                    )
                 )
-            )
 
         outcome = _outcome_from_findings(scores)
         if (
@@ -1160,6 +1250,7 @@ class Scorer:
                     localized=localized,
                     truth=truth,
                     fp=fp,
+                    cwe=row["cwe"],
                 )
             )
 
@@ -1576,6 +1667,91 @@ def precision_report(run_scores: list[RunScore]) -> list[CompetitorPrecision]:
     return [by_name[name] for name in sorted(by_name)]
 
 
+@dataclass
+class DedupedFindingCounts:
+    """Distinct findings for one competitor, de-duped across repeated trials.
+
+    Repeated (``--repeat``) passes are meant to give a model several bites at the
+    apple *without* triple-counting the same finding. Here every finding a
+    competitor reported for a case — across all its trials and files — is clustered
+    (same file + CWE within ``tolerance`` lines, the same window Nelson's review
+    de-dup uses), and each cluster is counted once by its best member verdict. So
+    the same real bug found in three passes is one ``target_hit``/``real_other``,
+    and the same spurious finding restated in three passes is one
+    ``false_positive`` — the honest "distinct bugs" tallies, not per-pass volume.
+    """
+
+    competitor_name: str
+    target_hits: int = 0
+    real_others: int = 0
+    false_positives: int = 0
+    undetermined: int = 0
+
+    @property
+    def true_findings(self) -> int:
+        return self.target_hits + self.real_others
+
+    @property
+    def precision(self) -> float | None:
+        decided = self.true_findings + self.false_positives
+        return self.true_findings / decided if decided else None
+
+
+def _deduped_cluster_category(members: list[FindingScore]) -> str | None:
+    """Category of a same-bug cluster, most-favorable member wins.
+
+    A confirmed target hit anywhere in the cluster makes it a target; else a
+    confirmed real (different) bug beats a false positive beats undetermined.
+    None (every member is a candidate-undetermined target — not a precision item)
+    means the cluster is not counted, mirroring :func:`precision_report`.
+    """
+    if any(m.is_target_hit for m in members):
+        return "target_hits"
+    cats = {m.fp_category for m in members}
+    if "real_other" in cats:
+        return "real_others"
+    if "false_positive" in cats:
+        return "false_positives"
+    if "undetermined" in cats:
+        return "undetermined"
+    return None
+
+
+def deduped_finding_counts(
+    run_scores: list[RunScore], tolerance: int = DEFAULT_CLUSTER_TOLERANCE
+) -> dict[str, DedupedFindingCounts]:
+    """Per-competitor distinct-finding tallies, de-duped across trials + files.
+
+    Findings are pooled per (competitor, case) — so restatements across repeated
+    trials collapse — then clustered and counted once each. Returns a map keyed by
+    competitor name.
+    """
+    by_cc: dict[tuple[str, str], list[FindingScore]] = {}
+    for rs in run_scores:
+        for f in rs.findings:
+            by_cc.setdefault((rs.competitor_name, rs.case_ext_id), []).append(f)
+    out: dict[str, DedupedFindingCounts] = {}
+    for (comp, _case), findings in by_cc.items():
+        counts = out.setdefault(comp, DedupedFindingCounts(comp))
+        adapted = [
+            {
+                "id": i,
+                "file_path": f.file,
+                "line_number": f.line,
+                "cwe_id": f.cwe,
+                "explanation": "",
+                "_fs": f,
+            }
+            for i, f in enumerate(findings)
+        ]
+        for cluster in _compare.cluster_findings(adapted, line_tolerance=tolerance):
+            members = [m["_fs"] for m in cluster.findings]
+            category = _deduped_cluster_category(members)
+            if category is not None:
+                setattr(counts, category, getattr(counts, category) + 1)
+    return out
+
+
 # -- Leaderboard + Pareto (P5) -----------------------------------------------
 #
 # The leaderboard fuses the three views a competitor is judged on — detection
@@ -1590,10 +1766,12 @@ def precision_report(run_scores: list[RunScore]) -> list[CompetitorPrecision]:
 class LeaderboardEntry:
     """One competitor's combined detection / precision / economics row.
 
-    Detection counts are over **cases** (file-runs rolled up); precision counts
-    are over **findings**; cost and latency are summed over the competitor's
-    **complete** runs and normalized by the cases it audited. ``size_class`` and
-    ``knowledge_cutoff`` are denormalized competitor metadata for display.
+    Detection counts are over **cases** (file-runs *and* repeated trials rolled up
+    to distinct cases); precision counts are over **distinct de-duped findings**
+    (the same bug or false positive restated across passes is counted once); cost
+    and latency are summed over the competitor's **complete** runs and normalized
+    by the cases it audited. ``size_class`` and ``knowledge_cutoff`` are
+    denormalized competitor metadata for display.
     """
 
     competitor_name: str
@@ -1637,18 +1815,26 @@ class LeaderboardEntry:
 
     @property
     def detection_rate(self) -> float:
-        """Detection rate (confirmed hits over eligible cases).
+        """De-duped detection rate: distinct cases hit over eligible cases.
 
-        A ``partial`` is an eligible non-hit, so it never lifts this number — the
-        strict standings are unaffected by the half-credit tier. For repeated runs
-        this is the **mean across trials** (each trial scored on its own, then
-        averaged) — a typical single run, not best-of-N. Trials with zero eligible
-        cases count as 0.0 so the mean is truly across trials.
+        A case counts as a hit if the model found the bug in **any** trial or file
+        — repeated (``--repeat``) passes are de-duped to distinct cases, not
+        triple-counted, so this is the union across passes (best-of-N pooled), the
+        real "does multipass find the bug" number. A ``partial`` is an eligible
+        non-hit and never lifts this. Per-trial variance lives in ``trial_spread``
+        / :func:`noise_report`, kept out of the headline on purpose.
         """
-        if self.trial_rates:
-            denom = max(self.n_trials, len(self.trial_rates))
-            return sum(self.trial_rates) / denom if denom else 0.0
         return self.hits / self.eligible if self.eligible else 0.0
+
+    @property
+    def partial_rate(self) -> float:
+        """De-duped partial rate: distinct cases localized right / eligible cases.
+
+        Right place, wrong bug — found in any pass, counted once. Informational and
+        genuinely useful (it still points a human at the vulnerable line), but never
+        part of the strict detection standings.
+        """
+        return self.partials / self.eligible if self.eligible else 0.0
 
     @property
     def half_credit_rate(self) -> float:
@@ -1751,7 +1937,11 @@ def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
     """
     det = {d.competitor_name: d for d in detection_report(run_scores)}
     prec = {p.competitor_name: p for p in precision_report(run_scores)}
-    # Per-trial variance, so the rate is the mean over trials (not best-of-N).
+    # Distinct-finding tallies de-duped across trials/files — so a model that
+    # restates the same bug (or the same false positive) every pass is counted
+    # once, not once per pass. This is what feeds the leaderboard's precision/FP.
+    deduped = deduped_finding_counts(run_scores)
+    # Per-trial variance, kept only for the informational spread (not the rate).
     noise = {n.competitor_name: n for n in noise_report(run_scores)}
 
     cost: dict[str, float] = {}
@@ -1783,6 +1973,7 @@ def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
     for name in set(det) | set(prec):
         d = det.get(name)
         p = prec.get(name)
+        dd = deduped.get(name)
         entries.append(
             LeaderboardEntry(
                 competitor_name=name,
@@ -1794,10 +1985,11 @@ def leaderboard(run_scores: list[RunScore]) -> list[LeaderboardEntry]:
                 judge_error=d.judge_error if d else 0,
                 refused=d.refused if d else 0,
                 excluded=d.excluded if d else 0,
-                target_hits=p.target_hits if p else 0,
-                real_others=p.real_others if p else 0,
-                false_positives=p.false_positives if p else 0,
-                undetermined=p.undetermined if p else 0,
+                # De-duped across trials (distinct bugs), not per-pass finding volume.
+                target_hits=dd.target_hits if dd else 0,
+                real_others=dd.real_others if dd else 0,
+                false_positives=dd.false_positives if dd else 0,
+                undetermined=dd.undetermined if dd else 0,
                 cases=len(cases_seen.get(name, set())),
                 competitor_cost=cost.get(name, 0.0),
                 judge_cost=d.judge_cost if d else 0.0,

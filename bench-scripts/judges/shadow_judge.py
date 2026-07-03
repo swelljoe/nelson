@@ -73,6 +73,12 @@ SHADOW_MODELS = {
         "key": lambda: "lm-studio",
         "timeout": 600.0,  # local APU/GPU, generous
     },
+    "glm52": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "model": "z-ai/glm-5.2",
+        "key": lambda: _read_key("/home/joe/secrets/openrouter"),
+        "timeout": 300.0,
+    },
 }
 
 TEMPERATURE = 0.0  # ask for the model's single best call; trial spread = its own noise
@@ -104,7 +110,10 @@ CREATE TABLE IF NOT EXISTS shadow_verdicts (
 # -- Eval-set loading --------------------------------------------------------
 
 
-def _load_eval_set() -> list[dict]:
+def _load_eval_set(
+    source_dbs: list[str] | None = None,
+    exclude_competitors: set[str] | None = None,
+) -> tuple[list[dict], dict[str, int]]:
     """Collect every (advisory, finding) input Opus truth-judged, deduped by prompt.
 
     Returns a list of {input_hash, prompt, opus_same_bug, opus_conflict, source_db,
@@ -113,18 +122,27 @@ def _load_eval_set() -> list[dict]:
     nondeterminism — kept, but excluded from strict accuracy by the report).
     """
     by_hash: dict[str, dict] = {}
-    for db_path in SOURCE_DBS:
+    stats = {"rows": 0, "excluded": 0}
+    dbs = source_dbs if source_dbs is not None else SOURCE_DBS
+    exclude = exclude_competitors or set()
+    for db_path in dbs:
         if not Path(db_path).exists():
             continue
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         case_cache: dict[int, Case] = {}
         rows = conn.execute(
-            """SELECT rf.*, r.case_id AS _case_id
-               FROM run_findings rf JOIN runs r ON rf.run_id = r.id
+            """SELECT rf.*, r.case_id AS _case_id, c.name AS _competitor
+               FROM run_findings rf
+               JOIN runs r ON rf.run_id = r.id
+               JOIN competitors c ON r.competitor_id = c.id
                WHERE rf.judge_truth_verdict IN ('same_bug', 'different_bug')"""
         ).fetchall()
         for row in rows:
+            stats["rows"] += 1
+            if row["_competitor"] in exclude:
+                stats["excluded"] += 1
+                continue
             cid = row["_case_id"]
             if cid not in case_cache:
                 crow = conn.execute(
@@ -153,7 +171,7 @@ def _load_eval_set() -> list[dict]:
                 "finding_line": finding.line,
             }
         conn.close()
-    return list(by_hash.values())
+    return list(by_hash.values()), stats
 
 
 # -- One judge call ----------------------------------------------------------
@@ -320,6 +338,21 @@ def main() -> int:
     ap.add_argument("--trials", type=int, default=3)
     ap.add_argument("--models", default=",".join(SHADOW_MODELS))
     ap.add_argument("--out", default="nelson-shadow-judge.db")
+    ap.add_argument(
+        "--source-dbs",
+        default="",
+        help="comma list of DBs to draw verdicts from (default: all six)",
+    )
+    ap.add_argument(
+        "--exclude",
+        default="",
+        help="comma list of competitor names whose findings to skip",
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="load + report the eval set, then exit without calling any judge",
+    )
     args = ap.parse_args()
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
@@ -328,7 +361,9 @@ def main() -> int:
         print(f"unknown model(s): {bad}; known: {list(SHADOW_MODELS)}")
         return 2
 
-    eval_set = _load_eval_set()
+    source_dbs = [d.strip() for d in args.source_dbs.split(",") if d.strip()] or None
+    exclude = {c.strip() for c in args.exclude.split(",") if c.strip()}
+    eval_set, stats = _load_eval_set(source_dbs, exclude)
     if args.limit:
         eval_set = eval_set[: args.limit]
     n_same = sum(i["opus_same_bug"] for i in eval_set)
@@ -336,9 +371,20 @@ def main() -> int:
     print(
         f"eval set: {len(eval_set)} distinct inputs "
         f"(opus same={n_same} diff={len(eval_set) - n_same}, "
-        f"self-conflict={n_conf}); models={models}; trials={args.trials}",
+        f"self-conflict={n_conf}, excluded={stats['excluded']}); "
+        f"models={models}; trials={args.trials}",
         flush=True,
     )
+    if not eval_set:
+        print("empty eval set — nothing to do", flush=True)
+        return 1
+    if args.dry_run:
+        print(
+            f"dry-run: would issue {len(eval_set) * args.trials} calls PER judge "
+            f"({len(models)} judges = {len(eval_set) * args.trials * len(models)} total)",
+            flush=True,
+        )
+        return 0
 
     conn = sqlite3.connect(args.out)
     conn.executescript(_RESULT_DDL)

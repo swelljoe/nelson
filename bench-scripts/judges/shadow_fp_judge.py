@@ -32,6 +32,7 @@ import argparse
 import hashlib
 import sqlite3
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -86,6 +87,12 @@ SHADOW_MODELS = {
         "key": lambda: "lm-studio",
         "timeout": 600.0,  # local APU/GPU, generous
     },
+    "glm52": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "model": "z-ai/glm-5.2",
+        "key": lambda: _read_key("/home/joe/secrets/openrouter"),
+        "timeout": 300.0,
+    },
 }
 
 TEMPERATURE = 0.0  # ask for the model's single best call; trial spread = its own noise
@@ -120,7 +127,10 @@ CREATE TABLE IF NOT EXISTS shadow_fp_verdicts (
 # -- Eval-set loading --------------------------------------------------------
 
 
-def _load_eval_set() -> tuple[list[dict], dict[str, int]]:
+def _load_eval_set(
+    source_dbs: list[str] | None = None,
+    exclude_competitors: set[str] | None = None,
+) -> tuple[list[dict], dict[str, int]]:
     """Collect every (finding, source) input Opus FP-judged, deduped by prompt.
 
     Returns (items, stats). Each item is {input_hash, prompt, opus_real, opus_conflict,
@@ -136,20 +146,27 @@ def _load_eval_set() -> tuple[list[dict], dict[str, int]]:
     """
     provider = GitCodeProvider()
     by_hash: dict[str, dict] = {}
-    stats = {"rows": 0, "skipped_no_source": 0, "skipped_no_file": 0}
-    for db_path in SOURCE_DBS:
+    stats = {"rows": 0, "skipped_no_source": 0, "skipped_no_file": 0, "excluded": 0}
+    dbs = source_dbs if source_dbs is not None else SOURCE_DBS
+    exclude = exclude_competitors or set()
+    for db_path in dbs:
         if not Path(db_path).exists():
             continue
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         case_cache: dict[int, Case] = {}
         rows = conn.execute(
-            """SELECT rf.*, r.case_id AS _case_id
-               FROM run_findings rf JOIN runs r ON rf.run_id = r.id
+            """SELECT rf.*, r.case_id AS _case_id, c.name AS _competitor
+               FROM run_findings rf
+               JOIN runs r ON rf.run_id = r.id
+               JOIN competitors c ON r.competitor_id = c.id
                WHERE rf.judge_fp_verdict IN ('real_bug', 'false_positive')"""
         ).fetchall()
         for row in rows:
             stats["rows"] += 1
+            if row["_competitor"] in exclude:
+                stats["excluded"] += 1
+                continue
             cid = row["_case_id"]
             if cid not in case_cache:
                 crow = conn.execute(
@@ -277,7 +294,12 @@ def _call(client: httpx.Client, cfg: dict, key: str, prompt: str) -> dict:
 
 
 def _run_model(
-    model_key: str, cfg: dict, eval_set: list[dict], trials: int, out_db: str
+    model_key: str,
+    cfg: dict,
+    eval_set: list[dict],
+    trials: int,
+    out_db: str,
+    concurrency: int = 1,
 ) -> None:
     try:
         key = cfg["key"]()
@@ -285,8 +307,11 @@ def _run_model(
         print(f"[{model_key}] SKIP — cannot read key: {exc}", flush=True)
         return
 
-    conn = sqlite3.connect(out_db, timeout=60.0)
+    # Shared write connection + lock: the DB write is trivially fast, so serializing
+    # it costs nothing while the slow part (the HTTP call) runs fully concurrently.
+    conn = sqlite3.connect(out_db, timeout=60.0, check_same_thread=False)
     conn.execute("PRAGMA busy_timeout=60000")
+    db_lock = threading.Lock()
     done = {
         (r[0], r[1])
         for r in conn.execute(
@@ -302,16 +327,17 @@ def _run_model(
     ]
     print(
         f"[{model_key}] {len(eval_set)} inputs x {trials} trials = "
-        f"{len(eval_set) * trials}; {len(done)} done, {len(todo)} to do",
+        f"{len(eval_set) * trials}; {len(done)} done, {len(todo)} to do; "
+        f"concurrency={concurrency}",
         flush=True,
     )
 
-    n = 0
-    agree = 0
-    scored = 0
-    with httpx.Client() as client:
-        for item, trial in todo:
-            res = _call(client, cfg, key, item["prompt"])
+    counters = {"n": 0, "agree": 0, "scored": 0}
+
+    def _work(item_trial: tuple, client: httpx.Client) -> None:
+        item, trial = item_trial
+        res = _call(client, cfg, key, item["prompt"])
+        with db_lock:
             conn.execute(
                 """INSERT OR IGNORE INTO shadow_fp_verdicts
                    (model, trial, input_hash, source_db, case_ext_id, finding_file,
@@ -337,11 +363,12 @@ def _run_model(
                 ),
             )
             conn.commit()
-            n += 1
+            counters["n"] += 1
             if res["shadow_real"] is not None and not item["opus_conflict"]:
-                scored += 1
+                counters["scored"] += 1
                 if res["shadow_real"] == item["opus_real"]:
-                    agree += 1
+                    counters["agree"] += 1
+            n, scored, agree = counters["n"], counters["scored"], counters["agree"]
             if n % 25 == 0 or n == len(todo):
                 acc = f"{agree / scored:.0%}" if scored else "n/a"
                 print(
@@ -349,6 +376,21 @@ def _run_model(
                     f"agree-w-opus {agree}/{scored} ({acc})",
                     flush=True,
                 )
+
+    # One httpx client per worker thread (httpx.Client is not meant to be shared
+    # across threads); ≤`concurrency` in-flight requests to this one endpoint.
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        clients = [httpx.Client() for _ in range(concurrency)]
+        try:
+            futs = [
+                pool.submit(_work, it, clients[i % concurrency])
+                for i, it in enumerate(todo)
+            ]
+            for f in futs:
+                f.result()
+        finally:
+            for c in clients:
+                c.close()
     conn.close()
     print(f"[{model_key}] FINISHED", flush=True)
 
@@ -362,6 +404,27 @@ def main() -> int:
     ap.add_argument("--trials", type=int, default=3)
     ap.add_argument("--models", default=",".join(SHADOW_MODELS))
     ap.add_argument("--out", default="nelson-shadow-fp-judge.db")
+    ap.add_argument(
+        "--source-dbs",
+        default="",
+        help="comma list of DBs to draw verdicts from (default: all six)",
+    )
+    ap.add_argument(
+        "--exclude",
+        default="",
+        help="comma list of competitor names whose findings to skip",
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="load + report the eval set, then exit without calling any judge",
+    )
+    ap.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="in-flight requests PER judge endpoint (paid APIs tolerate >1)",
+    )
     args = ap.parse_args()
 
     models = [m.strip() for m in args.models.split(",") if m.strip()]
@@ -370,7 +433,9 @@ def main() -> int:
         print(f"unknown model(s): {bad}; known: {list(SHADOW_MODELS)}")
         return 2
 
-    eval_set, stats = _load_eval_set()
+    source_dbs = [d.strip() for d in args.source_dbs.split(",") if d.strip()] or None
+    exclude = {c.strip() for c in args.exclude.split(",") if c.strip()}
+    eval_set, stats = _load_eval_set(source_dbs, exclude)
     if args.limit:
         eval_set = eval_set[: args.limit]
     n_real = sum(i["opus_real"] for i in eval_set)
@@ -380,24 +445,38 @@ def main() -> int:
         f"(opus real={n_real} fp={len(eval_set) - n_real}, "
         f"self-conflict={n_conf}); from {stats['rows']} verdict rows "
         f"(skipped {stats['skipped_no_source']} no-source, "
-        f"{stats['skipped_no_file']} no-file); models={models}; trials={args.trials}",
+        f"{stats['skipped_no_file']} no-file, {stats['excluded']} excluded-competitor); "
+        f"models={models}; trials={args.trials}",
         flush=True,
     )
     if not eval_set:
         print("empty eval set — nothing to do", flush=True)
         return 1
+    if args.dry_run:
+        print(
+            f"dry-run: would issue {len(eval_set) * args.trials} calls PER judge "
+            f"({len(models)} judges = {len(eval_set) * args.trials * len(models)} total)",
+            flush=True,
+        )
+        return 0
 
     conn = sqlite3.connect(args.out)
     conn.executescript(_RESULT_DDL)
     conn.commit()
     conn.close()
 
-    # One thread per model: ≤1 in-flight request per endpoint (rate-limit safe),
-    # and a slow/dead Gemma cannot block DeepSeek or MiMo.
+    # One thread per model so a slow endpoint can't block the others; each model
+    # then fans out `--concurrency` in-flight requests to its own endpoint.
     with ThreadPoolExecutor(max_workers=len(models)) as pool:
         futs = [
             pool.submit(
-                _run_model, m, SHADOW_MODELS[m], eval_set, args.trials, args.out
+                _run_model,
+                m,
+                SHADOW_MODELS[m],
+                eval_set,
+                args.trials,
+                args.out,
+                args.concurrency,
             )
             for m in models
         ]

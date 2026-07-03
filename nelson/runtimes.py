@@ -392,6 +392,24 @@ class RawApiLoopRuntime:
             # Sampling temperature for the audit (default 0.1). Raised for repeat-trial
             # experiments where run-to-run diversity is the point, not determinism.
             env["NELSON_TEMPERATURE"] = str(cfg["temperature"])
+        # Optional anti-repetition / nucleus knobs, injected into the API request only
+        # when set. Used to tame the repetition-spiral timeout some local models (e.g.
+        # Gemma 4) fall into. Absent for every competitor that doesn't set them, so
+        # strict OpenAI-compat endpoints never receive an unknown field.
+        for field, env_key in (
+            ("top_p", "NELSON_TOP_P"),
+            ("min_p", "NELSON_MIN_P"),
+            ("frequency_penalty", "NELSON_FREQUENCY_PENALTY"),
+            ("presence_penalty", "NELSON_PRESENCE_PENALTY"),
+            ("repeat_penalty", "NELSON_REPEAT_PENALTY"),
+        ):
+            if cfg.get(field) is not None:
+                env[env_key] = str(cfg[field])
+        # Arbitrary structured request fields merged verbatim into the API payload
+        # (e.g. {"chat_template_kwargs": {"enable_thinking": false}} to stop Gemma 4's
+        # reasoning phase running away to a timeout on large files). JSON-encoded.
+        if isinstance(cfg.get("extra_body"), dict):
+            env["NELSON_EXTRA_BODY"] = json.dumps(cfg["extra_body"])
         mounts = [
             (str(_RAW_API_SCRIPT_HOST), _RAW_API_SCRIPT_CONTAINER, "ro"),
             (str(ctx.src_dir), "/src", "ro"),

@@ -487,12 +487,12 @@ def test_noise_report_single_trial_has_zero_spread():
     assert r.flaky_cases == []  # a case seen in only one trial can't be flaky
 
 
-def test_leaderboard_detection_rate_is_mean_across_trials_not_best_of_n():
+def test_leaderboard_detection_rate_is_deduped_union_across_trials():
     from nelson.score import RunScore, leaderboard
 
     # alpha over 3 trials, 2 cases. Case A hit every trial; case B hit only in
-    # trial 0. Best-of-N would pool to A,B both hit = 2/2 = 100%. The honest
-    # figure is the mean of per-trial rates: t0=2/2, t1=1/2, t2=1/2 -> 66.7%.
+    # trial 0. Multipass de-dup: a case is a hit if found in ANY pass, so both A
+    # and B are hits -> 2/2 = 100%. (The old mean-of-trials figure was 66.7%.)
     runs = []
     rid = 0
     for t in range(3):
@@ -504,11 +504,11 @@ def test_leaderboard_detection_rate_is_mean_across_trials_not_best_of_n():
 
     e = leaderboard(runs)[0]
     assert e.n_trials == 3
-    assert e.detection_rate == pytest.approx((1.0 + 0.5 + 0.5) / 3)  # mean, not 1.0
+    assert e.detection_rate == pytest.approx(1.0)  # union, not the 0.667 mean
+    assert (e.hits, e.eligible) == (2, 2)
+    # Per-trial variance is still available for the spread tooltip.
     assert (e.trial_min_rate, e.trial_max_rate) == (0.5, 1.0)
     assert e.trial_spread == pytest.approx(0.5)
-    # pooled best-of-N counts remain available (for the hover tooltip).
-    assert (e.hits, e.eligible) == (2, 2)
 
 
 def test_leaderboard_single_trial_rate_unchanged():
@@ -541,6 +541,67 @@ def test_detection_report_counts_cases_not_runs():
     assert report[0].misses == 0
     assert report[0].eligible == 1
     assert report[0].detection_rate == 1.0
+
+
+def test_deduped_finding_counts_collapses_repeated_fp_across_trials():
+    from nelson.score import (
+        FindingScore,
+        FPVerdict,
+        RunScore,
+        deduped_finding_counts,
+    )
+
+    def fp(fid, file, line, cwe):
+        return FindingScore(
+            fid, file, line, localized=False, fp=FPVerdict(is_real=False), cwe=cwe
+        )
+
+    # Same false positive (a.c ~line 100, CWE-125) restated in all 3 passes, plus
+    # one genuinely distinct FP (b.c) in a single pass. De-duped: 2 distinct FPs.
+    runs = [
+        RunScore(
+            t + 1,
+            "alpha",
+            "M",
+            "complete",
+            "miss",
+            trial=t,
+            findings=[fp(t + 1, "a.c", 100 + t, "CWE-125")],
+        )
+        for t in range(3)
+    ]
+    runs[0].findings.append(fp(99, "b.c", 5, "CWE-476"))
+
+    counts = deduped_finding_counts(runs)["M"]
+    assert counts.false_positives == 2  # 3 restatements collapse to 1, plus 1 distinct
+    assert counts.true_findings == 0
+
+
+def test_deduped_finding_counts_target_hit_beats_fp_in_cluster():
+    from nelson.score import (
+        FindingScore,
+        FPVerdict,
+        RunScore,
+        TruthVerdict,
+        deduped_finding_counts,
+    )
+
+    # Same spot: pass 0 confirmed the target bug, pass 1 the FP judge (wrongly)
+    # called a restatement a false positive. The favorable verdict wins -> the
+    # cluster is one target hit, not an FP.
+    hit = FindingScore(
+        1, "a.c", 42, localized=True, truth=TruthVerdict(True), cwe="CWE-787"
+    )
+    noise = FindingScore(
+        2, "a.c", 43, localized=False, fp=FPVerdict(is_real=False), cwe="CWE-787"
+    )
+    runs = [
+        RunScore(1, "alpha", "M", "complete", "hit", trial=0, findings=[hit]),
+        RunScore(2, "alpha", "M", "complete", "miss", trial=1, findings=[noise]),
+    ]
+    counts = deduped_finding_counts(runs)["M"]
+    assert counts.target_hits == 1
+    assert counts.false_positives == 0
 
 
 # -- Real judge wiring (no network) ------------------------------------------
@@ -1134,3 +1195,72 @@ def test_claude_refusal_judge_is_a_refusaljudge():
     from nelson.score import RefusalJudge
 
     assert isinstance(ClaudeRefusalJudge(), RefusalJudge)
+
+
+# -- Judge de-duplication (same bug class, same place, same model = one bug) ----
+
+
+def test_score_run_dedups_truth_judge_for_same_bug_cluster(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    # Three restatements of one bug: same file, adjacent lines inside the hunk.
+    run_id = _complete_run(
+        db, case_id, findings=[("Foo.java", 75), ("Foo.java", 76), ("Foo.java", 77)]
+    )
+    judge = FakeJudge(TruthVerdict(True, reasoning="zip slip", cost_usd=0.05))
+
+    rs = Scorer(db, judge).score_run(run_id)
+
+    assert rs.outcome == "hit"
+    assert judge.calls == 1  # one cluster -> one judge call (was 3)
+    assert rs.judge_cost == 0.05  # counted once, not x3
+    # Every member still carries the derived verdict.
+    for f in db.run_findings(run_id):
+        assert f["matches_ground_truth"] == 1
+        assert f["judge_truth_verdict"] == "same_bug"
+    # The ledger records exactly the one real call.
+    assert len(db.judgments(target_kind="truth")) == 1
+
+
+def test_score_run_does_not_dedup_distant_findings(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    # Both localize (hunk 73-79) but are >cluster_tolerance apart -> two clusters.
+    run_id = _complete_run(db, case_id, findings=[("Foo.java", 73), ("Foo.java", 79)])
+    judge = FakeJudge(TruthVerdict(True, cost_usd=0.05))
+
+    Scorer(db, judge).score_run(run_id)
+
+    assert judge.calls == 2
+
+
+def test_score_run_cluster_tolerance_zero_judges_each_distinct_line(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Foo.java", 75), ("Foo.java", 76)])
+    judge = FakeJudge(TruthVerdict(True, cost_usd=0.05))
+
+    Scorer(db, judge, cluster_tolerance=0).score_run(run_id)
+
+    assert judge.calls == 2  # de-dup off: adjacent-but-distinct lines judged apart
+
+
+def test_score_run_dedups_fp_judge_for_same_bug_cluster(tmp_path):
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    # Two restatements of one off-target finding (far from the hunk, adjacent).
+    run_id = _complete_run(
+        db, case_id, findings=[("Other.java", 10), ("Other.java", 11)]
+    )
+    truth = FakeJudge(TruthVerdict(True))  # never reached (not localized)
+    fp = FakeFPJudge(FPVerdict(False, reasoning="safe", cost_usd=0.02))
+    code = FakeCode()
+
+    rs = Scorer(db, truth, fp_judge=fp, code=code).score_run(run_id)
+
+    assert truth.calls == 0
+    assert fp.calls == 1  # one cluster -> one FP call (was 2)
+    assert code.calls == 1  # one source read for the cluster
+    assert rs.fp_cost == 0.02
+    for f in db.run_findings(run_id):
+        assert f["judge_fp_verdict"] == "false_positive"

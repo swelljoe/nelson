@@ -265,6 +265,44 @@ def test_loop_honours_explicit_temperature(tmp_path):
     assert all(p["temperature"] == 0.6 for p in seen)  # repeat-trial diversity
 
 
+def test_loop_injects_extra_sampling_into_every_payload(tmp_path):
+    # Anti-repeat knobs + structured extra_body (e.g. disabling a model's runaway
+    # thinking) ride on each request; absent by default so strict servers see nothing.
+    seen = []
+
+    def post(url, payload, api_key):
+        seen.append(payload)
+        return _final("[]") if seen else _tool_call("read_file", {"path": "a.c"})
+
+    run_loop(
+        "audit",
+        base_url="x",
+        model="m",
+        api_key="k",
+        extra_sampling={
+            "frequency_penalty": 0.5,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+        post=post,
+        src_root=str(tmp_path),
+    )
+    assert seen and all(p["frequency_penalty"] == 0.5 for p in seen)
+    assert all(p["chat_template_kwargs"] == {"enable_thinking": False} for p in seen)
+
+
+def test_loop_no_extra_sampling_by_default(tmp_path):
+    seen = []
+
+    def post(url, payload, api_key):
+        seen.append(payload)
+        return _final("[]")
+
+    run_loop(
+        "audit", base_url="x", model="m", api_key="k", post=post, src_root=str(tmp_path)
+    )
+    assert all("frequency_penalty" not in p for p in seen)
+
+
 def test_loop_overrides_system_prompt_and_tools(tmp_path):
     # Host callers (scan-mode adapter) supply their own framing + tool schema
     # while reusing the loop; the benchmark defaults must not leak in.
