@@ -22,6 +22,18 @@ vet_notes: 'The advisory matches the fix: the pre-patch blocklist (`IP4_CIDR_LIS
   an SSRF-aware model but notably harder than spotting a flawed check.'
 description: SSRF Bypass via IPv6 Unspecified Address (`::`) in Mastodon
 build_recipe: null
+verification:
+  invariant: IPv6 unspecified addresses must be classified as private before any outbound connection is attempted.
+  image: nelson-verify-mastodon:ruby-3.3
+  network: false
+  build: []
+  witnesses:
+  - name: ipv6-unspecified-address
+    command: [ruby, /harness/witness_unspecified.rb]
+    vulnerable_exit_codes: [1]
+    fixed_exit_codes: [0]
+  controls:
+  - [ruby, /harness/controls.rb]
 gt_files:
 - app/lib/private_address_check.rb
 gt_hunks:

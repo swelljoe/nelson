@@ -228,3 +228,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Specific rosters
+bench-scripts/rosters/
+# Reports (artifacts)
+reports/

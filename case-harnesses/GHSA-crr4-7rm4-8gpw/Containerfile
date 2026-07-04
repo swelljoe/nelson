@@ -1,0 +1,4 @@
+FROM docker.io/library/ruby@sha256:2f618d39d933e8320aed4036437e7101f9007b60b4d10a9461b398d1b7740af7
+RUN addgroup -g 1000 agent && adduser -D -u 1000 -G agent agent
+USER agent
+WORKDIR /workspace
