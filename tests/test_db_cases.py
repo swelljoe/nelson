@@ -117,6 +117,20 @@ def test_ground_truth_json_columns_round_trip(tmp_path):
     db.close()
 
 
+def test_verification_json_round_trip(tmp_path):
+    db = Database(tmp_path / "c.db")
+    db.upsert_case(_seed())
+    verification = {
+        "invariant": "unsafe input is rejected",
+        "witnesses": [{"command": ["pytest", "test_security.py"]}],
+    }
+    db.update_case_fields("CVE-2026-27654", {"verification": verification})
+    row = db.get_case("CVE-2026-27654")
+    assert row is not None
+    assert json.loads(row["verification"]) == verification
+    db.close()
+
+
 def test_update_missing_case_is_noop(tmp_path):
     db = Database(tmp_path / "c.db")
     db.update_case_fields("GHSA-does-not-exist", {"cwe": "CWE-787"})

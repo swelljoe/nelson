@@ -79,6 +79,7 @@ class Case:
     gt_files: list[str] = field(default_factory=list)
     gt_hunks: list[dict[str, Any]] = field(default_factory=list)
     build_recipe: str | None = None
+    verification: dict[str, Any] | None = None
     status: str = "candidate"
     vet_confidence: float | None = None
     vet_notes: str | None = None
@@ -94,6 +95,9 @@ class Case:
         data: dict[str, Any] = {k: row[k] for k in (*CASE_COLUMNS, "id")}
         data["gt_files"] = json.loads(row["gt_files"]) if row["gt_files"] else []
         data["gt_hunks"] = json.loads(row["gt_hunks"]) if row["gt_hunks"] else []
+        data["verification"] = (
+            json.loads(row["verification"]) if row["verification"] else None
+        )
         return cls(**data)
 
 
@@ -198,6 +202,7 @@ _MANIFEST_FIELD_ORDER = (
     "vet_notes",
     "description",
     "build_recipe",
+    "verification",
     "gt_files",
     "gt_hunks",
 )

@@ -1117,9 +1117,58 @@ def show(ext_id: str, db_path: str):
         sys.exit(1)
     for key in row.keys():  # noqa: SIM118 — sqlite3.Row needs .keys() for columns
         value = row[key]
-        if key in ("gt_files", "gt_hunks") and value:
+        if key in ("gt_files", "gt_hunks", "verification") and value:
             value = json.loads(value)
         click.echo(f"{key:>16}: {value}")
+
+
+@corpus.command()
+@click.argument("ext_id")
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+@click.option(
+    "--work-dir", default="verification-cache", help="Verification checkouts."
+)
+@click.option(
+    "--harness-dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False),
+    help="Hidden harness directory mounted read-only at /harness.",
+)
+@click.option(
+    "--from-manifest",
+    default=None,
+    help="Also resolve the case from this manifest directory.",
+)
+def verify(
+    ext_id: str,
+    db_path: str,
+    work_dir: str,
+    harness_dir: str | None,
+    from_manifest: str | None,
+):
+    """Run a case's hidden harness on its vulnerable and fixed commits."""
+    from .verify import DifferentialVerifier
+
+    db = Database(db_path)
+    case = _resolve_case(ext_id, db, from_manifest)
+    result = DifferentialVerifier().verify(case, work_dir, harness_dir)
+    if result.error:
+        raise click.ClickException(result.error)
+    for check in result.checks:
+        actual = check.command_result.exit_code
+        if check.command_result.error:
+            actual = check.command_result.error
+        mark = "PASS" if check.passed else "FAIL"
+        expected = ",".join(str(v) for v in sorted(check.expected_exit_codes))
+        click.echo(
+            f"{mark:<4} {check.revision:<10} {check.kind:<8} {check.name}: "
+            f"exit={actual} expected={expected}"
+        )
+        if not check.passed and check.command_result.stderr:
+            click.echo(check.command_result.stderr.rstrip(), err=True)
+    if not result.verified:
+        raise click.ClickException("differential verification failed")
+    click.echo(f"Verified executable harness for {ext_id}")
 
 
 @corpus.command()

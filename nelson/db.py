@@ -18,7 +18,9 @@ from typing import Any
 # SQLite can only do via a table rebuild. New tables/columns go in MIGRATIONS keyed
 # by their target version; _apply_migrations walks a stored DB up to SCHEMA_VERSION,
 # so old databases upgrade in place.
-SCHEMA_VERSION = 7
+# v8 adds structured case-verification metadata used by the differential
+# vulnerable/fixed regression harness.
+SCHEMA_VERSION = 8
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -243,6 +245,12 @@ MIGRATIONS: dict[int, str] = {
     CREATE INDEX IF NOT EXISTS idx_jobs_file ON jobs(scan_id, file_path);
     PRAGMA foreign_keys=ON;
     """,
+    8: """
+    -- Declarative, case-specific differential verification harness. JSON holds
+    -- build/witness/control commands and expected outcomes. NULL means the case
+    -- has not yet been packaged for executable verification.
+    ALTER TABLE cases ADD COLUMN verification TEXT;
+    """,
 }
 
 # Columns a caller may set on a competitor (natural key = name). Mirrors the
@@ -279,12 +287,13 @@ CASE_COLUMNS: tuple[str, ...] = (
     "gt_files",
     "gt_hunks",
     "build_recipe",
+    "verification",
     "status",
     "vet_confidence",
     "vet_notes",
 )
 # These hold structured data; lists/dicts are JSON-encoded on the way in.
-_CASE_JSON_COLUMNS = frozenset({"gt_files", "gt_hunks"})
+_CASE_JSON_COLUMNS = frozenset({"gt_files", "gt_hunks", "verification"})
 
 
 def _now() -> str:
@@ -360,11 +369,11 @@ class Database:
                 try:
                     self.conn.executescript(script)
                 except sqlite3.OperationalError as exc:
-                    # An ALTER-TABLE migration (5, 6) may be partially applied if
+                    # An ALTER-TABLE migration (5, 6, 8) may be partially applied if
                     # the ADD COLUMN succeeds but writing schema_version does not;
                     # the column already existing on rerun is benign, so tolerate it.
                     if (
-                        version in (5, 6)
+                        version in (5, 6, 8)
                         and "duplicate column name" in str(exc).lower()
                     ):
                         # Re-run the migration statement-by-statement so that any

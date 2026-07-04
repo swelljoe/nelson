@@ -3,7 +3,7 @@
 import sqlite3
 from collections import defaultdict
 
-from nelson.db import Database
+from nelson.db import MIGRATIONS, Database
 from nelson.inventory import SourceFile
 from nelson.scanner import build_job_matrix
 
@@ -58,6 +58,9 @@ CREATE TABLE findings (
 def _make_v6_db(path):
     conn = sqlite3.connect(str(path))
     conn.executescript(_V6_SCHEMA)
+    # A real v6 database already has the v2 corpus table. Keep this focused
+    # fixture structurally faithful now that later migrations extend `cases`.
+    conn.executescript(MIGRATIONS[2])
     conn.execute("INSERT INTO scans(id, target_dir) VALUES(1, '/x')")
     conn.execute(
         "INSERT INTO jobs(id, scan_id, file_path, cwe_id, model_id, status) "
