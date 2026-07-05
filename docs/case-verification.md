@@ -66,3 +66,27 @@ nelson corpus verify GHSA-j273-m5qq-6825 --from-manifest cases \
 The command exits nonzero for malformed metadata, checkout/build infrastructure
 errors, unexpected witness behavior, or failing controls. It does not modify the
 case's vetted status; executable verification is an additional evidence tier.
+
+## Verifying a candidate mitigation
+
+After certifying the harness against the known vulnerable and fixed revisions,
+apply a model-generated unified diff to a fresh vulnerable checkout and run the
+fixed expectations:
+
+```bash
+nelson corpus verify-patch GHSA-j273-m5qq-6825 \
+  --patch candidate.diff \
+  --from-manifest cases \
+  --harness-dir case-harnesses/GHSA-j273-m5qq-6825
+```
+
+Nelson reports patch application, build, security witnesses, and compatibility
+controls separately. A patch that does not apply is a candidate failure, while a
+checkout or container failure is an infrastructure error. The cached vulnerable
+checkout remains pristine: every invocation copies it into a new candidate tree
+before applying the patch.
+
+Candidate patches are limited to 5 MiB and must be plain unified diffs accepted by
+`git apply`; Markdown fences and prose are intentionally rejected. Passing this
+command proves the mitigation satisfies the case harness. It does not by itself
+prove that the model's written vulnerability report was accurate or complete.

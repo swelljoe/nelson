@@ -12,6 +12,7 @@ manifests reproducible and avoids surprising shell interpolation.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -279,6 +280,74 @@ class VerificationResult:
         )
 
 
+@dataclass(frozen=True)
+class PatchApplicationResult:
+    applied: bool
+    error: str | None = None
+
+
+@runtime_checkable
+class PatchApplier(Protocol):
+    def apply(self, patch_path: Path, cwd: Path) -> PatchApplicationResult: ...
+
+
+class GitPatchApplier:
+    """Apply a unified diff without exposing repository metadata to the candidate."""
+
+    def __init__(self, *, max_bytes: int = 5 * 1024 * 1024, timeout_s: float = 60.0):
+        self.max_bytes = max_bytes
+        self.timeout_s = timeout_s
+
+    def apply(self, patch_path: Path, cwd: Path) -> PatchApplicationResult:
+        try:
+            patch = patch_path.read_bytes()
+        except OSError as exc:
+            return PatchApplicationResult(False, f"could not read patch: {exc}")
+        if not patch.strip():
+            return PatchApplicationResult(False, "patch is empty")
+        if len(patch) > self.max_bytes:
+            return PatchApplicationResult(
+                False, f"patch exceeds the {self.max_bytes}-byte limit"
+            )
+
+        base = ["git", "apply", "--recount", "--whitespace=nowarn"]
+        for argv in ([*base, "--check", "-"], [*base, "-"]):
+            try:
+                proc = subprocess.run(
+                    argv,
+                    cwd=cwd,
+                    input=patch,
+                    capture_output=True,
+                    timeout=self.timeout_s,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                return PatchApplicationResult(False, f"git apply failed: {exc}")
+            if proc.returncode != 0:
+                detail = proc.stderr.decode("utf-8", errors="replace").strip()
+                return PatchApplicationResult(
+                    False, detail or f"git apply exited {proc.returncode}"
+                )
+        return PatchApplicationResult(True)
+
+
+@dataclass
+class CandidateVerificationResult:
+    case_id: str
+    patch: PatchApplicationResult | None = None
+    checks: list[CheckResult] = field(default_factory=list)
+    error: str | None = None
+
+    @property
+    def verified(self) -> bool:
+        return (
+            self.error is None
+            and self.patch is not None
+            and self.patch.applied
+            and bool(self.checks)
+            and all(check.passed for check in self.checks)
+        )
+
+
 class DifferentialVerifier:
     def __init__(self, runner: CommandRunner | None = None):
         self.runner = runner
@@ -369,3 +438,94 @@ class DifferentialVerifier:
         runner: CommandRunner,
     ) -> CheckResult:
         return CheckResult(revision, kind, name, expected, runner.run(command, cwd))
+
+
+class CandidatePatchVerifier:
+    """Test a candidate mitigation on a fresh copy of the vulnerable revision."""
+
+    def __init__(
+        self,
+        runner: CommandRunner | None = None,
+        patch_applier: PatchApplier | None = None,
+    ):
+        self.runner = runner
+        self.patch_applier = patch_applier or GitPatchApplier()
+
+    def verify(
+        self,
+        case: Case,
+        patch_path: str | Path,
+        work_dir: str | Path,
+        harness_dir: str | Path | None = None,
+    ) -> CandidateVerificationResult:
+        result = CandidateVerificationResult(case.ext_id)
+        try:
+            spec = VerificationSpec.parse(case.verification)
+        except VerificationConfigError as exc:
+            result.error = str(exc)
+            return result
+        if not case.repo_url or not case.vuln_commit:
+            result.error = "case requires repo_url and vuln_commit"
+            return result
+
+        root = Path(work_dir) / case.ext_id
+        try:
+            pristine = prepare_checkout(
+                case.repo_url, case.vuln_commit, root / "candidate-base"
+            )
+            candidate_root = root / "candidate"
+            if candidate_root.exists():
+                shutil.rmtree(candidate_root)
+            tree = candidate_root / "src"
+            shutil.copytree(pristine, tree, symlinks=True)
+        except Exception as exc:
+            result.error = f"checkout failed: {exc}"
+            return result
+
+        result.patch = self.patch_applier.apply(Path(patch_path).resolve(), tree)
+        if not result.patch.applied:
+            return result
+
+        runner = self.runner or PodmanCommandRunner(
+            image=spec.image, network=spec.network, harness_dir=harness_dir
+        )
+        helper = DifferentialVerifier(runner)
+        for i, command in enumerate(spec.build):
+            check = helper._check(
+                "candidate",
+                "build",
+                f"build-{i + 1}",
+                command,
+                frozenset({0}),
+                tree,
+                runner,
+            )
+            result.checks.append(check)
+            if not check.passed:
+                return result
+
+        for witness in spec.witnesses:
+            result.checks.append(
+                helper._check(
+                    "candidate",
+                    "witness",
+                    witness.name,
+                    witness.command,
+                    witness.fixed_exit_codes,
+                    tree,
+                    runner,
+                )
+            )
+        for i, command in enumerate(spec.controls):
+            result.checks.append(
+                helper._check(
+                    "candidate",
+                    "control",
+                    f"control-{i + 1}",
+                    command,
+                    frozenset({0}),
+                    tree,
+                    runner,
+                )
+            )
+        return result

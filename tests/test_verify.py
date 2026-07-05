@@ -2,9 +2,12 @@ from pathlib import Path
 
 from nelson.corpus import Case, case_from_manifest, case_to_manifest
 from nelson.verify import (
+    CandidatePatchVerifier,
     Command,
     CommandResult,
     DifferentialVerifier,
+    GitPatchApplier,
+    PatchApplicationResult,
     PodmanCommandRunner,
     VerificationConfigError,
     VerificationSpec,
@@ -61,6 +64,16 @@ class FakeBackend:
 
         self.specs.append((spec, timeout))
         return ContainerExecResult(0, "ok", "")
+
+
+class FakePatchApplier:
+    def __init__(self, result=None):
+        self.result = result or PatchApplicationResult(True)
+        self.calls = []
+
+    def apply(self, patch_path, cwd):
+        self.calls.append((patch_path, cwd))
+        return self.result
 
 
 def test_spec_rejects_shell_string_and_requires_witness():
@@ -152,3 +165,93 @@ def test_podman_runner_uses_rw_workspace_without_network(tmp_path):
     assert spec.network is False
     assert timeout == 600
     assert backend.ready == 1
+
+
+def test_git_patch_applier_applies_plain_unified_diff(tmp_path):
+    source = tmp_path / "message.txt"
+    source.write_text("vulnerable\n")
+    patch = tmp_path / "candidate.diff"
+    patch.write_text(
+        "--- a/message.txt\n"
+        "+++ b/message.txt\n"
+        "@@ -1 +1 @@\n"
+        "-vulnerable\n"
+        "+fixed\n"
+    )
+
+    result = GitPatchApplier().apply(patch, tmp_path)
+
+    assert result.applied
+    assert result.error is None
+    assert source.read_text() == "fixed\n"
+
+
+def test_git_patch_applier_rejects_empty_and_invalid_patches(tmp_path):
+    empty = tmp_path / "empty.diff"
+    empty.write_text("")
+    invalid = tmp_path / "invalid.diff"
+    invalid.write_text("not a unified diff\n")
+
+    empty_result = GitPatchApplier().apply(empty, tmp_path)
+    invalid_result = GitPatchApplier().apply(invalid, tmp_path)
+
+    assert not empty_result.applied
+    assert empty_result.error == "patch is empty"
+    assert not invalid_result.applied
+    assert invalid_result.error
+
+
+def test_candidate_verifier_uses_fixed_expectations(monkeypatch, tmp_path):
+    def checkout(_repo, _commit, dest):
+        tree = dest / "src"
+        tree.mkdir(parents=True)
+        (tree / "source.txt").write_text("pristine")
+        return tree
+
+    monkeypatch.setattr("nelson.verify.prepare_checkout", checkout)
+    runner = FakeRunner(
+        {
+            ("candidate", "build"): 0,
+            ("candidate", "security-test"): 0,
+            ("candidate", "control-test"): 0,
+        }
+    )
+    applier = FakePatchApplier()
+    patch = tmp_path / "candidate.diff"
+    patch.write_text("ignored by fake")
+
+    result = CandidatePatchVerifier(runner, applier).verify(
+        _case(), patch, tmp_path / "work"
+    )
+
+    assert result.verified
+    assert result.patch == PatchApplicationResult(True)
+    assert [(check.kind, check.expected_exit_codes) for check in result.checks] == [
+        ("build", frozenset({0})),
+        ("witness", frozenset({0})),
+        ("control", frozenset({0})),
+    ]
+    assert applier.calls[0][1].parent.name == "candidate"
+
+
+def test_candidate_verifier_reports_patch_failure_without_running_checks(
+    monkeypatch, tmp_path
+):
+    def checkout(_repo, _commit, dest):
+        tree = dest / "src"
+        tree.mkdir(parents=True)
+        return tree
+
+    monkeypatch.setattr("nelson.verify.prepare_checkout", checkout)
+    failure = PatchApplicationResult(False, "patch does not apply")
+    patch = tmp_path / "candidate.diff"
+    patch.write_text("invalid")
+
+    result = CandidatePatchVerifier(
+        FakeRunner({}), FakePatchApplier(failure)
+    ).verify(_case(), patch, tmp_path / "work")
+
+    assert not result.verified
+    assert result.error is None
+    assert result.patch == failure
+    assert result.checks == []

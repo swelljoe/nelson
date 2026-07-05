@@ -1171,6 +1171,70 @@ def verify(
     click.echo(f"Verified executable harness for {ext_id}")
 
 
+@corpus.command(name="verify-patch")
+@click.argument("ext_id")
+@click.option(
+    "--patch",
+    "patch_path",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, readable=True),
+    help="Unified diff to apply to the vulnerable revision.",
+)
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+@click.option(
+    "--work-dir", default="verification-cache", help="Verification checkouts."
+)
+@click.option(
+    "--harness-dir",
+    default=None,
+    type=click.Path(exists=True, file_okay=False),
+    help="Hidden harness directory mounted read-only at /harness.",
+)
+@click.option(
+    "--from-manifest",
+    default=None,
+    help="Also resolve the case from this manifest directory.",
+)
+def verify_patch(
+    ext_id: str,
+    patch_path: str,
+    db_path: str,
+    work_dir: str,
+    harness_dir: str | None,
+    from_manifest: str | None,
+):
+    """Apply and test a candidate mitigation on the vulnerable revision."""
+    from .verify import CandidatePatchVerifier
+
+    db = Database(db_path)
+    case = _resolve_case(ext_id, db, from_manifest)
+    result = CandidatePatchVerifier().verify(
+        case, patch_path, work_dir, harness_dir
+    )
+    if result.error:
+        raise click.ClickException(result.error)
+    if result.patch is None or not result.patch.applied:
+        detail = result.patch.error if result.patch else "patch was not attempted"
+        click.echo(f"FAIL candidate patch: {detail}", err=True)
+        raise click.ClickException("candidate patch verification failed")
+    click.echo("PASS candidate patch: applied")
+    for check in result.checks:
+        actual = check.command_result.exit_code
+        if check.command_result.error:
+            actual = check.command_result.error
+        mark = "PASS" if check.passed else "FAIL"
+        expected = ",".join(str(v) for v in sorted(check.expected_exit_codes))
+        click.echo(
+            f"{mark:<4} {check.revision:<10} {check.kind:<8} {check.name}: "
+            f"exit={actual} expected={expected}"
+        )
+        if not check.passed and check.command_result.stderr:
+            click.echo(check.command_result.stderr.rstrip(), err=True)
+    if not result.verified:
+        raise click.ClickException("candidate patch verification failed")
+    click.echo(f"Verified candidate mitigation for {ext_id}")
+
+
 @corpus.command()
 @click.option("--cases-dir", default="cases", help="Directory to write manifests into.")
 @click.option("--status", default="vetted", help="Which cases to export.")
