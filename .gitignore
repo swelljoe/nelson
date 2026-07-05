@@ -233,3 +233,6 @@ __marimo__/
 bench-scripts/rosters/
 # Reports (artifacts)
 reports/
+# Run work dirs
+runs-*
+.cache-*

@@ -1,0 +1,5 @@
+FROM docker.io/library/eclipse-temurin@sha256:70adb0a56983a0c5f6961d5ed874fd3f705942315754aa16c1c763dc773cf707
+
+RUN addgroup -g 1000 agent && adduser -D -u 1000 -G agent agent
+USER agent
+WORKDIR /workspace

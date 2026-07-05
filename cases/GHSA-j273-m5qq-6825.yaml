@@ -22,6 +22,19 @@ vet_notes: 'The diff shows a genuine backslash path-traversal bug: pre-patch, cr
   and the backslash split.'
 description: Arbitrary file write due to backslash path traversal
 build_recipe: null
+verification:
+  invariant: Archive entry paths must not escape the extraction destination when backslashes are interpreted as path separators.
+  image: nelson-verify-junrar:jdk-17
+  network: false
+  build:
+  - [sh, /harness/build.sh]
+  witnesses:
+  - name: backslash-parent-traversal
+    command: [java, -cp, .nelson-harness/classes, com.github.junrar.BackslashTraversalWitness]
+    vulnerable_exit_codes: [1]
+    fixed_exit_codes: [0]
+  controls:
+  - [java, -cp, .nelson-harness/classes, com.github.junrar.CompatibilityControls]
 gt_files:
 - src/main/java/com/github/junrar/LocalFolderExtractor.java
 - src/test/java/com/github/junrar/LocalFolderExtractorTest.java
