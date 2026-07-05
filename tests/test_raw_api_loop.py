@@ -130,6 +130,30 @@ def test_loop_no_final_array_falls_back_to_last_text(tmp_path):
     assert final_text == "I could not find anything exploitable."
 
 
+def test_loop_supports_remediation_output_limit_and_final_instruction(tmp_path):
+    payloads = []
+
+    def post(_url, payload, _api_key):
+        payloads.append(payload)
+        return _final("diff --git a/a b/a")
+
+    final_text, *_ = run_loop(
+        "fix it",
+        base_url="https://x/v1",
+        model="m",
+        api_key="k",
+        max_steps=1,
+        max_output_tokens=16384,
+        final_instruction="output the patch now",
+        post=post,
+        src_root=str(tmp_path),
+    )
+
+    assert final_text.startswith("diff --git")
+    assert payloads[0]["max_tokens"] == 16384
+    assert payloads[0]["messages"][-1]["content"] == "output the patch now"
+
+
 # -- Native (plain-text) tool calls, e.g. DeepSeek DSML ----------------------
 
 _DSML = "｜｜DSML｜｜"  # noqa: RUF001  DeepSeek's native tag prefix (fullwidth bars)
@@ -432,6 +456,13 @@ def test_select_system_prompt_control_is_baseline(monkeypatch):
     assert select_system_prompt() == ral.SYSTEM_PROMPT
     monkeypatch.delenv("NELSON_TOOL_PROFILE", raising=False)
     assert select_system_prompt() == ral.SYSTEM_PROMPT
+
+
+def test_select_system_prompt_remediation_requires_git_diff(monkeypatch):
+    monkeypatch.setenv("NELSON_TASK", "remediation")
+    prompt = select_system_prompt()
+    assert "Git unified diff" in prompt
+    assert "diff --git a/PATH b/PATH" in prompt
 
 
 def test_select_system_prompt_semgrep_adds_note(monkeypatch):

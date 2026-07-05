@@ -8,6 +8,18 @@ known vulnerability. A valid harness has to demonstrate all of these properties:
 - the same witnesses have the declared green outcome on the upstream fix; and
 - compatibility controls remain green on both commits.
 
+## Terminology
+
+**Security harness:** The trusted, case-specific collection of build steps,
+security witnesses, compatibility controls, and supporting fixtures used to test
+a vulnerability. It is benchmark metadata kept hidden from the model being
+evaluated.
+
+**Security witness:** An executable check that demonstrates a specific security
+invariant. Its declared result differs between revisions: it exposes the unsafe
+behavior on the vulnerable revision and passes when that behavior is prevented by
+the fixed revision or a valid candidate mitigation.
+
 Harness commands run as argument arrays in rootless Podman containers, never
 through a shell. Source checkouts are separate and writable because build systems
 need to create artifacts. Container networking is disabled by default.
@@ -90,3 +102,23 @@ Candidate patches are limited to 5 MiB and must be plain unified diffs accepted 
 `git apply`; Markdown fences and prose are intentionally rejected. Passing this
 command proves the mitigation satisfies the case harness. It does not by itself
 prove that the model's written vulnerability report was accurate or complete.
+
+## Finding-scoped remediation jobs
+
+Detection and remediation are separate benchmark jobs. Given one finding produced
+by a completed detection run, Nelson can start a fresh model job to inspect the
+vulnerable repository, generate a patch, and immediately run the hidden harness:
+
+```bash
+nelson bench remediate FINDING_ID \
+  --competitor raw-api-loop/gemma4-31b \
+  --harness-dir case-harnesses/GHSA-j273-m5qq-6825 \
+  --thinking \
+  --max-output-tokens 16384
+```
+
+The remediation model receives that finding's location and explanation, not the
+authoritative case description, upstream fix, or hidden harness. Each attempt is
+stored independently in `remediation_runs`, including its configuration, token and
+time usage, raw response, extracted patch, and separate patch/build/witness/control
+outcomes. A retry therefore adds evidence instead of replacing a failed attempt.

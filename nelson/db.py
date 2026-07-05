@@ -19,8 +19,9 @@ from typing import Any
 # by their target version; _apply_migrations walks a stored DB up to SCHEMA_VERSION,
 # so old databases upgrade in place.
 # v8 adds structured case-verification metadata used by the differential
-# vulnerable/fixed regression harness.
-SCHEMA_VERSION = 8
+# vulnerable/fixed regression harness. v9 adds remediation attempts linked to a
+# detection finding, including patch artifacts and executable verification results.
+SCHEMA_VERSION = 9
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -250,6 +251,32 @@ MIGRATIONS: dict[int, str] = {
     -- build/witness/control commands and expected outcomes. NULL means the case
     -- has not yet been packaged for executable verification.
     ALTER TABLE cases ADD COLUMN verification TEXT;
+    """,
+    9: """
+    CREATE TABLE IF NOT EXISTS remediation_runs (
+        id INTEGER PRIMARY KEY,
+        finding_id INTEGER NOT NULL REFERENCES run_findings(id),
+        competitor_id INTEGER NOT NULL REFERENCES competitors(id),
+        status TEXT NOT NULL DEFAULT 'pending',
+        config TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        tokens_in INTEGER,
+        tokens_out INTEGER,
+        cost_usd REAL,
+        wall_clock_s REAL,
+        transcript_path TEXT,
+        raw_output TEXT,
+        patch_text TEXT,
+        patch_applied INTEGER,
+        build_passed INTEGER,
+        witnesses_passed INTEGER,
+        controls_passed INTEGER,
+        verified INTEGER,
+        error_msg TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_remediation_finding
+        ON remediation_runs(finding_id, competitor_id, status);
     """,
 }
 
@@ -955,6 +982,93 @@ class Database:
             "SELECT * FROM run_findings WHERE run_id = ? ORDER BY file, line_start",
             (run_id,),
         ).fetchall()
+
+    def get_run_finding_context(self, finding_id: int) -> sqlite3.Row | None:
+        """Return a finding with its detection run, case, and competitor labels."""
+        return self.conn.execute(
+            """SELECT rf.*, r.case_id, r.competitor_id AS detection_competitor_id,
+                      r.id AS detection_run_id, c.ext_id AS case_ext_id,
+                      dc.name AS detection_competitor_name
+               FROM run_findings rf
+               JOIN runs r ON r.id = rf.run_id
+               JOIN cases c ON c.id = r.case_id
+               JOIN competitors dc ON dc.id = r.competitor_id
+               WHERE rf.id = ?""",
+            (finding_id,),
+        ).fetchone()
+
+    # -- Remediation runs --
+
+    def create_remediation_run(
+        self, finding_id: int, competitor_id: int, *, config: dict[str, Any]
+    ) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO remediation_runs(finding_id, competitor_id, config)
+               VALUES(?, ?, ?)""",
+            (finding_id, competitor_id, json.dumps(config, sort_keys=True)),
+        )
+        self.conn.commit()
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def start_remediation_run(self, remediation_id: int) -> None:
+        self.conn.execute(
+            "UPDATE remediation_runs SET status = 'running', started_at = ? WHERE id = ?",
+            (_now(), remediation_id),
+        )
+        self.conn.commit()
+
+    def complete_remediation_run(
+        self,
+        remediation_id: int,
+        *,
+        tokens_in: int | None,
+        tokens_out: int | None,
+        cost_usd: float | None,
+        wall_clock_s: float,
+        transcript_path: str,
+        raw_output: str,
+        patch_text: str | None,
+        patch_applied: bool,
+        build_passed: bool,
+        witnesses_passed: bool,
+        controls_passed: bool,
+        verified: bool,
+        error_msg: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            """UPDATE remediation_runs
+               SET status = 'complete', completed_at = ?, tokens_in = ?,
+                   tokens_out = ?, cost_usd = ?, wall_clock_s = ?,
+                   transcript_path = ?, raw_output = ?, patch_text = ?,
+                   patch_applied = ?, build_passed = ?, witnesses_passed = ?,
+                   controls_passed = ?, verified = ?, error_msg = ?
+               WHERE id = ?""",
+            (
+                _now(), tokens_in, tokens_out, cost_usd, wall_clock_s,
+                transcript_path, raw_output, patch_text,
+                int(patch_applied), int(build_passed), int(witnesses_passed),
+                int(controls_passed), int(verified), error_msg, remediation_id,
+            ),
+        )
+        self.conn.commit()
+
+    def fail_remediation_run(
+        self, remediation_id: int, status: str, error_msg: str
+    ) -> None:
+        if status not in {"auth_failed", "infra_error"}:
+            raise ValueError(f"invalid remediation failure status: {status}")
+        self.conn.execute(
+            """UPDATE remediation_runs
+               SET status = ?, completed_at = ?, error_msg = ? WHERE id = ?""",
+            (status, _now(), error_msg, remediation_id),
+        )
+        self.conn.commit()
+
+    def get_remediation_run(self, remediation_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM remediation_runs WHERE id = ?", (remediation_id,)
+        ).fetchone()
 
     # -- Scoring (P3/P4) --
 

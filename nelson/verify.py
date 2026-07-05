@@ -23,6 +23,7 @@ from .runner import (
     ContainerBackend,
     ContainerSpec,
     PodmanBackend,
+    _safe_rmtree,
     prepare_checkout,
 )
 
@@ -475,7 +476,9 @@ class CandidatePatchVerifier:
             )
             candidate_root = root / "candidate"
             if candidate_root.exists():
-                shutil.rmtree(candidate_root)
+                _safe_rmtree(candidate_root)
+            if candidate_root.exists():
+                raise OSError(f"could not remove prior workspace {candidate_root}")
             tree = candidate_root / "src"
             shutil.copytree(pristine, tree, symlinks=True)
         except Exception as exc:

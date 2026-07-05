@@ -1396,6 +1396,91 @@ def bench_run(
         sys.exit(1)
 
 
+@bench.command(name="remediate")
+@click.argument("finding_id", type=int)
+@click.option(
+    "--competitor",
+    "competitor_name",
+    default=None,
+    help="Registered remediation competitor (defaults to the detecting competitor).",
+)
+@click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
+@click.option(
+    "--harness-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False),
+    help="Hidden case harness mounted read-only during verification.",
+)
+@click.option("--cache-dir", default="remediation-cache", help="Source checkouts.")
+@click.option(
+    "--runs-dir", default="remediation-runs", help="Patch/transcript artifacts."
+)
+@click.option(
+    "--verification-dir",
+    default="verification-cache",
+    help="Candidate verification workspaces.",
+)
+@click.option("--thinking/--no-thinking", default=True, help="Enable model reasoning.")
+@click.option(
+    "--max-output-tokens",
+    default=16384,
+    type=click.IntRange(min=1),
+    help="Per-response output ceiling for remediation.",
+)
+@click.option("--timeout", default=1800.0, type=float, help="Job wall-clock cap.")
+def bench_remediate(
+    finding_id: int,
+    competitor_name: str | None,
+    db_path: str,
+    harness_dir: str,
+    cache_dir: str,
+    runs_dir: str,
+    verification_dir: str,
+    thinking: bool,
+    max_output_tokens: int,
+    timeout: float,
+):
+    """Generate and verify a patch for one reported benchmark finding."""
+    from .remediate import RemediationRunner
+
+    db = Database(db_path)
+    finding = db.get_run_finding_context(finding_id)
+    if finding is None:
+        raise click.ClickException(f"finding {finding_id} not found")
+    competitor_name = competitor_name or finding["detection_competitor_name"]
+    try:
+        result = RemediationRunner(
+            db,
+            cache_dir=cache_dir,
+            runs_dir=runs_dir,
+            verification_dir=verification_dir,
+            timeout_s=timeout,
+        ).run(
+            finding_id,
+            competitor_name,
+            harness_dir,
+            thinking=thinking,
+            max_output_tokens=max_output_tokens,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Remediation run {result.remediation_id}: {result.status}")
+    if result.tokens_in is not None:
+        click.echo(f"  tokens:    in={result.tokens_in} out={result.tokens_out}")
+    if result.wall_clock_s is not None:
+        click.echo(f"  wall:      {result.wall_clock_s:.1f}s")
+    click.echo(f"  patch:     {'PASS' if result.patch_applied else 'FAIL'}")
+    click.echo(f"  build:     {'PASS' if result.build_passed else 'FAIL'}")
+    click.echo(f"  witnesses: {'PASS' if result.witnesses_passed else 'FAIL'}")
+    click.echo(f"  controls:  {'PASS' if result.controls_passed else 'FAIL'}")
+    if result.error:
+        click.echo(f"  error:     {result.error}", err=True)
+    if result.status != "complete" or not result.verified:
+        raise click.ClickException("remediation verification failed")
+    click.echo("Verified remediation")
+
+
 @bench.command(name="runs")
 @click.option("--db", "db_path", default="nelson.db", help="Path to SQLite database.")
 def bench_runs(db_path: str):

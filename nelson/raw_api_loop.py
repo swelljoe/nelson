@@ -927,6 +927,8 @@ def run_loop(
     src_root: str | None = None,
     system_prompt: str | None = None,
     tools: list[dict[str, Any]] | None = None,
+    max_output_tokens: int | None = None,
+    final_instruction: str | None = None,
 ) -> tuple[str, int, int, list[dict[str, Any]], float | None]:
     """Drive the tool-use loop; return (final_text, in, out, steps, provider_cost).
 
@@ -967,6 +969,11 @@ def run_loop(
     total_cost: float | None = None
     steps: list[dict[str, Any]] = []
     final_text = ""
+    final_instruction = final_instruction or (
+        "You have reached your tool-use budget. Do not call any tools. Based only "
+        "on what you have already read, output NOW your final answer as the JSON "
+        "array specified earlier (output [] if you found no exploitable vulnerability)."
+    )
 
     for step in range(max_steps):
         force_final = step == max_steps - 1 or (total_in + total_out) >= token_budget
@@ -977,12 +984,7 @@ def run_loop(
             messages.append(
                 {
                     "role": "user",
-                    "content": (
-                        "You have reached your tool-use budget. Do not call any "
-                        "tools. Based only on what you have already read, output "
-                        "NOW your final answer as the JSON array specified earlier "
-                        "(output [] if you found no exploitable vulnerability)."
-                    ),
+                    "content": final_instruction,
                 }
             )
         payload: dict[str, Any] = {
@@ -990,6 +992,8 @@ def run_loop(
             "messages": messages,
             "temperature": temperature,
         }
+        if max_output_tokens is not None:
+            payload["max_tokens"] = max_output_tokens
         # Optional anti-repetition / nucleus knobs (frequency_penalty, min_p,
         # repeat_penalty, …). Only present when the competitor's cost_model sets
         # them, so strict OpenAI-compat endpoints never see an unknown field.
@@ -1110,6 +1114,15 @@ def select_tools() -> list[dict[str, Any]]:
 
 def select_system_prompt() -> str:
     """System prompt for the active profile: base, plus a tool note if applicable."""
+    if os.environ.get("NELSON_TASK") == "remediation":
+        return (
+            "You are performing a software-security remediation job. The vulnerable "
+            "repository is mounted read-only at /src. Inspect the reported issue and "
+            "relevant source with the available tools. Your final answer must contain "
+            "only a Git unified diff that applies from the repository root: include "
+            "diff --git a/PATH b/PATH and --- a/PATH / +++ b/PATH headers. Do not "
+            "include prose or Markdown fences."
+        )
     profile = os.environ.get("NELSON_TOOL_PROFILE", "")
     if "semgrep" in profile:
         return SYSTEM_PROMPT + SEMGREP_SYSTEM_NOTE
@@ -1159,6 +1172,13 @@ def main() -> None:
                 extra_sampling.update(parsed)
         except (ValueError, TypeError):
             print("ignoring malformed NELSON_EXTRA_BODY", file=sys.stderr)
+    remediation = os.environ.get("NELSON_TASK") == "remediation"
+    final_instruction = None
+    if remediation:
+        final_instruction = (
+            "Do not call any more tools. Output only the final Git unified diff now, "
+            "with diff --git and a/ b/ path headers. Do not include prose or fences."
+        )
     try:
         final_text, tin, tout, steps, provider_cost = run_loop(
             prompt,
@@ -1171,6 +1191,12 @@ def main() -> None:
             extra_sampling=extra_sampling or None,
             tools=select_tools(),
             system_prompt=select_system_prompt(),
+            max_output_tokens=(
+                _int_env("NELSON_MAX_OUTPUT_TOKENS", 16384)
+                if remediation
+                else None
+            ),
+            final_instruction=final_instruction,
         )
     except urllib.error.HTTPError as e:
         body = ""
