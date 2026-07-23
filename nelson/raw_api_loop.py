@@ -894,6 +894,23 @@ def _coerce_native_param(val: str) -> Any:
         return val
 
 
+def _assistant_turn(msg: dict[str, Any]) -> dict[str, Any]:
+    """A minimal, replay-safe assistant message from a model response.
+
+    Reasoning models (e.g. Laguna, DeepSeek-R1) return a ``reasoning_content``
+    (and/or ``reasoning``) field on the assistant message. Echoing that field back
+    into the next request's ``messages`` makes some provider backends reject the
+    call (OpenRouter returns HTTP 400 ``duplicate field 'reasoning_content'``) —
+    reasoning traces are model *output*, not conversation input to be resent. So we
+    rebuild the turn with only the fields a chat endpoint expects to receive:
+    ``role``, ``content``, and ``tool_calls`` when present. Non-reasoning models are
+    unaffected (they carry no reasoning field to drop)."""
+    turn: dict[str, Any] = {"role": "assistant", "content": msg.get("content") or ""}
+    if msg.get("tool_calls"):
+        turn["tool_calls"] = msg["tool_calls"]
+    return turn
+
+
 def parse_native_tool_calls(content: str) -> list[dict[str, Any]]:
     """Extract ``[{"name", "args"}]`` from tool calls a model wrote as plain-text
     XML (see ``_NATIVE_INVOKE_RE``). Empty list when there are none — so the caller
@@ -1033,7 +1050,9 @@ def run_loop(
         )
 
         if tool_calls and not force_final:
-            messages.append(msg)  # assistant turn carrying the tool_calls
+            # Rebuild the turn (drop reasoning_content etc.) so replaying it to the
+            # provider is accepted; keep the tool_calls the loop is about to honour.
+            messages.append(_assistant_turn(msg))
             for tc in tool_calls:
                 fn = tc.get("function") or {}
                 name = str(fn.get("name", ""))
