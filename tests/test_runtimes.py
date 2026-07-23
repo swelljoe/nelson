@@ -27,6 +27,8 @@ from nelson.runtimes import (
     AgyRuntime,
     BindMountedCliRuntime,
     ClaudeCodeRuntime,
+    CodexCredentialMountAuth,
+    CodexRuntime,
     EnvKeyAuth,
     ParsedOutput,
     RawApiLoopRuntime,
@@ -117,7 +119,14 @@ def test_get_runtime_unknown_raises():
 
 
 def test_all_planned_runtimes_registered():
-    for name in ("claude-code", "raw-api-loop", "agy", "kimi-cli", "pi-custom"):
+    for name in (
+        "claude-code",
+        "raw-api-loop",
+        "agy",
+        "codex",
+        "kimi-cli",
+        "pi-custom",
+    ):
         assert get_runtime(name).name == name
 
 
@@ -531,6 +540,87 @@ def test_agy_parse_output_extracts_findings_from_plain_text():
     assert (parsed.tokens_in, parsed.tokens_out, parsed.cost) == (None, None, None)
     assert len(parsed.findings) == 1
     assert parsed.findings[0]["cwe"] == "CWE-22"
+
+
+def test_codex_credential_mount_auth_stages_auth_json(tmp_path):
+    creds = tmp_path / "dotcodex"
+    creds.mkdir()
+    (creds / "auth.json").write_text('{"tokens": {"access_token": "x"}}')
+    (creds / "version.json").write_text('{"version": "0.145.0"}')
+    # a big sqlite log that must NOT be copied into the per-run mount
+    (creds / "logs_2.sqlite").write_text("x" * 1000)
+    material = CodexCredentialMountAuth(creds_dir=creds).prepare(tmp_path / "stg")
+    assert material.env == {"CODEX_HOME": "/home/agent/.codex"}
+    assert material.mounts == [
+        (str(tmp_path / "stg" / "codex"), "/home/agent/.codex", "rw,U")
+    ]
+    staged = tmp_path / "stg" / "codex"
+    assert (staged / "auth.json").is_file()
+    assert (staged / "version.json").is_file()
+    assert not (staged / "logs_2.sqlite").exists()  # only creds copied
+
+
+def test_codex_credential_mount_auth_missing_is_runner_error(tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(RunnerError):
+        CodexCredentialMountAuth(creds_dir=empty).prepare(tmp_path / "stg")
+
+
+def test_codex_build_spec_exec_argv_and_readonly_mounts(monkeypatch, tmp_path):
+    monkeypatch.setattr("nelson.runtimes.shutil.which", lambda _b: "/usr/bin/codex")
+    ctx = RuntimeContext(
+        competitor=Competitor(
+            name="codex/gpt-5.6-sol", model="gpt-5.6-sol", runtime="codex"
+        ),
+        prompt="audit a.c",
+        src_dir=tmp_path / "src",
+        auth=AuthMaterial(
+            env={"CODEX_HOME": "/home/agent/.codex"},
+            mounts=[(str(tmp_path / "c"), "/home/agent/.codex", "rw,U")],
+        ),
+        name="r1",
+    )
+    spec = CodexRuntime().build_spec(ctx)
+    assert spec.argv[:2] == ["codex", "exec"]
+    # model comes from the competitor, not hardcoded
+    assert spec.argv[spec.argv.index("-m") + 1] == "gpt-5.6-sol"
+    # working root is the read-only source mount, sandbox is read-only
+    assert spec.argv[spec.argv.index("-C") + 1] == "/src"
+    assert spec.argv[spec.argv.index("-s") + 1] == "read-only"
+    assert "--skip-git-repo-check" in spec.argv
+    assert spec.stdin == "audit a.c"  # prompt on stdin
+    assert spec.env["CODEX_HOME"] == "/home/agent/.codex"
+    modes = {dst: opts for _, dst, opts in spec.mounts}
+    assert modes["/src"] == "ro"
+    assert modes["/usr/local/bin/codex"] == "ro"
+    assert modes["/home/agent/.codex"] == "rw,U"
+
+
+def test_codex_build_spec_infra_when_binary_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr("nelson.runtimes.shutil.which", lambda _b: None)
+    ctx = RuntimeContext(
+        competitor=Competitor(name="codex/x", model="gpt-5.6-sol", runtime="codex"),
+        prompt="audit",
+        src_dir=tmp_path / "src",
+        auth=AuthMaterial(env={}, mounts=[]),
+        name="r1",
+    )
+    with pytest.raises(RunnerError):
+        CodexRuntime().build_spec(ctx)
+
+
+def test_codex_parse_output_extracts_findings_from_plain_text():
+    stdout = (
+        "codex exec\nReviewed a.c.\n"
+        '[{"file": "a.c", "line": 7, "confidence": "high", "cwe": "CWE-787"}]\n'
+    )
+    parsed = CodexRuntime().parse_output(
+        ContainerExecResult(0, stdout, ""), Competitor(name="codex/x", model="a")
+    )
+    assert (parsed.tokens_in, parsed.tokens_out, parsed.cost) == (None, None, None)
+    assert len(parsed.findings) == 1
+    assert parsed.findings[0]["cwe"] == "CWE-787"
 
 
 @pytest.mark.parametrize("runtime", ["kimi-cli", "pi-custom"])

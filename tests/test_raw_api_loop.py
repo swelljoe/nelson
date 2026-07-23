@@ -101,6 +101,38 @@ def test_loop_executes_tool_call_then_emits_final(tmp_path):
     assert cost is None  # no provider cost field on a non-OpenRouter endpoint
 
 
+def test_loop_strips_reasoning_content_from_replayed_assistant_turn(tmp_path):
+    # A reasoning model (e.g. Laguna) returns reasoning_content on its tool-call
+    # turn; echoing it back trips some provider backends (OpenRouter: HTTP 400
+    # "duplicate field reasoning_content"). The loop must replay a clean assistant
+    # turn — role/content/tool_calls only — so the follow-up request is accepted.
+    (tmp_path / "a.c").write_text("int main() { return 0; }\n")
+    tc = _tool_call("read_file", {"path": "a.c"})
+    tc["choices"][0]["message"]["reasoning_content"] = "let me think about a.c..."
+    tc["choices"][0]["message"]["reasoning"] = "chain of thought"
+    sent = []
+    responses = iter([tc, _final('[{"file": "a.c", "line": 1, "confidence": "low"}]')])
+
+    def post(url, payload, api_key):
+        sent.append(payload)
+        return next(responses)
+
+    run_loop(
+        "audit a.c",
+        base_url="https://x/v1",
+        model="m",
+        api_key="k",
+        post=post,
+        src_root=str(tmp_path),
+    )
+    # The second request carries the replayed assistant turn plus the tool result.
+    replayed = [m for m in sent[1]["messages"] if m.get("role") == "assistant"]
+    assert replayed, "the assistant tool-call turn must be replayed"
+    turn = replayed[-1]
+    assert "reasoning_content" not in turn and "reasoning" not in turn
+    assert turn["tool_calls"], "tool_calls must survive so the tool result is valid"
+
+
 def test_loop_max_steps_terminates(tmp_path):
     # A model that never stops calling tools must still terminate and return.
     post = _post_returning(*[_tool_call("list_dir", {"path": "."}) for _ in range(5)])

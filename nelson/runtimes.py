@@ -18,6 +18,10 @@ Runtimes registered here:
   profile).
 - ``agy`` — the host ``agy`` (Antigravity / Gemini) agent CLI bind-mounted in; a
   Claude-Code-like interface (it replaced the old ``gemini`` CLI), plain-text out.
+- ``codex`` — the host ``codex`` (OpenAI Codex CLI) static binary bind-mounted in;
+  drives a GPT model over the ChatGPT-subscription rolling limits via the mounted
+  ``~/.codex`` sign-in (no API key / per-token spend). The OpenAI counterpart to
+  ``claude-code``; ``codex exec`` non-interactive, plain-text out.
 - ``kimi-cli`` / ``pi-custom`` — generic native-CLI runtimes for vendors that ship
   an *official* agent, wired and unit-tested but stubbed: an absent host binary
   resolves to ``infra_error`` until the CLI is installed and its argv/output
@@ -188,6 +192,44 @@ class AgyCredentialMountAuth:
         return AuthMaterial(
             env={},
             mounts=[(str(dest), "/home/agent/.gemini", "rw,U")],
+        )
+
+
+class CodexCredentialMountAuth:
+    """Mount the host ``codex`` (OpenAI Codex CLI) sign-in into the container.
+
+    Copies just ``~/.codex/auth.json`` (the ChatGPT-subscription OAuth ``tokens``
+    — *not* an API key, so runs draw on the plan's rolling limits) into a per-run
+    staging dir mounted ``rw,U`` at ``/home/agent/.codex`` with ``CODEX_HOME``
+    pointed at it. Writable so codex can refresh the token mid-run without touching
+    the host original; the refreshed copy is discarded when the container exits.
+    Only ``auth.json`` (+ ``version.json`` if present, to skip the update nag) is
+    copied — the rest of ``~/.codex`` is multi-MB sqlite logs/sessions the run does
+    not need, and ``--ignore-user-config`` on the exec side means config.toml is
+    not required either. Missing creds -> :class:`RunnerError` -> ``auth_failed``.
+    """
+
+    def __init__(self, creds_dir: Path | None = None):
+        self.creds_dir = Path(creds_dir) if creds_dir else (Path.home() / ".codex")
+
+    def prepare(self, staging: Path) -> AuthMaterial:
+        auth = self.creds_dir / "auth.json"
+        if not auth.is_file():
+            raise RunnerError(
+                f"no codex credentials at {auth}; sign in with `codex login` on "
+                "the host first"
+            )
+dest = staging / "codex"
+dest.mkdir(parents=True, exist_ok=True, mode=0o700)
+dest.chmod(0o700)
+shutil.copyfile(auth, dest / "auth.json")
+(dest / "auth.json").chmod(0o600)
+        version = self.creds_dir / "version.json"
+        if version.is_file():
+            shutil.copyfile(version, dest / "version.json")
+        return AuthMaterial(
+            env={"CODEX_HOME": "/home/agent/.codex"},
+            mounts=[(str(dest), "/home/agent/.codex", "rw,U")],
         )
 
 
@@ -488,6 +530,82 @@ class AgyRuntime:
         return ParsedOutput(text, None, None, None, parse_competitor_findings(text))
 
 
+class CodexRuntime:
+    """The host ``codex`` (OpenAI Codex CLI) binary bind-mounted into the run.
+
+    Codex ships as a self-contained static-PIE musl binary, so — like ``agy`` —
+    it bind-mounts as a single file and runs against fedora-minimal's loader with
+    no node/runtime deps. This is the OpenAI counterpart to :class:`ClaudeCodeRuntime`:
+    it drives a GPT model (``-m``) through the ChatGPT-subscription rolling limits
+    via the mounted ``~/.codex`` sign-in (:class:`CodexCredentialMountAuth`), so
+    there is no per-token API spend and no ``auth_profile``/API key.
+
+    ``codex exec`` is the non-interactive mode: ``-C /src`` roots the agent at the
+    read-only source mount, ``-s read-only`` confines any model-run shell command
+    to reads (matching the read/grep harness the rest of the field uses),
+    ``approval_policy="never"`` keeps it from blocking on an approval prompt with
+    no TTY, ``--skip-git-repo-check`` tolerates the git-stripped mount,
+    ``--ephemeral`` avoids writing session files, and ``--ignore-user-config``
+    skips the host config.toml (auth still resolves from ``CODEX_HOME``). The
+    prompt is delivered on stdin. VERIFY-AT-WIRING: exec flag set + output shape
+    were confirmed live against codex-cli 0.145.0.
+    """
+
+    name = "codex"
+
+    def default_auth(self) -> ContainerAuth:
+        return CodexCredentialMountAuth()
+
+    def build_spec(self, ctx: RuntimeContext) -> ContainerSpec:
+        codex_bin = shutil.which("codex")
+        if not codex_bin:
+            raise RunnerError(
+                "codex CLI not found on PATH; install it and `codex login` on the "
+                "host first to run codex competitors"
+            )
+        argv = [
+            "codex",
+            "exec",
+            "-m",
+            ctx.competitor.model,
+            "-C",
+            "/src",
+            "-s",
+            "read-only",
+            "-c",
+            'approval_policy="never"',
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--color",
+            "never",
+        ]
+        mounts = [
+            (str(Path(codex_bin).resolve()), "/usr/local/bin/codex", "ro"),
+            (str(ctx.src_dir), "/src", "ro"),
+            *ctx.auth.mounts,
+        ]
+        return ContainerSpec(
+            image=IMAGE_TAG,
+            argv=argv,
+            env={"HOME": "/home/agent", **ctx.auth.env},
+            mounts=mounts,
+            name=ctx.name,
+            # Network MUST stay on: codex calls the OpenAI backend.
+            network=ctx.network,
+            stdin=ctx.prompt,
+        )
+
+    def parse_output(
+        self, exec_result: ContainerExecResult, competitor: Competitor
+    ) -> ParsedOutput:
+        # `codex exec` prints the agent's turns then its final message as plain
+        # text (no token/cost envelope on the subscription path); the findings JSON
+        # array is scanned out of it exactly as for agy.
+        text = exec_result.stdout
+        return ParsedOutput(text, None, None, None, parse_competitor_findings(text))
+
+
 class BindMountedCliRuntime:
     """Generic native-CLI runtime: a host agent binary bind-mounted into the run.
 
@@ -566,6 +684,7 @@ def _register_defaults() -> None:
     register_runtime(ClaudeCodeRuntime())
     register_runtime(RawApiLoopRuntime())
     register_runtime(AgyRuntime())
+    register_runtime(CodexRuntime())
     # No `deepseek-cli`: DeepSeek ships no first-party agent CLI (the ones that
     # exist are untrusted third parties), so DeepSeek runs through the two trusted
     # shared harnesses instead — claude-code over its Anthropic-compatible endpoint
