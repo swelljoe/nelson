@@ -41,6 +41,7 @@ model ids, key env-var names; native CLI argv/output shapes).
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -231,6 +232,228 @@ class CodexCredentialMountAuth:
             env={"CODEX_HOME": "/home/agent/.codex"},
             mounts=[(str(dest), "/home/agent/.codex", "rw,U")],
         )
+
+
+# Native-agent read/grep posture (Track B). Each vendor CLI is restricted to a
+# read-oriented toolset with its explicit web-search/fetch tool removed, so the
+# model cannot look a CVE up online. A read-oriented *shell* is deliberately kept
+# (parity with the codex row's ``-s read-only`` shell, which the shell-tool
+# experiment showed materially lifts detection); its network use, if any, is
+# caught by the per-run stdout audit trail rather than blocked at the tool layer.
+
+# reasonix ``[tools] enabled`` read-only allowlist (empty = ALL tools, the unsafe
+# default). Drops every writer + ``web_fetch``; keeps ``bash``. Subagents inherit
+# this allowlist, so meta-tools (task/research/explore) cannot re-open the network.
+_REASONIX_TOOLS = '["read_file", "grep", "glob", "ls", "code_index", "bash"]'
+_REASONIX_TOOLS_RE = re.compile(
+    r"(\[tools\][^\[]*?\benabled\s*=\s*)\[[^\]]*\]", re.DOTALL
+)
+
+# kimi v2 agent profile: the ``tools:`` list IS the allowlist. Omits ``WebSearch``
+# and ``FetchURL`` (and the ``Agent``/``AgentSwarm`` subagents that would carry
+# them). Requires KIMI_CODE_EXPERIMENTAL_FLAG=1 + ``--agent-file`` on the exec side.
+_KIMI_AGENT_CONTAINER = "/home/agent/agents/nelson-readonly.md"
+_KIMI_AGENT_PROFILE = """\
+---
+name: nelson-readonly
+description: Read-only security code auditor with no web access
+tools:
+  - Read
+  - Grep
+  - Glob
+  - Bash
+  - ReadMediaFile
+  - TodoList
+---
+You are a read-only security code auditor. Use only local file tools to inspect
+the source under /src. You have no web access.
+"""
+
+
+def _reasonix_readonly_config(text: str) -> str:
+    """Rewrite the staged reasonix config's ``[tools] enabled`` to the allowlist."""
+    new, n = _REASONIX_TOOLS_RE.subn(
+        lambda m: m.group(1) + _REASONIX_TOOLS, text, count=1
+    )
+    if n == 0:
+        # No [tools].enabled to pin -> append the table (still closes the default).
+        new = text.rstrip() + f"\n\n[tools]\nenabled = {_REASONIX_TOOLS}\n"
+    return new
+
+
+class ReasonixCredentialMountAuth:
+    """Stage the host ``reasonix`` (~/.reasonix) sign-in into the container.
+
+    reasonix reads its provider key from ``~/.reasonix/.env`` (named by the
+    provider's ``api_key_env``), *not* the process environment, so the whole
+    ~/.reasonix (config.toml + .env) is copied into a per-run staging dir mounted
+    ``rw,U`` at ``/home/agent/.reasonix``. The staged config's ``[tools] enabled``
+    is rewritten to a read-only allowlist (drops writers + ``web_fetch``). Missing
+    config/.env -> :class:`RunnerError` -> ``auth_failed``.
+    """
+
+    def __init__(self, creds_dir: Path | None = None):
+        self.creds_dir = Path(creds_dir) if creds_dir else (Path.home() / ".reasonix")
+
+    def prepare(self, staging: Path) -> AuthMaterial:
+        cfg = self.creds_dir / "config.toml"
+        env_file = self.creds_dir / ".env"
+        if not cfg.is_file() or not env_file.is_file():
+            raise RunnerError(
+                f"no reasonix credentials under {self.creds_dir} (need config.toml "
+                "+ .env); run `reasonix setup` and sign in on the host first"
+            )
+        dest = staging / "reasonix"
+        dest.mkdir(parents=True, exist_ok=True, mode=0o700)
+        dest.chmod(0o700)
+        shutil.copyfile(env_file, dest / ".env")
+        (dest / ".env").chmod(0o600)
+        (dest / "config.toml").write_text(_reasonix_readonly_config(cfg.read_text()))
+        (dest / "config.toml").chmod(0o600)
+        return AuthMaterial(
+            env={}, mounts=[(str(dest), "/home/agent/.reasonix", "rw,U")]
+        )
+
+
+class KimiCredentialMountAuth:
+    """Stage the host ``kimi`` (Moonshot Kimi Code) sign-in into the container.
+
+    Copies ~/.kimi-code's config + oauth/credentials + device_id into a per-run
+    staging dir mounted ``rw,U`` at ``/home/agent/.kimi-code``, and drops a
+    restricted v2 agent profile (mounted ``ro`` at ``/home/agent/agents``) whose
+    ``tools:`` allowlist omits ``WebSearch``/``FetchURL``. The exec side passes
+    ``KIMI_CODE_EXPERIMENTAL_FLAG=1`` (v2 engine) + ``--agent-file``. Missing creds
+    -> :class:`RunnerError` -> ``auth_failed``.
+    """
+
+    def __init__(self, creds_dir: Path | None = None):
+        self.creds_dir = Path(creds_dir) if creds_dir else (Path.home() / ".kimi-code")
+
+    def prepare(self, staging: Path) -> AuthMaterial:
+        cfg = self.creds_dir / "config.toml"
+        creds = self.creds_dir / "credentials"
+        if not cfg.is_file() or not creds.is_dir():
+            raise RunnerError(
+                f"no kimi credentials under {self.creds_dir} (need config.toml + "
+                "credentials/); run `kimi login` on the host first"
+            )
+        dest = staging / "kimi-code"
+        dest.mkdir(parents=True, exist_ok=True, mode=0o700)
+        dest.chmod(0o700)
+        for rel in ("config.toml", "device_id"):
+            src = self.creds_dir / rel
+            if src.is_file():
+                shutil.copyfile(src, dest / rel)
+        for rel in ("credentials", "oauth"):
+            src = self.creds_dir / rel
+            if src.is_dir():
+                shutil.copytree(src, dest / rel)
+        # World-readable: this dir mounts ``ro`` (no ``,U`` uid-remap), so the
+        # container's ``agent`` user must be able to read the (non-secret) profile.
+        agents = staging / "kimi-agents"
+        agents.mkdir(parents=True, exist_ok=True, mode=0o755)
+        profile = agents / "nelson-readonly.md"
+        profile.write_text(_KIMI_AGENT_PROFILE)
+        profile.chmod(0o644)
+        return AuthMaterial(
+            env={"KIMI_CODE_EXPERIMENTAL_FLAG": "1"},
+            mounts=[
+                (str(dest), "/home/agent/.kimi-code", "rw,U"),
+                (str(agents), "/home/agent/agents", "ro"),
+            ],
+        )
+
+
+class QwenCredentialMountAuth:
+    """Stage the host ``qwen`` (Qwen Code) sign-in into the container.
+
+    Copies only ``~/.qwen/settings.json`` (which carries the DashScope/Bailian key
+    and model providers) + ``installation_id`` into a per-run staging dir mounted
+    ``rw,U`` at ``/home/agent/.qwen`` — deliberately NOT the host's extensions /
+    skills / memories, so with ``--safe-mode`` dropped nothing extra loads. A
+    ``tools.exclude`` block is injected into the staged settings to drop
+    ``web_fetch``/``web_search``. Missing settings -> ``auth_failed``.
+    """
+
+    _EXCLUDE = ("web_fetch", "web_search")
+
+    def __init__(self, creds_dir: Path | None = None):
+        self.creds_dir = Path(creds_dir) if creds_dir else (Path.home() / ".qwen")
+
+    def prepare(self, staging: Path) -> AuthMaterial:
+        settings = self.creds_dir / "settings.json"
+        if not settings.is_file():
+            raise RunnerError(
+                f"no qwen credentials at {settings}; sign in / configure a provider "
+                "with `qwen` on the host first"
+            )
+        dest = staging / "qwen"
+        dest.mkdir(parents=True, exist_ok=True, mode=0o700)
+        dest.chmod(0o700)
+        try:
+            data = json.loads(settings.read_text())
+        except (json.JSONDecodeError, ValueError) as e:
+            raise RunnerError(f"qwen settings.json is not valid JSON: {e}") from e
+        tools = data.setdefault("tools", {})
+        if isinstance(tools, dict):
+            existing = tools.get("exclude") or []
+            tools["exclude"] = sorted({*existing, *self._EXCLUDE})
+        (dest / "settings.json").write_text(json.dumps(data, indent=2))
+        (dest / "settings.json").chmod(0o600)
+        inst = self.creds_dir / "installation_id"
+        if inst.is_file():
+            shutil.copyfile(inst, dest / "installation_id")
+        return AuthMaterial(env={}, mounts=[(str(dest), "/home/agent/.qwen", "rw,U")])
+
+
+class MimoCredentialMountAuth:
+    """Stage the host ``mimo`` (Xiaomi MiMoCode) sign-in into the container.
+
+    mimo splits its state across XDG dirs: the provider credential lives at
+    ``~/.local/share/mimocode/auth.json`` and config at
+    ``~/.config/mimocode/mimocode.jsonc``. Both are copied into a per-run staging
+    HOME mounted ``rw,U`` (mimo re-creates its sqlite state there on first run).
+    The staged ``mimocode.jsonc`` denies the ``webfetch`` tool (``--pure`` alone
+    does NOT). Missing auth.json -> :class:`RunnerError` -> ``auth_failed``.
+    """
+
+    def __init__(self, home: Path | None = None):
+        self.home = Path(home) if home else Path.home()
+
+    def prepare(self, staging: Path) -> AuthMaterial:
+        share = self.home / ".local" / "share" / "mimocode"
+        auth = share / "auth.json"
+        if not auth.is_file():
+            raise RunnerError(
+                f"no mimo credentials at {auth}; run `mimo providers login` on the "
+                "host first"
+            )
+        dest = staging / "mimo-home"
+        share_dest = dest / ".local" / "share" / "mimocode"
+        conf_dest = dest / ".config" / "mimocode"
+        share_dest.mkdir(parents=True, exist_ok=True)
+        conf_dest.mkdir(parents=True, exist_ok=True)
+        for rel in ("auth.json", "mimo-key-name", "installation_id"):
+            src = share / rel
+            if src.is_file():
+                shutil.copyfile(src, share_dest / rel)
+        (share_dest / "auth.json").chmod(0o600)
+        # Deny the web-fetch tool at the CONFIG level: ``--pure`` does NOT remove
+        # mimo's ``webfetch`` tool (verified — the model fetched a URL under
+        # --pure), whereas ``permission.webfetch = deny`` propagates to the default
+        # ``build`` agent AND the explore/general subagents it can spawn, so the
+        # model cannot look a CVE up online. A per-agent tools: allowlist would not
+        # cover subagents (and its markdown body would perturb the uniform prompt).
+        (conf_dest / "mimocode.jsonc").write_text(
+            json.dumps(
+                {
+                    "$schema": "https://mimo.xiaomi.com/mimocode/config.json",
+                    "permission": {"webfetch": "deny"},
+                },
+                indent=2,
+            )
+        )
+        return AuthMaterial(env={}, mounts=[(str(dest), "/home/agent", "rw,U")])
 
 
 def auth_for_competitor(
@@ -606,6 +829,259 @@ class CodexRuntime:
         return ParsedOutput(text, None, None, None, parse_competitor_findings(text))
 
 
+class ReasonixRuntime:
+    """The host ``reasonix`` (DeepSeek-Reasonix) static Go binary bind-mounted in.
+
+    A Track-B *product* runtime (``reasonix run`` non-interactive). THIRD-PARTY
+    multi-model agent CLI — not a first-party DeepSeek product — so rows carry an
+    unofficial/untrusted-harness flag. ``--dir /src`` roots it at the read-only
+    source; ``--model`` names the reasonix *provider* (e.g. ``deepseek-pro`` ->
+    deepseek-v4-pro). Read-only tool allowlist + key come from the staged
+    ~/.reasonix (:class:`ReasonixCredentialMountAuth`). Plain-text out; findings
+    scanned from stdout. Cost is left null here (subscription-style on the board);
+    reasonix is metered upstream but its per-token counts land in a metrics file
+    inside the torn-down staging mount, out of reach of ``parse_output``.
+    """
+
+    name = "reasonix"
+
+    def default_auth(self) -> ContainerAuth:
+        return ReasonixCredentialMountAuth()
+
+    def build_spec(self, ctx: RuntimeContext) -> ContainerSpec:
+        rbin = shutil.which("reasonix")
+        if not rbin:
+            raise RunnerError(
+                "reasonix CLI not found on PATH; install DeepSeek-Reasonix and "
+                "configure ~/.reasonix on the host first"
+            )
+        cfg = parse_cost_model(ctx.competitor.cost_model)
+        argv = [
+            "reasonix",
+            "run",
+            "--dir",
+            "/src",
+            "--max-steps",
+            str(cfg.get("max_steps", 40)),
+        ]
+        if ctx.competitor.model:
+            argv += ["--model", ctx.competitor.model]
+        argv.append(ctx.prompt)
+        mounts = [
+            (str(Path(rbin).resolve()), "/usr/local/bin/reasonix", "ro"),
+            (str(ctx.src_dir), "/src", "ro"),
+            *ctx.auth.mounts,
+        ]
+        return ContainerSpec(
+            image=IMAGE_TAG,
+            argv=argv,
+            env={"HOME": "/home/agent", **ctx.auth.env},
+            mounts=mounts,
+            name=ctx.name,
+            workdir="/home/agent",
+            network=ctx.network,
+            stdin=None,
+        )
+
+    def parse_output(
+        self, exec_result: ContainerExecResult, competitor: Competitor
+    ) -> ParsedOutput:
+        text = exec_result.stdout
+        return ParsedOutput(text, None, None, None, parse_competitor_findings(text))
+
+
+class KimiRuntime:
+    """The host ``kimi`` (Moonshot Kimi Code) self-contained ELF bind-mounted in.
+
+    A Track-B *product* runtime. ``kimi -p`` runs one prompt non-interactively;
+    ``--agent-file`` (v2 engine, gated by ``KIMI_CODE_EXPERIMENTAL_FLAG=1`` from
+    the auth) selects the read-only, no-web tool profile. ``-m`` needs the
+    fully-qualified alias (e.g. ``kimi-code/k3``). The sibling ``fd`` helper is
+    mounted alongside the binary. Subscription (no per-token envelope); findings
+    scanned from the plain-text output.
+    """
+
+    name = "kimi"
+
+    def default_auth(self) -> ContainerAuth:
+        return KimiCredentialMountAuth()
+
+    def build_spec(self, ctx: RuntimeContext) -> ContainerSpec:
+        kbin = shutil.which("kimi")
+        if not kbin:
+            raise RunnerError(
+                "kimi CLI not found on PATH; install Kimi Code and `kimi login` on "
+                "the host first"
+            )
+        argv = [
+            "kimi",
+            "-p",
+            ctx.prompt,
+            "--output-format",
+            "text",
+            "-m",
+            ctx.competitor.model,
+            "--agent-file",
+            _KIMI_AGENT_CONTAINER,
+        ]
+        resolved = Path(kbin).resolve()
+        mounts = [(str(resolved), "/usr/local/bin/kimi", "ro")]
+        fd = resolved.with_name("fd")
+        if fd.is_file():
+            mounts.append((str(fd), "/usr/local/bin/fd", "ro"))
+        mounts += [(str(ctx.src_dir), "/src", "ro"), *ctx.auth.mounts]
+        return ContainerSpec(
+            image=IMAGE_TAG,
+            argv=argv,
+            env={"HOME": "/home/agent", **ctx.auth.env},
+            mounts=mounts,
+            name=ctx.name,
+            workdir="/src",
+            network=ctx.network,
+            stdin=None,
+        )
+
+    def parse_output(
+        self, exec_result: ContainerExecResult, competitor: Competitor
+    ) -> ParsedOutput:
+        text = exec_result.stdout
+        return ParsedOutput(text, None, None, None, parse_competitor_findings(text))
+
+
+class QwenRuntime:
+    """The host ``qwen`` (Qwen Code) node app bind-mounted in.
+
+    A Track-B *product* runtime. Qwen Code bundles its own node under
+    ``~/.local/lib/qwen-code/node``, so the whole tree bind-mounts at
+    ``/opt/qwen-code`` (no host node needed) and its inner launcher is invoked
+    directly. ``-p`` is non-interactive; ``-o json`` emits a claude-shaped result
+    stream (token usage included), parsed by :func:`_claude_shaped_output`.
+    ``--safe-mode`` is intentionally NOT passed: it bypasses the ``tools.exclude``
+    web-tool filter injected into the staged settings; the staged ~/.qwen has no
+    extensions/skills/MCP so nothing extra loads without it.
+    """
+
+    name = "qwen"
+    _TREE = Path.home() / ".local" / "lib" / "qwen-code"
+    _CONTAINER_TREE = "/opt/qwen-code"
+
+    def default_auth(self) -> ContainerAuth:
+        return QwenCredentialMountAuth()
+
+    def build_spec(self, ctx: RuntimeContext) -> ContainerSpec:
+        if not (self._TREE / "bin" / "qwen").is_file():
+            raise RunnerError(
+                f"qwen Code not found at {self._TREE}; install it and configure a "
+                "provider in ~/.qwen on the host first"
+            )
+        argv = [
+            f"{self._CONTAINER_TREE}/bin/qwen",
+            "-p",
+            ctx.prompt,
+            "-o",
+            "json",
+            "-m",
+            ctx.competitor.model,
+        ]
+        mounts = [
+            (str(self._TREE.resolve()), self._CONTAINER_TREE, "ro"),
+            (str(ctx.src_dir), "/src", "ro"),
+            *ctx.auth.mounts,
+        ]
+        return ContainerSpec(
+            image=IMAGE_TAG,
+            argv=argv,
+            env={"HOME": "/home/agent", **ctx.auth.env},
+            mounts=mounts,
+            name=ctx.name,
+            workdir="/src",
+            network=ctx.network,
+            stdin=None,
+        )
+
+    def parse_output(
+        self, exec_result: ContainerExecResult, competitor: Competitor
+    ) -> ParsedOutput:
+        # qwen -o json emits a JSON ARRAY of stream events ending in a
+        # ``type==result`` object (its ``result`` string is the final message and
+        # ``usage`` carries token counts) — not claude-code's single result object,
+        # so parse the array directly rather than via ``extract_result``.
+        text = exec_result.stdout
+        final, tin, tout, cost = text, None, None, None
+        try:
+            arr = json.loads(text[text.index("[") :])
+        except (json.JSONDecodeError, ValueError):
+            arr = None
+        if isinstance(arr, list):
+            results = [
+                o for o in arr if isinstance(o, dict) and o.get("type") == "result"
+            ]
+            if results:
+                r = results[-1]
+                final = r.get("result") or ""
+                usage = r.get("usage") or {}
+                tin = usage.get("input_tokens")
+                tout = usage.get("output_tokens")
+                cost = r.get("total_cost_usd")
+        cost = _effective_cost(competitor, tin, tout, cost)
+        return ParsedOutput(final, tin, tout, cost, parse_competitor_findings(final))
+
+
+class MimoRuntime:
+    """The host ``mimo`` (Xiaomi MiMoCode) self-contained ELF bind-mounted in.
+
+    A Track-B *product* runtime. ``mimo run --pure`` runs one message
+    non-interactively with no external plugins; the ``webfetch`` tool is denied via
+    the staged config (:class:`MimoCredentialMountAuth`), not ``--pure``. ``-m`` is
+    the fully-qualified ``provider/model`` of the logged-in token plan. State lives in
+    the staged HOME (:class:`MimoCredentialMountAuth`); mimo re-creates its sqlite
+    store there on first run. Subscription; findings scanned from the formatted
+    text output.
+    """
+
+    name = "mimo"
+
+    def default_auth(self) -> ContainerAuth:
+        return MimoCredentialMountAuth()
+
+    def build_spec(self, ctx: RuntimeContext) -> ContainerSpec:
+        mbin = shutil.which("mimo") or str(Path.home() / ".mimocode" / "bin" / "mimo")
+        if not Path(mbin).is_file():
+            raise RunnerError(
+                "mimo CLI not found; install MiMoCode and `mimo providers login` on "
+                "the host first"
+            )
+        argv = [
+            "mimo",
+            "run",
+            "--pure",
+            "-m",
+            ctx.competitor.model,
+            ctx.prompt,
+        ]
+        mounts = [
+            (str(Path(mbin).resolve()), "/usr/local/bin/mimo", "ro"),
+            (str(ctx.src_dir), "/src", "ro"),
+            *ctx.auth.mounts,
+        ]
+        return ContainerSpec(
+            image=IMAGE_TAG,
+            argv=argv,
+            env={"HOME": "/home/agent", **ctx.auth.env},
+            mounts=mounts,
+            name=ctx.name,
+            workdir="/src",
+            network=ctx.network,
+            stdin=None,
+        )
+
+    def parse_output(
+        self, exec_result: ContainerExecResult, competitor: Competitor
+    ) -> ParsedOutput:
+        text = exec_result.stdout
+        return ParsedOutput(text, None, None, None, parse_competitor_findings(text))
+
+
 class BindMountedCliRuntime:
     """Generic native-CLI runtime: a host agent binary bind-mounted into the run.
 
@@ -685,6 +1161,12 @@ def _register_defaults() -> None:
     register_runtime(RawApiLoopRuntime())
     register_runtime(AgyRuntime())
     register_runtime(CodexRuntime())
+    # Track B ("with preferred agent") native product runtimes: each vendor's own
+    # agent CLI bind-mounted in, restricted to a read-only/no-web tool posture.
+    register_runtime(ReasonixRuntime())
+    register_runtime(KimiRuntime())
+    register_runtime(QwenRuntime())
+    register_runtime(MimoRuntime())
     # No `deepseek-cli`: DeepSeek ships no first-party agent CLI (the ones that
     # exist are untrusted third parties), so DeepSeek runs through the two trusted
     # shared harnesses instead — claude-code over its Anthropic-compatible endpoint
