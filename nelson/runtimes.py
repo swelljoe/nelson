@@ -219,11 +219,11 @@ class CodexCredentialMountAuth:
                 f"no codex credentials at {auth}; sign in with `codex login` on "
                 "the host first"
             )
-dest = staging / "codex"
-dest.mkdir(parents=True, exist_ok=True, mode=0o700)
-dest.chmod(0o700)
-shutil.copyfile(auth, dest / "auth.json")
-(dest / "auth.json").chmod(0o600)
+        dest = staging / "codex"
+        dest.mkdir(parents=True, exist_ok=True, mode=0o700)
+        dest.chmod(0o700)
+        shutil.copyfile(auth, dest / "auth.json")
+        (dest / "auth.json").chmod(0o600)
         version = self.creds_dir / "version.json"
         if version.is_file():
             shutil.copyfile(version, dest / "version.json")

@@ -905,11 +905,11 @@ def _assistant_turn(msg: dict[str, Any]) -> dict[str, Any]:
     rebuild the turn with only the fields a chat endpoint expects to receive:
     ``role``, ``content``, and ``tool_calls`` when present. Non-reasoning models are
     unaffected (they carry no reasoning field to drop)."""
-turn: dict[str, Any] = {"role": "assistant", "content": msg.get("content")}
-tool_calls = msg.get("tool_calls")
-if tool_calls:
-    turn["tool_calls"] = tool_calls
-return turn
+    turn: dict[str, Any] = {"role": "assistant", "content": msg.get("content")}
+    tool_calls = msg.get("tool_calls")
+    if tool_calls:
+        turn["tool_calls"] = tool_calls
+    return turn
 
 
 def parse_native_tool_calls(content: str) -> list[dict[str, Any]]:
