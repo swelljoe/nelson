@@ -1700,7 +1700,7 @@ def bench_score(
     )
 
     if run_id is not None:
-        _emit_run_score(scorer.score_run(run_id))
+        _emit_run_score(scorer.score_run(run_id, reuse_settled=not rescore))
         return
 
     rows = db.list_runs()
@@ -1711,7 +1711,7 @@ def bench_score(
     for r in rows:
         rid = r["id"]
         if r["status"] == "complete" and (rescore or scorer.needs_scoring(rid)):
-            rs = scorer.score_run(rid)
+            rs = scorer.score_run(rid, reuse_settled=not rescore)
         else:
             rs = scorer.load_run_score(rid)
         run_scores.append(rs)
