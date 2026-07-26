@@ -90,6 +90,11 @@ def _cluster_finding_rows(rows: Iterable[Any], tolerance: int) -> list[list[dict
                 "description": r["description"],
                 "cwe": r["cwe"],
                 "confidence": r["confidence"],
+                # Persisted verdicts, so score_run can reuse a settled cluster
+                # instead of re-judging it (incremental scoring).
+                "judge_truth_verdict": r["judge_truth_verdict"],
+                "judge_fp_verdict": r["judge_fp_verdict"],
+                "judge_reasoning": r["judge_reasoning"],
                 # Aliases consumed by compare.cluster_findings + effective_cwe.
                 "file_path": r["file"],
                 "line_number": r["line_start"],
@@ -1055,12 +1060,20 @@ class Scorer:
             "trial": run["trial"],
         }
 
-    def score_run(self, run_id: int) -> RunScore:
+    def score_run(self, run_id: int, *, reuse_settled: bool = True) -> RunScore:
         """Score one run: localize, truth-judge the localized findings, and (if a
         FP judge is wired) FP-judge the non-target findings; persist all of it.
 
         Calls the judge(s) — use :meth:`load_run_score` to rebuild a RunScore
         from already-persisted columns without re-spending judge budget.
+
+        Incremental by default (``reuse_settled=True``): a cluster whose
+        representative already carries a valid (non-error) persisted verdict is
+        reused, not re-judged. This matters when a run is reprocessed only because
+        *another* of its clusters has a straggler — without it, every partial
+        reprocess re-spends on (and risks clobbering, e.g. into a rate-limit error)
+        the verdicts the run already has. ``reuse_settled=False`` forces a fresh
+        judgment for every cluster — the ``--rescore`` path.
         """
         run = self.db.get_run(run_id)
         if run is None:
@@ -1102,21 +1115,31 @@ class Scorer:
             localized = [m for m in members if locs[m["id"]].matched]
 
             # Truth: one call per cluster, shared across its localized members.
+            # Reuse an already-settled verdict rather than re-judging it (see the
+            # reuse_settled docstring): only a missing or errored verdict is judged.
             cluster_truth: TruthVerdict | None = None
             if localized:
                 rep = _cluster_representative(localized)
-                cluster_truth = self.judge.judge(case, ReportedFinding.from_row(rep))
-                judge_cost += cluster_truth.cost_usd or 0.0
-                self.db.add_judgment(
-                    target_kind="truth",
-                    target_id=rep["id"],
-                    judge_model=self.judge.name,
-                    verdict=cluster_truth.label,
-                    reasoning=cluster_truth.reasoning,
-                    tokens_in=cluster_truth.tokens_in,
-                    tokens_out=cluster_truth.tokens_out,
-                    cost_usd=cluster_truth.cost_usd,
-                )
+                settled = rep["judge_truth_verdict"]
+                if reuse_settled and _is_settled_verdict(settled):
+                    cluster_truth = _verdict_from_label(
+                        settled, rep["judge_reasoning"] or ""
+                    )
+                else:
+                    cluster_truth = self.judge.judge(
+                        case, ReportedFinding.from_row(rep)
+                    )
+                    judge_cost += cluster_truth.cost_usd or 0.0
+                    self.db.add_judgment(
+                        target_kind="truth",
+                        target_id=rep["id"],
+                        judge_model=self.judge.name,
+                        verdict=cluster_truth.label,
+                        reasoning=cluster_truth.reasoning,
+                        tokens_in=cluster_truth.tokens_in,
+                        tokens_out=cluster_truth.tokens_out,
+                        cost_usd=cluster_truth.cost_usd,
+                    )
             for m in members:
                 matched = locs[m["id"]].matched
                 v = cluster_truth if matched else None
@@ -1143,21 +1166,30 @@ class Scorer:
                 ]
                 if fp_members:
                     rep = _cluster_representative(fp_members)
-                    source = self.code.source(case, rep["file"])
-                    cluster_fp = self.fp_judge.judge(
-                        ReportedFinding.from_row(rep), source
-                    )
-                    fp_cost += cluster_fp.cost_usd or 0.0
-                    self.db.add_judgment(
-                        target_kind="fp",
-                        target_id=rep["id"],
-                        judge_model=self.fp_judge.name,
-                        verdict=cluster_fp.label,
-                        reasoning=cluster_fp.reasoning,
-                        tokens_in=cluster_fp.tokens_in,
-                        tokens_out=cluster_fp.tokens_out,
-                        cost_usd=cluster_fp.cost_usd,
-                    )
+                    settled_fp = rep["judge_fp_verdict"]
+                    if reuse_settled and _is_settled_verdict(settled_fp):
+                        ledger = self.db.judgments(
+                            target_kind="fp", target_id=rep["id"]
+                        )
+                        cluster_fp = _fp_verdict_from_label(
+                            settled_fp, ledger[-1]["reasoning"] if ledger else ""
+                        )
+                    else:
+                        source = self.code.source(case, rep["file"])
+                        cluster_fp = self.fp_judge.judge(
+                            ReportedFinding.from_row(rep), source
+                        )
+                        fp_cost += cluster_fp.cost_usd or 0.0
+                        self.db.add_judgment(
+                            target_kind="fp",
+                            target_id=rep["id"],
+                            judge_model=self.fp_judge.name,
+                            verdict=cluster_fp.label,
+                            reasoning=cluster_fp.reasoning,
+                            tokens_in=cluster_fp.tokens_in,
+                            tokens_out=cluster_fp.tokens_out,
+                            cost_usd=cluster_fp.cost_usd,
+                        )
                     for m in fp_members:
                         self.db.record_fp_verdict(m["id"], verdict=cluster_fp.label)
                     fp_ids = {m["id"] for m in fp_members}
@@ -1337,6 +1369,12 @@ def _persisted_fp_eligible(matches_ground_truth: Any, truth_verdict: Any) -> boo
     # Localized: a precision item only if the truth judge decided a *different*
     # bug (a settled non-same_bug, non-error verdict).
     return truth_verdict == "different_bug"
+
+
+def _is_settled_verdict(label: Any) -> bool:
+    """True if a persisted verdict column holds a real, reusable judgment — it
+    exists and is not an ``error: …`` sentinel (which must be re-judged)."""
+    return label is not None and not str(label).startswith("error:")
 
 
 def _verdict_from_label(label: str, reasoning: str) -> TruthVerdict:

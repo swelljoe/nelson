@@ -299,6 +299,81 @@ def test_needs_scoring_true_until_judged(tmp_path):
     assert not scorer.needs_scoring(run_id)
 
 
+# -- Incremental reuse: don't re-judge already-settled clusters --------------
+
+
+def test_score_run_reuses_settled_truth_verdict(tmp_path):
+    # Reprocessing a run must not re-call the truth judge for a cluster that is
+    # already settled — the leak that redundantly re-spent (and clobbered) verdicts
+    # whenever a run was reprocessed for an unrelated straggler.
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Foo.java", 76)])
+    judge = FakeJudge(TruthVerdict(True, reasoning="same zip-slip", cost_usd=0.05))
+    scorer = Scorer(db, judge)
+
+    scorer.score_run(run_id)
+    assert judge.calls == 1
+    rs = scorer.score_run(run_id)  # second pass: verdict already settled
+    assert judge.calls == 1  # NOT re-judged
+    assert rs.outcome == "hit"  # reused verdict still yields the same outcome
+    assert rs.judge_cost == 0.0  # reuse spends nothing
+    # exactly one ledger row — reuse must not append a duplicate
+    assert len(db.judgments(target_kind="truth")) == 1
+
+
+def test_score_run_rejudges_errored_truth_verdict(tmp_path):
+    # A cluster whose persisted verdict is an *error* is not "settled" — it must be
+    # re-judged on the next pass (this is how straggler recovery makes progress).
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Foo.java", 76)])
+    judge = FakeJudge(TruthVerdict(None, error="rate_limited"))
+    scorer = Scorer(db, judge)
+    scorer.score_run(run_id)
+    assert judge.calls == 1
+    assert db.run_findings(run_id)[0]["judge_truth_verdict"] == "error: rate_limited"
+
+    # now the judge succeeds; a re-score must retry the errored verdict
+    judge.verdict = TruthVerdict(True, reasoning="ok")
+    rs = scorer.score_run(run_id)
+    assert judge.calls == 2  # errored verdict WAS re-judged
+    assert rs.outcome == "hit"
+    assert db.run_findings(run_id)[0]["judge_truth_verdict"] == "same_bug"
+
+
+def test_score_run_rescore_forces_rejudge_of_settled(tmp_path):
+    # reuse_settled=False (the --rescore path) must re-judge even a settled cluster.
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Foo.java", 76)])
+    judge = FakeJudge(TruthVerdict(True, cost_usd=0.05))
+    scorer = Scorer(db, judge)
+    scorer.score_run(run_id)
+    assert judge.calls == 1
+    scorer.score_run(run_id, reuse_settled=False)
+    assert judge.calls == 2  # forced re-judge despite a settled verdict
+
+
+def test_score_run_reuses_settled_fp_verdict(tmp_path):
+    # The same reuse guard applies to the FP judge: an already-settled FP cluster is
+    # not re-judged (and its source is not re-read) on a later pass.
+    db = Database(tmp_path / "t.db")
+    case_id = _case(db)
+    run_id = _complete_run(db, case_id, findings=[("Other.java", 10)])  # off-target
+    truth = FakeJudge(TruthVerdict(True))  # never reached (not localized)
+    fp = FakeFPJudge(FPVerdict(False, reasoning="not exploitable", cost_usd=0.02))
+    code = FakeCode()
+    scorer = Scorer(db, truth, fp_judge=fp, code=code)
+
+    scorer.score_run(run_id)
+    assert fp.calls == 1 and code.calls == 1
+    rs = scorer.score_run(run_id)  # second pass: FP verdict already settled
+    assert fp.calls == 1 and code.calls == 1  # not re-judged, source not re-read
+    assert rs.findings[0].fp_category == "false_positive"
+    assert len(db.judgments(target_kind="fp")) == 1  # no duplicate ledger row
+
+
 # -- Detection report --------------------------------------------------------
 
 
