@@ -31,7 +31,11 @@ def fmt_dur(secs):
 
 c = sqlite3.connect(DB)
 c.row_factory = sqlite3.Row
-active = list(c.execute("SELECT id, name, knowledge_cutoff FROM competitors WHERE status='active'"))
+active = list(
+    c.execute(
+        "SELECT id, name, knowledge_cutoff FROM competitors WHERE status='active'"
+    )
+)
 
 overall_eta = 0.0
 rows = []
@@ -69,7 +73,9 @@ for comp in active:
     if eta_s:
         overall_eta = max(overall_eta, eta_s)
     pct = 100 * len(done) / target if target else 0
-    rows.append((comp["name"], len(done), running, failed, target, pct, mean_s, med_s, eta_s))
+    rows.append(
+        (comp["name"], len(done), running, failed, target, pct, mean_s, med_s, eta_s)
+    )
 
 
 print(f"\n  DB={DB}  repeat={REPEAT}   ({len(active)} active competitors)\n")

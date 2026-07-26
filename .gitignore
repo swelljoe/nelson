@@ -12,6 +12,13 @@ bench-runs/
 bench-cache/
 corpus-cache/
 .nelson_cache/
+# Per-run caches and outputs from bench-scripts (label-suffixed: .cache-<name>/,
+# runs-<name>/). These are checked-out third-party source + transcripts, not
+# maintained code — keep them out of git and out of `ty`/ruff (ignore-file aware).
+.cache-*/
+runs-*/
+reports/
+*-retired-snapshot.txt
 bench-report.html
 bench-report-*.html
 bench-exp*.html
