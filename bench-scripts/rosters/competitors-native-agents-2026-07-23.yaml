@@ -1,0 +1,73 @@
+# Track B ("with preferred agent" / product leaderboard): four vendor-native
+# agent CLIs, each driving its own model through its own harness — the counterpart
+# to claude-code/opus and codex/gpt-5.6-sol. These are NEVER cross-ranked against
+# the uniform raw-api-loop read/grep "model" track; they measure the shipped
+# product (model + agent scaffold), not the model in isolation.
+#
+# Container bring-up (2026-07-23): all four host CLIs bind-mount into
+# nelson-bench:fedora-tools2 and run under the same isolation as codex
+# (--security-opt label=disable + --cap-drop ALL; that label=disable is what lets
+# a host binary read its mounts under SELinux). kimi/mimo are self-contained
+# compiled ELFs; reasonix is a static Go binary; qwen ships its own bundled node,
+# so no host node is needed. Each runtime stages a COPY of the host sign-in into a
+# per-run dir (never the host original) and, where possible, disables the CLI's
+# web-search/fetch tool so the model cannot look up a CVE online (contamination
+# guard). Network stays ON (the model API needs it); the per-run stdout is the
+# audit trail — if a native row scores wildly above its raw-api-loop sibling,
+# suspect contamination and check the logs for web-tool use.
+#
+# Cost: kimi/mimo/qwen run on prepaid subscription / token plans with no reliable
+# per-token price from the CLI, so cost_model=subscription (null cost -> 0 on the
+# board). reasonix meters DeepSeek V4 Pro per token; USD pricing derived from its
+# config's CNY rates (¥3/¥6 per Mtok ≈ $0.42/$0.84 at ~7.15 CNY/USD).
+#
+# knowledge_cutoff 2026-01 keeps all 22 cases eligible (same basis as the codex row).
+
+# DeepSeek V4 Pro via reasonix (DeepSeek-Reasonix, a THIRD-PARTY multi-model agent
+# CLI — NOT a first-party DeepSeek product; flag as unofficial/untrusted-harness on
+# the board). reasonix reads its key from ~/.reasonix/.env (not the process env),
+# so the whole ~/.reasonix (config.toml + .env) is staged and mounted. --model is
+# the reasonix *provider* name (deepseek-pro), which resolves to deepseek-v4-pro.
+- name: reasonix/deepseek-v4-pro
+  model: deepseek-pro
+  runtime: reasonix
+  tool_profile: read-grep
+  cost_model: '{"input_usd_per_mtok": 0.42, "output_usd_per_mtok": 0.84}'
+  size_class: large
+  knowledge_cutoff: 2026-01
+
+# Qwen 3.8 via qwen (Qwen Code, Alibaba's official Gemini-CLI fork). Auth is the
+# DashScope/Bailian key baked into ~/.qwen/settings.json; --safe-mode kills
+# hooks/extensions/skills/MCP; qwen3.8-max-preview is a pre-configured provider.
+# Emits a claude-shaped JSON result object (token usage included).
+- name: qwen/qwen3.8-max-preview
+  model: qwen3.8-max-preview
+  runtime: qwen
+  tool_profile: read-grep
+  cost_model: subscription
+  size_class: large
+  knowledge_cutoff: 2026-01
+
+# MiMo V2.5 Pro via mimo (Xiaomi MiMoCode). Self-contained ELF; --pure runs with
+# no external plugins; creds at ~/.local/share/mimocode/auth.json. Web-fetch is
+# denied via a staged mimocode.jsonc (permission.webfetch=deny) — --pure alone does
+# NOT remove it. --model is the fully-qualified provider/model of the token plan.
+- name: mimo/mimo-v2.5-pro
+  model: xiaomi-token-plan-sgp/mimo-v2.5-pro
+  runtime: mimo
+  tool_profile: read-grep
+  cost_model: subscription
+  size_class: large
+  knowledge_cutoff: 2026-01
+
+# Kimi K3 via kimi (Moonshot Kimi Code). Self-contained ELF (+ fd helper); oauth
+# sign-in staged from ~/.kimi-code. -m needs the fully-qualified alias kimi-code/k3.
+# NOTE: Moonshot's endpoint 429s under load (Chinese peak hours) — expect some runs
+# to fail as infra_error and get pulled; launch off-peak.
+- name: kimi/k3
+  model: kimi-code/k3
+  runtime: kimi
+  tool_profile: read-grep
+  cost_model: subscription
+  size_class: large
+  knowledge_cutoff: 2026-01

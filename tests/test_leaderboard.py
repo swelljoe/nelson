@@ -319,3 +319,85 @@ def test_generate_leaderboard_report_handles_no_runs():
     html = generate_leaderboard_report([], [])
     assert "<!DOCTYPE html>" in html
     assert "No plottable data" in html  # empty scatter, no crash
+
+
+def test_display_name_disambiguates_same_model_across_runtimes():
+    from nelson.html_report import _display_name, _name_collisions
+
+    names = [
+        "codex/gpt-5.6-sol",
+        "raw-api-loop/gpt-5.6-sol",
+        "claude-code/opus",  # nickname `opus` -> `opus-4.8`, keyed on model id
+        "raw-api-loop/opus",  # same product name, no per-runtime config needed
+        "raw-api-loop/glm-5.2",  # single-runtime model: stays bare
+    ]
+    col = _name_collisions(names)
+    assert col == frozenset({"gpt-5.6-sol", "opus-4.8"})
+    # colliding models render model-first with a /harness suffix
+    assert _display_name("codex/gpt-5.6-sol", col) == "gpt-5.6-sol/codex"
+    assert _display_name("raw-api-loop/gpt-5.6-sol", col) == "gpt-5.6-sol/api"
+    assert _display_name("claude-code/opus", col) == "opus-4.8/claude-code"
+    assert _display_name("raw-api-loop/opus", col) == "opus-4.8/api"
+    # a model on a single runtime keeps its bare label (prefix is noise)
+    assert _display_name("raw-api-loop/glm-5.2", col) == "glm-5.2"
+
+
+def test_display_name_generalizes_to_new_agents_without_config():
+    """A brand-new native agent (mimo) paired with its API-loop row disambiguates
+    with NO additions to the label maps: the harness falls through to the runtime
+    name, and the shared nickname keyed on the model id makes them collide."""
+    from nelson.html_report import _display_name, _name_collisions
+
+    names = ["mimo/mimo", "raw-api-loop/mimo", "raw-api-loop/glm-5.2"]
+    col = _name_collisions(names)
+    assert col == frozenset({"mimo-v2.5-pro"})  # both mimo rows, via the nickname
+    assert _display_name("mimo/mimo", col) == "mimo-v2.5-pro/mimo"
+    assert _display_name("raw-api-loop/mimo", col) == "mimo-v2.5-pro/api"
+    assert _display_name("raw-api-loop/glm-5.2", col) == "glm-5.2"
+
+
+def test_leaderboard_report_shows_harness_suffix_only_on_collision():
+    scores = [
+        RunScore(
+            1,
+            "caseA",
+            "codex/gpt-5.6-sol",
+            "complete",
+            "hit",
+            findings=[_hit_finding(1)],
+            competitor_cost=0.0,
+            wall_clock_s=10.0,
+            size_class="large",
+        ),
+        RunScore(
+            2,
+            "caseA",
+            "raw-api-loop/gpt-5.6-sol",
+            "complete",
+            "hit",
+            findings=[_hit_finding(2)],
+            competitor_cost=0.20,
+            wall_clock_s=10.0,
+            tokens_in=1000,
+            tokens_out=200,
+            size_class="large",
+        ),
+        RunScore(
+            3,
+            "caseA",
+            "raw-api-loop/glm-5.2",
+            "complete",
+            "hit",
+            findings=[_hit_finding(3)],
+            competitor_cost=0.05,
+            wall_clock_s=10.0,
+            tokens_in=500,
+            tokens_out=100,
+            size_class="small",
+        ),
+    ]
+    html = generate_leaderboard_report(leaderboard(scores), case_scores(scores))
+    assert "gpt-5.6-sol/codex" in html
+    assert "gpt-5.6-sol/api" in html
+    assert ">gpt-5.6-sol<" not in html  # never the ambiguous bare label
+    assert "glm-5.2" in html  # single-runtime model unaffected

@@ -12,6 +12,8 @@ from .db import Database
 from .report_style import BASE_CSS, THEME_HEAD, THEME_TOGGLE, THEME_VARS
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from .score import CaseScore, CompetitorNoise, LeaderboardEntry
 
 # Shared, themeable CSS for every report (see nelson/report_style.py). The four
@@ -665,14 +667,20 @@ def _tok(v: float | None) -> str:
     return f"{v:.0f}"
 
 
-def _token_bars_svg(entries: list[LeaderboardEntry]) -> str:
+def _token_bars_svg(
+    entries: list[LeaderboardEntry], collisions: frozenset[str] = frozenset()
+) -> str:
     """Horizontal bar chart of tokens/case per competitor (descending), each bar
     annotated with its latency/case. Linear scale, so the heavy brute-forcers
     dominate visually and the light models read as short bars — the point is to
     expose the order-of-magnitude spread. Pure string building, no JS/assets.
     """
     pts = [
-        (_display_name(e.competitor_name), e.tokens_per_case, e.latency_per_case)
+        (
+            _display_name(e.competitor_name, collisions),
+            e.tokens_per_case,
+            e.latency_per_case,
+        )
         for e in entries
         if e.tokens_per_case is not None
     ]
@@ -721,6 +729,7 @@ def _scatter_svg(
     x_label: str,
     x_fmt,
     frontier: set[str],
+    collisions: frozenset[str] = frozenset(),
 ) -> str:
     """Inline-SVG scatter of quality (y, 0..1) vs an economic axis (x, minimized).
 
@@ -735,7 +744,7 @@ def _scatter_svg(
             continue
         pts.append(
             (
-                _display_name(e.competitor_name),
+                _display_name(e.competitor_name, collisions),
                 float(xv),
                 float(yv),
                 e.competitor_name in frontier,
@@ -834,33 +843,70 @@ _OUTCOME_CELL = {
 }
 
 
-# Friendly leaderboard labels. The runtime prefix (raw-api-loop/, claude-code/) is
-# noise in the report — every non-Claude model runs in the API loop, so its prefix
-# carries no information — so we drop it. A few competitors are registered under a
-# bare model nickname; map those to their versioned product name so every row reads
-# at the same level of detail. Display-only: the stored competitor_name (and every
-# DB/frontier/matrix lookup keyed on it) is unchanged.
-_DISPLAY_OVERRIDES = {
-    "claude-code/haiku": "haiku-4.5",
-    "claude-code/sonnet": "sonnet-4.6",
-    "claude-code/opus": "opus-4.8",
-    # Pinned tiers (use these going forward).
-    "raw-api-loop/deepseek-pro": "deepseek-v4-pro",
-    "raw-api-loop/deepseek-flash": "deepseek-v4-flash",
+# Leaderboard labels are derived from the competitor name, which is ``runtime/model``
+# by convention (e.g. ``raw-api-loop/glm-5.2``, ``codex/gpt-5.6-sol``). Two small,
+# open-ended maps drive the rendering; neither needs an entry per competitor.
+#
+# 1. Pretty product name for a bare model id, keyed on the MODEL id alone (the part
+#    after ``runtime/``). One entry per model — it applies no matter which runtime
+#    the model ran under, so an agent row and an API-loop row for the same model
+#    share it automatically. A model id with no entry renders as-is.
+_MODEL_NICKNAMES = {
+    "opus": "opus-4.8",
+    "haiku": "haiku-4.5",
+    "sonnet": "sonnet-4.6",
+    "deepseek-pro": "deepseek-v4-pro",
+    "deepseek-flash": "deepseek-v4-flash",
     # Legacy unpinned alias (`deepseek-chat`): DeepSeek routed it to v4-pro OR
-    # v4-flash at its discretion, so historical rows under this name are a tier
-    # mix — labelled to flag that, not as a clean "pro".
-    "raw-api-loop/deepseek": "deepseek-v4 (alias)",
-    "raw-api-loop/mimo": "mimo-v2.5-pro",
+    # v4-flash at its discretion, so historical rows under this id are a tier mix —
+    # labelled to flag that, not as a clean "pro".
+    "deepseek": "deepseek-v4 (alias)",
+    "mimo": "mimo-v2.5-pro",
+}
+
+# 2. Short label for a runtime, shown as the ``/harness`` suffix ONLY when a model
+#    was audited under more than one runtime (the two-track harness-vs-model split;
+#    otherwise the prefix is noise and is dropped). ``raw-api-loop`` is the only one
+#    that needs renaming — native agent runtimes (``codex``, ``mimo``, ``reasonix``,
+#    ``qwen`` …) already read well, so an unmapped runtime falls through to its own
+#    name and new agent+API pairs need nothing added here.
+_HARNESS_LABELS = {
+    "raw-api-loop": "api",
 }
 
 
-def _display_name(name: str) -> str:
-    """Render a competitor's leaderboard label: explicit override if one exists,
-    otherwise drop the leading ``runtime/`` prefix."""
-    if name in _DISPLAY_OVERRIDES:
-        return _DISPLAY_OVERRIDES[name]
-    return name.split("/", 1)[1] if "/" in name else name
+def _split_competitor(name: str) -> tuple[str, str]:
+    """``runtime/model`` -> ``(runtime, model_id)``; a bare name -> ``("", name)``."""
+    runtime, sep, model_id = name.partition("/")
+    return (runtime, model_id) if sep else ("", runtime)
+
+
+def _model_label(name: str) -> str:
+    """The human-facing model name: the model id, mapped to its product name."""
+    _, model_id = _split_competitor(name)
+    return _MODEL_NICKNAMES.get(model_id, model_id)
+
+
+def _name_collisions(names: Iterable[str]) -> frozenset[str]:
+    """Model labels shared by two or more competitors — the set for which the runtime
+    is informative and must be shown as a suffix to keep the rows distinct. Keyed on
+    the resolved label (not the raw id) so an agent row and an API row that resolve
+    to the same product name collide even if their raw ids differ slightly."""
+    seen: dict[str, set[str]] = {}
+    for n in names:
+        seen.setdefault(_model_label(n), set()).add(n)
+    return frozenset(label for label, comps in seen.items() if len(comps) > 1)
+
+
+def _display_name(name: str, collisions: frozenset[str] = frozenset()) -> str:
+    """Render a competitor's leaderboard label. Normally just the model; when that
+    model was audited under more than one runtime (``collisions``), disambiguate as
+    ``model/harness`` — model first, per the leaderboard convention."""
+    label = _model_label(name)
+    runtime, _ = _split_competitor(name)
+    if label in collisions and runtime:
+        return f"{label}/{_HARNESS_LABELS.get(runtime, runtime)}"
+    return label
 
 
 # Competitors that audited far fewer than the full corpus are omitted from the
@@ -895,6 +941,15 @@ def generate_leaderboard_report(
     matrix. ``None`` (the single-shot default) renders exactly as before.
     """
     from .score import pareto_frontier
+
+    # Model labels shared by two competitors (same model, different runtime) get a
+    # ``/harness`` suffix; computed over the full name universe (ranked entries plus
+    # any matrix-only competitor) so a collision is detected no matter where a row
+    # is plotted.
+    collisions = _name_collisions(
+        [e.competitor_name for e in entries]
+        + [cs.competitor_name for cs in case_scores]
+    )
 
     # The Pareto frontier and scatter plots compare only competitors audited on
     # enough of the corpus to be commensurable — substantially-partial probes are
@@ -1018,7 +1073,7 @@ def generate_leaderboard_report(
             hits_elig = f"{e.hits}/{e.eligible}"
         parts.append(
             f'<tr><td class="lead-rank">{i}</td>'
-            f"<td>{escape(_display_name(e.competitor_name))}{partial}{star}</td>"
+            f"<td>{escape(_display_name(e.competitor_name, collisions))}{partial}{star}</td>"
             f"<td>{escape(e.size_class or '—')}</td>"
             f'<td class="num">{detect}{partial}</td>'
             f'<td class="num">{_pct(e.half_credit_rate) if e.eligible else "—"}</td>'
@@ -1084,6 +1139,7 @@ def generate_leaderboard_report(
             x_label="cost / case",
             x_fmt=lambda v: f"${v:.2f}",
             frontier=cost_front,
+            collisions=collisions,
         )
     )
     parts.append("</div>")
@@ -1096,6 +1152,7 @@ def generate_leaderboard_report(
             x_label="latency / case",
             x_fmt=lambda v: f"{v:.0f}s",
             frontier=lat_front,
+            collisions=collisions,
         )
     )
     parts.append("</div></div>")
@@ -1108,7 +1165,7 @@ def generate_leaderboard_report(
     )
     if excluded_from_plots:
         names = ", ".join(
-            f"{escape(_display_name(e.competitor_name))} ({e.cases}/{full_n})"
+            f"{escape(_display_name(e.competitor_name, collisions))} ({e.cases}/{full_n})"
             for e in excluded_from_plots
         )
         parts.append(
@@ -1125,7 +1182,7 @@ def generate_leaderboard_report(
 
     # Tokens (+ latency) per case — exposes the order-of-magnitude usage spread.
     parts.append("<h2>Tokens &amp; time per case</h2>")
-    parts.append(_token_bars_svg(entries))
+    parts.append(_token_bars_svg(entries, collisions))
     parts.append(
         '<p class="muted">Mean total tokens (prompt + completion, with the '
         "ReAct loop's resent context counted each turn) per audited case; the "
@@ -1164,7 +1221,9 @@ def generate_leaderboard_report(
             parts.append(f"<th>{escape(c)}</th>")
         parts.append("</tr>")
         for comp in ordered_comps:
-            parts.append(f'<tr><td class="comp">{escape(_display_name(comp))}</td>')
+            parts.append(
+                f'<tr><td class="comp">{escape(_display_name(comp, collisions))}</td>'
+            )
             for c in ordered_cases:
                 outcome = by_cell.get((comp, c))
                 if outcome is None:
